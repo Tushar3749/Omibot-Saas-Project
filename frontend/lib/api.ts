@@ -61,9 +61,40 @@ export const configAPI = {
     api.patch('/api/payment/ai-config', data).then(r => r.data),
 }
 
+// ── Settings (delivery charges + bulk discounts) ──────────────────────────────
+export const settingsAPI = {
+  getDeliveryCharges: () =>
+    api.get('/api/settings/delivery-charges').then(r => r.data),
+  saveDeliveryCharges: (charges: { district: string; charge: number }[]) =>
+    api.put('/api/settings/delivery-charges', { charges }).then(r => r.data),
+
+  listBulkDiscounts: () =>
+    api.get('/api/settings/bulk-discounts').then(r => r.data),
+  createBulkDiscount: (data: Record<string, unknown>) =>
+    api.post('/api/settings/bulk-discounts', data).then(r => r.data),
+  updateBulkDiscount: (id: string, data: Record<string, unknown>) =>
+    api.patch(`/api/settings/bulk-discounts/${id}`, data).then(r => r.data),
+  deleteBulkDiscount: (id: string) =>
+    api.delete(`/api/settings/bulk-discounts/${id}`).then(r => r.data),
+}
+
+// ── Courier ───────────────────────────────────────────────────────────────────
+export const courierAPI = {
+  saveTracking: (orderId: string, data: { tracking_number: string; courier_name: string }) =>
+    api.patch(`/api/courier/orders/${orderId}/tracking`, data).then(r => r.data),
+
+  createSteadfast: (data: Record<string, unknown>) =>
+    api.post('/api/courier/steadfast/create', data).then(r => r.data),
+
+  createPathao: (data: Record<string, unknown>) =>
+    api.post('/api/courier/pathao/create', data).then(r => r.data),
+
+  track: (orderId: string) =>
+    api.get(`/api/courier/track/${orderId}`).then(r => r.data),
+}
+
 // ── Products ─────────────────────────────────────────────────────────────────
 export const productsAPI = {
-  // ── CRUD ──────────────────────────────────────────────────────────────────
   list:   () => api.get('/api/products/').then(r => r.data),
   get:    (id: string) => api.get(`/api/products/${id}`).then(r => r.data),
   create: (data: Record<string, unknown>) =>
@@ -72,11 +103,6 @@ export const productsAPI = {
     api.patch(`/api/products/${id}`, data).then(r => r.data),
   delete: (id: string) => api.delete(`/api/products/${id}`).then(r => r.data),
 
-  // ── CSV Import ────────────────────────────────────────────────────────────
-  /**
-   * Upload a CSV file for bulk import.
-   * importType: 'products' | 'stock' | 'campaign'
-   */
   importCSV: (file: File, importType: CSVImportType = 'products'): Promise<CSVImportResult> => {
     const formData = new FormData()
     formData.append('file', file)
@@ -86,14 +112,8 @@ export const productsAPI = {
     }).then(r => r.data)
   },
 
-  /** Last 10 import audit log entries */
   importHistory: () => api.get('/api/products/import/history').then(r => r.data),
 
-  // ── CSV Template download (authenticated, streams file) ───────────────────
-  /**
-   * Downloads a CSV template file.
-   * Uses axios so the auth header is sent, then triggers a browser download.
-   */
   downloadTemplate: async (templateType: CSVImportType): Promise<void> => {
     const response = await api.get(`/api/products/templates/${templateType}`, {
       responseType: 'blob',
@@ -109,7 +129,6 @@ export const productsAPI = {
     window.URL.revokeObjectURL(url)
   },
 
-  // ── Custom Columns ────────────────────────────────────────────────────────
   customColumns: {
     list: () => api.get('/api/products/custom-columns').then(r => r.data),
     create: (data: {
@@ -126,13 +145,12 @@ export const productsAPI = {
 
 // ── Conversations ─────────────────────────────────────────────────────────────
 export const conversationsAPI = {
-  list:        () => api.get('/api/conversations/').then(r => r.data),
-  get:         (id: string) => api.get(`/api/conversations/${id}`).then(r => r.data),
-  messages:    (id: string) => api.get(`/api/conversations/${id}/messages`).then(r => r.data),
-  takeover:    (id: string, is_ai_active: boolean) =>
+  list:     () => api.get('/api/conversations/').then(r => r.data),
+  get:      (id: string) => api.get(`/api/conversations/${id}`).then(r => r.data),
+  messages: (id: string) => api.get(`/api/conversations/${id}/messages`).then(r => r.data),
+  takeover: (id: string, is_ai_active: boolean) =>
     api.patch(`/api/conversations/${id}/takeover`, { is_ai_active }).then(r => r.data),
-  // Alias used in conversations page
-  toggleAI:    (id: string, is_ai_active: boolean) =>
+  toggleAI: (id: string, is_ai_active: boolean) =>
     api.patch(`/api/conversations/${id}/takeover`, { is_ai_active }).then(r => r.data),
 }
 
@@ -143,6 +161,8 @@ export const ordersAPI = {
   get:          (id: string) => api.get(`/api/orders/${id}`).then(r => r.data),
   updateStatus: (id: string, status: string) =>
     api.patch(`/api/orders/${id}/status`, { status }).then(r => r.data),
+  saveTracking: (id: string, tracking_number: string, courier_name: string) =>
+    api.patch(`/api/courier/orders/${id}/tracking`, { tracking_number, courier_name }).then(r => r.data),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
@@ -150,6 +170,8 @@ export const analyticsAPI = {
   overview: () => api.get('/api/analytics/overview').then(r => r.data),
   daily:    (days = 30) =>
     api.get('/api/analytics/daily', { params: { days } }).then(r => r.data),
+  advanced: (period: '7d' | '30d' | '90d' = '30d') =>
+    api.get('/api/analytics/advanced', { params: { period } }).then(r => r.data),
 }
 
 // ── Channels ──────────────────────────────────────────────────────────────────
@@ -223,6 +245,98 @@ export const uploadAPI = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)
   },
+}
+
+// ── Combos ────────────────────────────────────────────────────────────────────
+export const combosAPI = {
+  list:   () => api.get('/api/combos/').then(r => r.data),
+  create: (data: Record<string, unknown>) => api.post('/api/combos/', data).then(r => r.data),
+  update: (id: string, data: Record<string, unknown>) => api.patch(`/api/combos/${id}`, data).then(r => r.data),
+  delete: (id: string) => api.delete(`/api/combos/${id}`).then(r => r.data),
+  downloadTemplate: async () => {
+    const response = await api.get('/api/combos/templates/combo', { responseType: 'blob' })
+    const blob = new Blob([response.data], { type: 'text/csv' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url; link.download = 'combo-template.csv'
+    document.body.appendChild(link); link.click()
+    document.body.removeChild(link); window.URL.revokeObjectURL(url)
+  },
+}
+
+// ── Stock ─────────────────────────────────────────────────────────────────────
+export const stockAPI = {
+  list:         () => api.get('/api/stock/').then(r => r.data),
+  update:       (data: Record<string, unknown>) => api.patch('/api/stock/update', data).then(r => r.data),
+  history:      () => api.get('/api/stock/history').then(r => r.data),
+  alerts:       () => api.get('/api/stock/alerts').then(r => r.data),
+  setThreshold: (threshold: number) => api.patch('/api/stock/threshold', { threshold }).then(r => r.data),
+}
+
+// ── Returns ───────────────────────────────────────────────────────────────────
+export const returnsAPI = {
+  list:   () => api.get('/api/returns/').then(r => r.data),
+  create: (data: Record<string, unknown>) => api.post('/api/returns/', data).then(r => r.data),
+  update: (id: string, data: Record<string, unknown>) => api.patch(`/api/returns/${id}`, data).then(r => r.data),
+  delete: (id: string) => api.delete(`/api/returns/${id}`).then(r => r.data),
+}
+
+// ── Complaints ────────────────────────────────────────────────────────────────
+export const complaintsAPI = {
+  list:   (status?: string) => api.get('/api/complaints/', { params: status ? { status } : {} }).then(r => r.data),
+  create: (data: Record<string, unknown>) => api.post('/api/complaints/', data).then(r => r.data),
+  update: (id: string, data: Record<string, unknown>) => api.patch(`/api/complaints/${id}`, data).then(r => r.data),
+  stats:  () => api.get('/api/complaints/stats').then(r => r.data),
+}
+
+// ── Product Images ────────────────────────────────────────────────────────────
+export const productImagesAPI = {
+  list: (productId: string) =>
+    api.get('/api/product-images/', { params: { product_id: productId } }).then(r => r.data),
+
+  upload: (
+    productId: string,
+    file: File,
+    description: string,
+    isPrimary: boolean,
+    autoDescribe = false,
+  ) => {
+    const fd = new FormData()
+    fd.append('product_id',    productId)
+    fd.append('file',          file)
+    fd.append('description',   description)
+    fd.append('is_primary',    String(isPrimary))
+    fd.append('auto_describe', String(autoDescribe))
+    return api.post('/api/product-images/', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
+
+  setPrimary: (imageId: string) =>
+    api.patch(`/api/product-images/${imageId}/primary`).then(r => r.data),
+
+  updateDescription: (imageId: string, description: string) =>
+    api.patch(`/api/product-images/${imageId}/description`, { description }).then(r => r.data),
+
+  delete: (imageId: string) =>
+    api.delete(`/api/product-images/${imageId}`).then(r => r.data),
+
+  search: (q: string, limit = 5) =>
+    api.get('/api/product-images/search', { params: { q, limit } }).then(r => r.data),
+}
+
+// ── OTP ───────────────────────────────────────────────────────────────────────
+export const otpAPI = {
+  testSend: (phone: string): Promise<{ message: string }> =>
+    api.post('/api/otp/test-send', { phone }).then(r => r.data),
+}
+
+// ── Negotiation Rules ─────────────────────────────────────────────────────────
+export const negotiationAPI = {
+  list:   () => api.get('/api/negotiation/').then(r => r.data),
+  create: (data: Record<string, unknown>) => api.post('/api/negotiation/', data).then(r => r.data),
+  update: (id: string, data: Record<string, unknown>) => api.patch(`/api/negotiation/${id}`, data).then(r => r.data),
+  delete: (id: string) => api.delete(`/api/negotiation/${id}`).then(r => r.data),
 }
 
 export default api

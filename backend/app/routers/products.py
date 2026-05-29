@@ -224,8 +224,27 @@ async def download_template(
     stock    → sku + stock
     campaign → sku + discount_price + discount_category
     """
-    if template_type not in ("products", "stock", "campaign"):
-        raise HTTPException(status_code=400, detail="template_type must be: products | stock | campaign")
+    if template_type not in ("products", "stock", "campaign", "combo"):
+        raise HTTPException(status_code=400, detail="template_type must be: products | stock | campaign | combo")
+
+    # Combo template — handled directly
+    if template_type == "combo":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        for line in [
+            "# COMBO STOCK UPDATE TEMPLATE",
+            "# combo_sku: Combo-এর SKU (required) | The SKU of the combo (required)",
+            "# stock: নতুন stock পরিমাণ (required) | New stock quantity (required)",
+            "#",
+        ]:
+            writer.writerow([line])
+        writer.writerow(["combo_sku", "stock"])
+        writer.writerow(["CMB-ABC123", "10"])
+        return StreamingResponse(
+            io.StringIO(output.getvalue()),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="combo-template.csv"'},
+        )
 
     tid = tenant["tenant_id"]
 
@@ -248,11 +267,18 @@ async def download_template(
                     "10", "Electronics", "https://example.com/image.jpg"]
         example += ["" for _ in custom_cols]
         instructions = [
-            "# PRODUCT IMPORT TEMPLATE",
-            "# Required columns: sku, name, mrp",
-            "# Optional: discount_price, discount_category, stock, category, image_url + custom columns",
-            "# Rows with missing sku / name / mrp will be skipped",
-            "# If SKU already exists, the row will UPDATE that product",
+            "# PRODUCT IMPORT TEMPLATE | পণ্য আমদানি টেমপ্লেট",
+            "# Required columns | আবশ্যক কলাম: sku, name, mrp",
+            "# sku: পণ্যের অনন্য কোড | Unique product code",
+            "# name: পণ্যের নাম | Product name",
+            "# mrp: সর্বোচ্চ খুচরা মূল্য | Maximum retail price (must be > 0)",
+            "# discount_price: ছাড়ের মূল্য (ঐচ্ছিক) | Discounted price (optional)",
+            "# discount_category: ছাড়ের বিভাগ (ঐচ্ছিক) | Discount category label (optional)",
+            "# stock: মজুদ পরিমাণ (ঐচ্ছিক) | Stock quantity (optional)",
+            "# category: পণ্য বিভাগ (ঐচ্ছিক) | Product category (optional)",
+            "# image_url: পণ্যের ছবির লিঙ্ক (ঐচ্ছিক) | Product image URL (optional)",
+            "# Rows with missing sku / name / mrp will be skipped | sku/name/mrp না থাকলে সারি বাদ যাবে",
+            "# If SKU already exists, the row will UPDATE that product | SKU থাকলে পণ্য আপডেট হবে",
             "#",
         ]
     elif template_type == "stock":

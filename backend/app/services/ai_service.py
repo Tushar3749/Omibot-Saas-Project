@@ -64,7 +64,21 @@ _UPDATE_STATE = genai_types.FunctionDeclaration(
     ),
 )
 
-TOOLS = [genai_types.Tool(function_declarations=[_EXTRACT_ORDER, _UPDATE_STATE])]
+_DETECT_COMPLAINT = genai_types.FunctionDeclaration(
+    name="detect_complaint",
+    description="Customer অভিযোগ করলে বা সমস্যার কথা জানালে এই function call করো।",
+    parameters=genai_types.Schema(
+        type=genai_types.Type.OBJECT,
+        properties={
+            "complaint_text":    genai_types.Schema(type=genai_types.Type.STRING, description="Customer-এর অভিযোগ"),
+            "product_mentioned": genai_types.Schema(type=genai_types.Type.STRING, description="উল্লেখিত পণ্যের নাম"),
+            "complaint_type":    genai_types.Schema(type=genai_types.Type.STRING, description="delivery|product_quality|wrong_item|general|pricing"),
+        },
+        required=["complaint_text"],
+    ),
+)
+
+TOOLS = [genai_types.Tool(function_declarations=[_EXTRACT_ORDER, _UPDATE_STATE, _DETECT_COMPLAINT])]
 
 FALLBACK_REPLY  = "দুঃখিত, এই মুহূর্তে সমস্যা হচ্ছে। একটু পরে আবার চেষ্টা করুন।"
 INJECTION_REPLY = (
@@ -234,6 +248,25 @@ class AIService:
                             order_data = fn_args
                         elif fn_name == "update_conversation_state":
                             state_update = fn_args
+                        elif fn_name == "detect_complaint":
+                            # Save detected complaint to DB
+                            try:
+                                import uuid as _uuid
+                                from app.database import supabase as _supabase
+                                _supabase.table("complaints").insert({
+                                    "complaint_id":      str(_uuid.uuid4()),
+                                    "tenant_id":         tenant_id,
+                                    "conversation_id":   conversation_id,
+                                    "complaint_text":    fn_args.get("complaint_text", ""),
+                                    "product_mentioned": fn_args.get("product_mentioned"),
+                                    "complaint_type":    fn_args.get("complaint_type", "general"),
+                                    "priority":          "medium",
+                                    "source":            "ai",
+                                    "status":            "open",
+                                }).execute()
+                                logger.info(f"AI detected complaint saved for tenant={tenant_id}")
+                            except Exception as ce:
+                                logger.warning(f"Failed to save AI-detected complaint: {ce}")
                         func_calls.append((fn_name, fn_args))
 
             # 8. If only function calls returned, ask Gemini for a text follow-up

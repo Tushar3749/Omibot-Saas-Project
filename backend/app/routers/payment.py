@@ -124,8 +124,8 @@ async def get_ai_config(tenant: dict = Depends(get_current_tenant)):
         .maybe_single()
         .execute()
     )
-    # maybe_single().execute() returns None when 0 rows found
-    return result.data if result is not None else {}
+    # maybe_single() returns None in result.data when no row exists
+    return result.data or {}
 
 
 @router.patch("/ai-config")
@@ -134,18 +134,65 @@ async def update_ai_config(
     tenant: dict = Depends(get_current_tenant),
 ):
     allowed = {
+        # Bot identity
         "bot_name", "system_prompt", "language", "allow_negotiation",
         "escalation_keywords", "forbidden_topics", "prompt_injection_guard",
         "max_discount_pct", "negotiation_style", "negotiation_phrases",
+        # Order management
+        "min_order_amount", "max_order_qty_per_customer", "preorder_enabled",
+        "waitlist_enabled", "partial_payment_enabled", "partial_payment_advance_pct",
+        "payment_deadline_hours", "installment_enabled",
+        # Message templates
+        "tpl_shipping_confirm", "tpl_delay_notify", "tpl_out_of_stock",
+        "tpl_wrong_item", "tpl_review_request", "tpl_referral",
+        # Smart AI
+        "price_range_filter_enabled", "product_image_auto_send",
+        "catalog_pdf_auto_send", "competitor_response_template",
+        # Bangladesh specific
+        "pathao_store_id", "pathao_client_id", "pathao_client_secret",
+        "steadfast_api_key", "steadfast_api_secret", "sundarban_enabled",
+        "hartal_mode", "hartal_message", "friday_offline_enabled",
+        "ramadan_mode", "ramadan_start_time", "ramadan_end_time",
+        "eid_greeting_enabled", "eid_greeting_date", "eid_greeting_message",
+        # Loyalty & referral
+        "loyalty_enabled", "loyalty_points_per_taka", "loyalty_min_redeem",
+        "loyalty_point_value", "referral_enabled", "referral_discount_pct",
+        "referral_reward_pct",
+        # SMS / OTP
+        "sms_enabled", "sms_provider",
+        "ssl_wireless_api_key", "ssl_wireless_sid",
+        "twilio_account_sid", "twilio_auth_token", "twilio_from_number",
     }
     update_data = {k: v for k, v in body.items() if k in allowed}
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    result = (
+    tid = tenant["tenant_id"]
+
+    # Check if a config row already exists for this tenant
+    existing = (
         supabase.table("ai_config")
-        .update(update_data)
-        .eq("tenant_id", tenant["tenant_id"])
+        .select("config_id")
+        .eq("tenant_id", tid)
+        .maybe_single()
         .execute()
     )
+
+    if existing.data:
+        # Row exists → update it
+        result = (
+            supabase.table("ai_config")
+            .update(update_data)
+            .eq("tenant_id", tid)
+            .execute()
+        )
+    else:
+        # No row yet → create one (first-time save)
+        import uuid as _uuid
+        result = (
+            supabase.table("ai_config")
+            .insert({"config_id": str(_uuid.uuid4()), "tenant_id": tid, **update_data})
+            .execute()
+        )
+
     return result.data[0] if result.data else {}

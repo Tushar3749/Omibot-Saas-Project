@@ -4,8 +4,10 @@ import toast from 'react-hot-toast'
 import { campaignsAPI } from '@/lib/api'
 import {
   Megaphone, Plus, X, Edit2, Trash2, Upload,
-  CheckCircle, Clock, AlertCircle, XCircle,
+  CheckCircle, Clock, AlertCircle, XCircle, Package,
 } from 'lucide-react'
+import ProductPicker, { type SelectedProduct } from '@/components/ui/ProductPicker'
+import CsvGuide from '@/components/ui/CsvGuide'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Campaign {
@@ -67,14 +69,16 @@ function typeLabel(type: string, amount: number) {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function CampaignsPage() {
-  const [campaigns, setCampaigns] = useState<Campaign[]>([])
-  const [loading, setLoading]     = useState(true)
-  const [showModal, setShowModal] = useState(false)
-  const [editing, setEditing]     = useState<Campaign | null>(null)
-  const [form, setForm]           = useState<FormData>(EMPTY_FORM)
-  const [saving, setSaving]       = useState(false)
-  const [importing, setImporting] = useState(false)
-  const [deleting, setDeleting]   = useState<string | null>(null)
+  const [campaigns, setCampaigns]       = useState<Campaign[]>([])
+  const [loading, setLoading]           = useState(true)
+  const [showModal, setShowModal]       = useState(false)
+  const [editing, setEditing]           = useState<Campaign | null>(null)
+  const [form, setForm]                 = useState<FormData>(EMPTY_FORM)
+  const [saving, setSaving]             = useState(false)
+  const [importing, setImporting]       = useState(false)
+  const [deleting, setDeleting]         = useState<string | null>(null)
+  const [showPicker, setShowPicker]     = useState(false)
+  const [selectedProducts, setSelectedProducts] = useState<SelectedProduct[]>([])
   const csvRef = useRef<HTMLInputElement>(null)
 
   // ── Load ──────────────────────────────────────────────────────────────────
@@ -95,6 +99,7 @@ export default function CampaignsPage() {
   function openCreate() {
     setEditing(null)
     setForm(EMPTY_FORM)
+    setSelectedProducts([])
     setShowModal(true)
   }
 
@@ -110,6 +115,14 @@ export default function CampaignsPage() {
       apply_to:    c.apply_to,
       is_active:   c.is_active,
     })
+    // Restore selected products if editing a specific campaign
+    if (c.apply_to === 'specific' && c.product_ids?.length) {
+      setSelectedProducts(c.product_ids.map(id => ({
+        product_id: id, sku: '', name: id, mrp: 0, quantity: 1,
+      })))
+    } else {
+      setSelectedProducts([])
+    }
     setShowModal(true)
   }
 
@@ -130,6 +143,7 @@ export default function CampaignsPage() {
         end_date:    form.end_date   || null,
         apply_to:    form.apply_to,
         is_active:   form.is_active,
+        product_ids: form.apply_to === 'specific' ? selectedProducts.map(p => p.product_id) : null,
       }
       if (editing) {
         const updated = await campaignsAPI.update(editing.campaign_id, payload)
@@ -228,11 +242,8 @@ export default function CampaignsPage() {
         </div>
       </div>
 
-      {/* CSV hint */}
-      <div className="text-xs px-4 py-2.5 rounded"
-           style={{ backgroundColor: '#E8F5E9', color: '#2E7D32', border: '1px solid #A5D6A7' }}>
-        📋 CSV কলাম: <code className="font-mono">name, type(percentage/flat/bonus), amount, description, start_date(YYYY-MM-DD), end_date, is_active(true/false)</code>
-      </div>
+      {/* CSV Guide */}
+      <CsvGuide type="campaign" />
 
       {/* List */}
       {loading ? (
@@ -322,6 +333,14 @@ export default function CampaignsPage() {
           </table>
         </div>
       )}
+
+      {/* Product Picker */}
+      <ProductPicker
+        open={showPicker}
+        onClose={() => setShowPicker(false)}
+        onConfirm={setSelectedProducts}
+        selected={selectedProducts}
+      />
 
       {/* Modal */}
       {showModal && (
@@ -420,7 +439,7 @@ export default function CampaignsPage() {
               {/* Apply to */}
               <div>
                 <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>প্রযোজ্য</label>
-                <div className="flex gap-3">
+                <div className="flex gap-3 mb-3">
                   {(['all', 'specific'] as const).map(v => (
                     <label key={v} className="flex items-center gap-2 cursor-pointer">
                       <input
@@ -437,6 +456,36 @@ export default function CampaignsPage() {
                     </label>
                   ))}
                 </div>
+                {form.apply_to === 'specific' && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setShowPicker(true)}
+                      className="btn-secondary gap-2 text-xs"
+                    >
+                      <Package size={13} /> পণ্য নির্বাচন করুন ({selectedProducts.length} টি)
+                    </button>
+                    {selectedProducts.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {selectedProducts.map(p => (
+                          <span
+                            key={p.product_id}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full"
+                            style={{ backgroundColor: '#E8F5E9', color: '#2E7D32' }}
+                          >
+                            {p.sku || p.name}
+                            <button
+                              onClick={() => setSelectedProducts(sp => sp.filter(x => x.product_id !== p.product_id))}
+                              className="hover:text-red-600"
+                            >
+                              <X size={9} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Active toggle */}

@@ -62,15 +62,15 @@ export default function OrdersPage() {
       </div>
 
       {/* ── Status filter tabs ────────────────────────────────────────────── */}
-      <div className="flex gap-1.5 flex-wrap">
+      <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
         {STATUSES.map(s => (
           <button
             key={s}
             onClick={() => setFilter(s)}
-            className="px-3.5 py-1.5 rounded text-sm font-medium capitalize transition-all duration-150"
+            className="flex-shrink-0 px-3.5 py-2 rounded-lg text-sm font-medium capitalize transition-all duration-200 tap-target"
             style={filter === s
-              ? { backgroundColor: '#04AA6D', color: '#FFFFFF' }
-              : { backgroundColor: '#FFFFFF', border: '1px solid #E0E0E0', color: '#424242' }
+              ? { backgroundColor: '#04AA6D', color: '#FFFFFF', boxShadow: '0 2px 8px rgba(4,170,109,0.3)', transform: 'scale(1.03)' }
+              : { backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)', color: 'var(--c-text-2)' }
             }
           >
             {s === 'all' ? 'সব' : s}
@@ -86,9 +86,9 @@ export default function OrdersPage() {
       ) : orders.length === 0 ? (
         <div className="card p-14">
           <div className="empty-state">
-            <div className="w-14 h-14 rounded flex items-center justify-center"
-                 style={{ backgroundColor: '#F5F5F5' }}>
-              <ShoppingBag size={24} style={{ color: '#9E9E9E' }} />
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center empty-icon"
+                 style={{ backgroundColor: 'var(--c-surface)', border: '2px dashed var(--c-border)' }}>
+              <ShoppingBag size={24} style={{ color: 'var(--c-muted)' }} />
             </div>
             <p className="font-medium" style={{ color: '#616161' }}>কোনো order নেই</p>
             <p className="text-sm" style={{ color: '#9E9E9E' }}>AI function calling দিয়ে orders স্বয়ংক্রিয়ভাবে তৈরি হয়</p>
@@ -96,10 +96,12 @@ export default function OrdersPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {orders.map(order => {
+          {orders.map((order, idx) => {
             const style = STATUS_STYLES[order.status]
             return (
-              <div key={order.order_id} className="card p-5 hover:shadow-md transition-shadow">
+              <div key={order.order_id}
+                   className="card p-4 sm:p-5"
+                   style={{ animation: `floatUp 0.3s ease-out ${idx * 40}ms both` }}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2.5 mb-3 flex-wrap">

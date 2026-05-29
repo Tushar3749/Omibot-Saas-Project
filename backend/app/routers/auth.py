@@ -11,8 +11,9 @@ import secrets
 import logging
 from datetime import datetime, timezone, timedelta
 
+import bcrypt as _bcrypt
+
 from fastapi import APIRouter, HTTPException, status, Depends
-from passlib.context import CryptContext
 
 from app.auth.jwt_handler import create_access_token
 from app.auth.dependencies import get_current_tenant
@@ -25,7 +26,19 @@ from app.services.email_service import send_password_reset_email
 
 logger = logging.getLogger(__name__)
 router  = APIRouter()
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def _hash_password(plain: str) -> str:
+    """Hash a plain-text password with bcrypt."""
+    return _bcrypt.hashpw(plain.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    """Verify a plain-text password against a bcrypt hash."""
+    try:
+        return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
@@ -45,7 +58,7 @@ async def register(body: RegisterRequest):
         raise HTTPException(status_code=400, detail="Email already registered")
 
     tenant_id     = str(uuid.uuid4())
-    password_hash = pwd_ctx.hash(body.password)
+    password_hash = _hash_password(body.password)
     # Starter plan — 14-day free trial
     trial_expires = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
 
@@ -93,7 +106,7 @@ async def login(body: LoginRequest):
     tenant = result.data if (result is not None and hasattr(result, 'data')) else result
     if tenant is None:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not pwd_ctx.verify(body.password, tenant["password_hash"]):
+    if not _verify_password(body.password, tenant["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not tenant.get("is_active", True):
@@ -183,7 +196,7 @@ async def reset_password(body: ResetPasswordRequest):
         raise HTTPException(status_code=400, detail="Token-এর মেয়াদ শেষ হয়ে গেছে। আবার চেষ্টা করুন।")
 
     # Update password and clear token
-    new_hash = pwd_ctx.hash(body.new_password)
+    new_hash = _hash_password(body.new_password)
     supabase.table("tenants").update({
         "password_hash": new_hash,
         "reset_token": None,

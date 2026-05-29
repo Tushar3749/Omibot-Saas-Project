@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { productsAPI, uploadAPI } from '@/lib/api'
+import ProductImageManager from '@/components/ui/ProductImageManager'
 import { formatBDT, formatDate } from '@/lib/utils'
 import type {
   Product,
@@ -13,8 +14,9 @@ import type {
 import {
   Plus, Edit2, Trash2, Package, Search,
   Upload, Download, ChevronDown, X, AlertTriangle,
-  CheckCircle, Columns, Loader2, FileText, Clock, ImagePlus,
+  CheckCircle, Columns, Loader2, FileText, Clock, ImagePlus, Image,
 } from 'lucide-react'
+import CsvGuide from '@/components/ui/CsvGuide'
 
 // ─── tiny helpers ─────────────────────────────────────────────────────────────
 const IMPORT_TYPE_LABELS: Record<CSVImportType, string> = {
@@ -61,6 +63,9 @@ export default function ProductsPage() {
     column_name: '', display_name: '', column_type: 'text', is_required: false,
   })
   const [savingCol, setSavingCol] = useState(false)
+
+  // ── image manager ────────────────────────────────────────────────────────────
+  const [imageManagerProduct, setImageManagerProduct] = useState<{ id: string; name: string } | null>(null)
 
   // ── search / filter ──────────────────────────────────────────────────────────
   const [search, setSearch] = useState('')
@@ -470,6 +475,16 @@ export default function ProductsPage() {
                   ))}
                   <td className="td">
                     <div className="flex gap-1.5">
+                      <button
+                        onClick={() => setImageManagerProduct({ id: p.product_id, name: p.name })}
+                        className="p-1.5 rounded-lg transition-colors"
+                        style={{ color: '#7B1FA2' }}
+                        title="Images পরিচালনা করুন"
+                        onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#F3E5F5')}
+                        onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      >
+                        <Image size={15} />
+                      </button>
                       <button onClick={() => openEdit(p)} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 transition-colors hover:text-primary-600">
                         <Edit2 size={15} />
                       </button>
@@ -727,29 +742,8 @@ export default function ProductsPage() {
                 </div>
               </div>
 
-              {/* Rules reminder */}
-              <div className="bg-slate-50 rounded-lg p-3 text-xs text-slate-600 space-y-1">
-                {importType === 'products' && (
-                  <>
-                    <p><strong>Required columns:</strong> sku, name, mrp</p>
-                    <p><strong>Optional:</strong> discount_price, discount_category, stock, category, image_url</p>
-                    <p><strong>Extra columns</strong> → saved to custom fields automatically</p>
-                    <p><strong>Existing SKU</strong> → updates that product | <strong>New SKU</strong> → creates new</p>
-                  </>
-                )}
-                {importType === 'stock' && (
-                  <>
-                    <p><strong>Required columns:</strong> sku, stock</p>
-                    <p>Only updates the stock quantity for existing SKUs</p>
-                  </>
-                )}
-                {importType === 'campaign' && (
-                  <>
-                    <p><strong>Required columns:</strong> sku</p>
-                    <p><strong>Update fields:</strong> discount_price, discount_category</p>
-                  </>
-                )}
-              </div>
+              {/* CSV Guide */}
+              <CsvGuide type={importType} defaultOpen />
 
               {/* Import result */}
               {importResult && (
@@ -999,5 +993,14 @@ export default function ProductsPage() {
       )}
 
     </div>
+
+    {/* ── Product Image Manager Modal ─────────────────────────────────── */}
+    {imageManagerProduct && (
+      <ProductImageManager
+        productId={imageManagerProduct.id}
+        productName={imageManagerProduct.name}
+        onClose={() => setImageManagerProduct(null)}
+      />
+    )}
   )
 }

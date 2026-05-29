@@ -2,7 +2,7 @@
 OmniBot SaaS — Pydantic Request / Response Schemas
 """
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Optional, Literal
 from pydantic import BaseModel, EmailStr, Field
 
@@ -34,17 +34,109 @@ class ResetPasswordRequest(BaseModel):
 # ─── AI Config ───────────────────────────────────────────────────────────────
 
 class AIConfigUpdate(BaseModel):
+    # Bot identity
     bot_name: Optional[str] = None
     system_prompt: Optional[str] = None
-    language: Optional[str] = None          # bangla | english | banglish
+    language: Optional[str] = None
     allow_negotiation: Optional[bool] = None
     escalation_keywords: Optional[list[str]] = None
     forbidden_topics: Optional[list[str]] = None
     prompt_injection_guard: Optional[bool] = True
-    # Negotiation
     max_discount_pct: Optional[float] = None
-    negotiation_style: Optional[str] = None   # aggressive | moderate | soft
+    negotiation_style: Optional[str] = None
     negotiation_phrases: Optional[list[str]] = None
+
+    # Order management
+    min_order_amount: Optional[float] = None
+    max_order_qty_per_customer: Optional[int] = None
+    preorder_enabled: Optional[bool] = None
+    waitlist_enabled: Optional[bool] = None
+    partial_payment_enabled: Optional[bool] = None
+    partial_payment_advance_pct: Optional[float] = None
+    payment_deadline_hours: Optional[int] = None
+    installment_enabled: Optional[bool] = None
+
+    # Message templates
+    tpl_shipping_confirm: Optional[str] = None
+    tpl_delay_notify: Optional[str] = None
+    tpl_out_of_stock: Optional[str] = None
+    tpl_wrong_item: Optional[str] = None
+    tpl_review_request: Optional[str] = None
+    tpl_referral: Optional[str] = None
+
+    # Smart AI
+    price_range_filter_enabled: Optional[bool] = None
+    product_image_auto_send: Optional[bool] = None
+    catalog_pdf_auto_send: Optional[bool] = None
+    competitor_response_template: Optional[str] = None
+
+    # Bangladesh specific
+    pathao_store_id: Optional[str] = None
+    pathao_client_id: Optional[str] = None
+    pathao_client_secret: Optional[str] = None
+    steadfast_api_key: Optional[str] = None
+    steadfast_api_secret: Optional[str] = None
+    sundarban_enabled: Optional[bool] = None
+    hartal_mode: Optional[bool] = None
+    hartal_message: Optional[str] = None
+    friday_offline_enabled: Optional[bool] = None
+    ramadan_mode: Optional[bool] = None
+    ramadan_start_time: Optional[str] = None
+    ramadan_end_time: Optional[str] = None
+    eid_greeting_enabled: Optional[bool] = None
+    eid_greeting_date: Optional[date] = None
+    eid_greeting_message: Optional[str] = None
+
+    # Loyalty & referral
+    loyalty_enabled: Optional[bool] = None
+    loyalty_points_per_taka: Optional[float] = None
+    loyalty_min_redeem: Optional[int] = None
+    loyalty_point_value: Optional[float] = None
+    referral_enabled: Optional[bool] = None
+    referral_discount_pct: Optional[float] = None
+    referral_reward_pct: Optional[float] = None
+
+
+# ─── Delivery Charges ─────────────────────────────────────────────────────────
+
+class DeliveryChargeItem(BaseModel):
+    district: str
+    charge: float = Field(ge=0)
+
+class DeliveryChargesUpdate(BaseModel):
+    charges: list[DeliveryChargeItem]
+
+
+# ─── Bulk Discount Rules ──────────────────────────────────────────────────────
+
+class BulkDiscountRuleCreate(BaseModel):
+    min_quantity: int = Field(ge=1)
+    discount_pct: float = Field(ge=0, le=90)
+    product_id: Optional[str] = None
+    product_name: Optional[str] = None
+
+class BulkDiscountRuleUpdate(BaseModel):
+    min_quantity: Optional[int] = None
+    discount_pct: Optional[float] = None
+    is_active: Optional[bool] = None
+
+
+# ─── Courier / Tracking ───────────────────────────────────────────────────────
+
+class TrackingUpdate(BaseModel):
+    tracking_number: str
+    courier_name: str   # pathao | steadfast | sundarban | other
+
+class CourierOrderCreate(BaseModel):
+    order_id: str
+    courier: str = Field(pattern=r'^(pathao|steadfast)$')
+    recipient_name: str
+    recipient_phone: str
+    recipient_address: str
+    recipient_city: str
+    cod_amount: float = Field(ge=0)
+    item_type: str = "parcel"
+    note: Optional[str] = None
 
 
 # ─── Products ────────────────────────────────────────────────────────────────
@@ -59,8 +151,8 @@ class ProductCreate(BaseModel):
     category: Optional[str] = None
     image_url: Optional[str] = None
     min_price: Optional[float] = None
-    negotiation_style: Optional[str] = None   # aggressive | moderate | soft
-    extra_fields: Optional[dict] = None    # Schema-on-read JSONB for custom columns
+    negotiation_style: Optional[str] = None
+    extra_fields: Optional[dict] = None
 
 class ProductUpdate(BaseModel):
     sku: Optional[str] = None
@@ -114,7 +206,6 @@ class CustomColumnCreate(BaseModel):
     column_name: str = Field(
         min_length=1, max_length=50,
         pattern=r'^[a-z][a-z0-9_]*$',
-        description="snake_case key used in extra_fields JSONB and CSV headers"
     )
     display_name: str = Field(min_length=1, max_length=100)
     column_type: Literal["text", "number", "boolean", "url"] = "text"
@@ -141,7 +232,7 @@ class CSVImportResponse(BaseModel):
 
 class KnowledgeDocCreate(BaseModel):
     content: str = Field(min_length=10)
-    content_type: str = "policy"   # product | policy | faq
+    content_type: str = "policy"
     metadata: Optional[dict] = None
 
 
@@ -154,13 +245,13 @@ class TakeoverRequest(BaseModel):
 # ─── Orders ──────────────────────────────────────────────────────────────────
 
 class OrderStatusUpdate(BaseModel):
-    status: str    # pending | confirmed | shipped | delivered | cancelled
+    status: str
 
 
 # ─── Payment ─────────────────────────────────────────────────────────────────
 
 class PaymentInitRequest(BaseModel):
-    plan: str       # starter | pro | enterprise
+    plan: str
     customer_name: str
     customer_phone: str
     customer_address: Optional[str] = None
@@ -171,8 +262,8 @@ class PaymentInitRequest(BaseModel):
 class PageConnectRequest(BaseModel):
     page_id: str
     page_name: str
-    access_token: str        # Plain-text; will be AES-encrypted before storing
-    platform: str = "facebook"   # facebook | instagram
+    access_token: str
+    platform: str = "facebook"
 
 
 # ─── Analytics ───────────────────────────────────────────────────────────────
@@ -185,3 +276,94 @@ class AnalyticsResponse(BaseModel):
     messages_this_month: int
     top_products: list[dict]
     daily_stats: list[dict]
+
+
+# ─── Combos ──────────────────────────────────────────────────────────────────
+
+class ComboProductItem(BaseModel):
+    product_id: str
+    sku: str
+    name: str
+    mrp: Optional[float] = None
+    quantity: int = 1
+
+class ComboCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    price: float = Field(gt=0)
+    offer_price: float = Field(gt=0)
+    stock: int = 0
+    image_url: Optional[str] = None
+    products: list[ComboProductItem] = []
+
+class ComboUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    offer_price: Optional[float] = None
+    stock: Optional[int] = None
+    image_url: Optional[str] = None
+    is_active: Optional[bool] = None
+    products: Optional[list[ComboProductItem]] = None
+
+
+# ─── Stock ───────────────────────────────────────────────────────────────────
+
+class StockManualUpdate(BaseModel):
+    product_id: str
+    quantity: int
+    note: Optional[str] = None
+
+class LowStockThreshold(BaseModel):
+    threshold: int = Field(ge=0)
+
+
+# ─── Returns ─────────────────────────────────────────────────────────────────
+
+class ReturnCreate(BaseModel):
+    sku: str
+    product_name: str
+    quantity: int = Field(ge=1)
+    return_type: str = Field(default='return', pattern=r'^(return|damage|expiry)$')
+    reason: Optional[str] = None
+    order_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    notes: Optional[str] = None
+
+class ReturnStatusUpdate(BaseModel):
+    status: str = Field(pattern=r'^(pending|processed|rejected)$')
+    notes: Optional[str] = None
+
+
+# ─── Complaints ───────────────────────────────────────────────────────────────
+
+class ComplaintCreate(BaseModel):
+    conversation_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_id: Optional[str] = None
+    product_mentioned: Optional[str] = None
+    complaint_text: str = Field(min_length=5)
+    complaint_type: str = 'general'
+    priority: str = 'medium'
+
+class ComplaintUpdate(BaseModel):
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    resolution_note: Optional[str] = None
+
+
+# ─── Negotiation Rules ────────────────────────────────────────────────────────
+
+class NegotiationRuleCreate(BaseModel):
+    product_id: str
+    sku: str
+    product_name: Optional[str] = None
+    max_discount_pct: float = Field(default=15.0, ge=0, le=90)
+    min_price: Optional[float] = None
+    negotiation_style: str = Field(default='moderate', pattern=r'^(aggressive|moderate|soft)$')
+
+class NegotiationRuleUpdate(BaseModel):
+    max_discount_pct: Optional[float] = None
+    min_price: Optional[float] = None
+    negotiation_style: Optional[str] = None
+    is_active: Optional[bool] = None
