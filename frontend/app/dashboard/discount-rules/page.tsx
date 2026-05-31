@@ -1,11 +1,11 @@
 'use client'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
 import { discountRulesAPI, configAPI, productsAPI } from '@/lib/api'
 import {
   Plus, Trash2, Edit2, Save, ChevronDown, ChevronRight,
   ShoppingCart, RefreshCw, User, Tag, Layers, Hash,
-  MapPin, Clock, Calendar, GripVertical, X, Percent,
+  MapPin, Clock, Calendar, X, Percent, Megaphone,
 } from 'lucide-react'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -14,8 +14,6 @@ type RuleType =
   | 'cart_value' | 'repeated_customer' | 'new_customer'
   | 'specific_product' | 'specific_category' | 'bulk_quantity'
   | 'district' | 'time_based' | 'seasonal' | 'lifetime_value'
-
-type ConflictResolution = 'best_deal' | 'priority_wins' | 'stack_all' | 'stack_with_cap'
 
 interface DiscountRule {
   rule_id: string
@@ -26,6 +24,8 @@ interface DiscountRule {
   priority: number
   is_active: boolean
 }
+
+interface PrioritySetting { priority: number; enabled: boolean }
 
 const BD_DISTRICTS = [
   'Bagerhat','Bandarban','Barguna','Barisal','Bhola','Bogra','Brahmanbaria',
@@ -55,6 +55,22 @@ const RULE_META: Record<RuleType, { label: string; icon: React.ElementType; colo
   seasonal:          { label: 'Seasonal',           icon: Calendar,     color: '#C62828' },
   lifetime_value:    { label: 'Lifetime Value',     icon: Percent,      color: '#4527A0' },
 }
+
+// All 12 rule types for the priority table (including system types)
+const ALL_PRIORITY_TYPES = [
+  { key: 'campaign',          label: 'Campaign',          icon: Megaphone,    color: '#F57F17', defaultPriority: 1,  system: true  },
+  { key: 'combo',             label: 'Combo Offer',       icon: Layers,       color: '#AD1457', defaultPriority: 2,  system: true  },
+  { key: 'cart_value',        label: 'Cart Value',        icon: ShoppingCart, color: '#1565C0', defaultPriority: 3,  system: false },
+  { key: 'repeated_customer', label: 'Repeated Customer', icon: RefreshCw,    color: '#6A1B9A', defaultPriority: 4,  system: false },
+  { key: 'new_customer',      label: 'New Customer',      icon: User,         color: '#00695C', defaultPriority: 5,  system: false },
+  { key: 'specific_product',  label: 'Specific Product',  icon: Tag,          color: '#E65100', defaultPriority: 6,  system: false },
+  { key: 'specific_category', label: 'Specific Category', icon: Layers,       color: '#AD1457', defaultPriority: 7,  system: false },
+  { key: 'bulk_quantity',     label: 'Bulk Quantity',     icon: Hash,         color: '#2E7D32', defaultPriority: 8,  system: false },
+  { key: 'district',          label: 'District/Location', icon: MapPin,       color: '#558B2F', defaultPriority: 9,  system: false },
+  { key: 'time_based',        label: 'Time Based',        icon: Clock,        color: '#F57F17', defaultPriority: 10, system: false },
+  { key: 'seasonal',          label: 'Seasonal',          icon: Calendar,     color: '#C62828', defaultPriority: 11, system: false },
+  { key: 'lifetime_value',    label: 'Lifetime Value',    icon: Percent,      color: '#4527A0', defaultPriority: 12, system: false },
+]
 
 // ── Reward input helper ────────────────────────────────────────────────────────
 
@@ -97,46 +113,36 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
   products: { product_id: string; sku: string; name: string }[]
   categories: string[]
 }) {
-  // Repeated customer tiers
   const tiers = (conditions.tiers as { from_days: number; to_days: number; discount_pct: number; product_filter: string }[]) || []
 
   function addTier() {
     onCondChange({ ...conditions, tiers: [...tiers, { from_days: 0, to_days: 30, discount_pct: 10, product_filter: 'all' }] })
   }
   function updateTier(i: number, key: string, val: unknown) {
-    const next = tiers.map((t, idx) => idx === i ? { ...t, [key]: val } : t)
-    onCondChange({ ...conditions, tiers: next })
+    onCondChange({ ...conditions, tiers: tiers.map((t, idx) => idx === i ? { ...t, [key]: val } : t) })
   }
   function removeTier(i: number) {
     onCondChange({ ...conditions, tiers: tiers.filter((_, idx) => idx !== i) })
   }
 
-  // District multiselect
   const selDistricts = (conditions.districts as string[]) || []
   function toggleDistrict(d: string) {
-    const next = selDistricts.includes(d) ? selDistricts.filter(x => x !== d) : [...selDistricts, d]
-    onCondChange({ ...conditions, districts: next })
+    onCondChange({ ...conditions, districts: selDistricts.includes(d) ? selDistricts.filter(x => x !== d) : [...selDistricts, d] })
   }
 
-  // Day checkboxes
   const selDays = (conditions.days_of_week as string[]) || []
   function toggleDay(d: string) {
-    const next = selDays.includes(d) ? selDays.filter(x => x !== d) : [...selDays, d]
-    onCondChange({ ...conditions, days_of_week: next })
+    onCondChange({ ...conditions, days_of_week: selDays.includes(d) ? selDays.filter(x => x !== d) : [...selDays, d] })
   }
 
-  // SKU list
   const selSkus = (conditions.skus as string[]) || []
   function toggleSku(sku: string) {
-    const next = selSkus.includes(sku) ? selSkus.filter(x => x !== sku) : [...selSkus, sku]
-    onCondChange({ ...conditions, skus: next })
+    onCondChange({ ...conditions, skus: selSkus.includes(sku) ? selSkus.filter(x => x !== sku) : [...selSkus, sku] })
   }
 
-  // Category list
   const selCats = (conditions.categories as string[]) || []
   function toggleCat(cat: string) {
-    const next = selCats.includes(cat) ? selCats.filter(x => x !== cat) : [...selCats, cat]
-    onCondChange({ ...conditions, categories: next })
+    onCondChange({ ...conditions, categories: selCats.includes(cat) ? selCats.filter(x => x !== cat) : [...selCats, cat] })
   }
 
   const labelCls = "block text-xs font-medium mb-1"
@@ -146,8 +152,8 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
     <div className="space-y-3">
       <div><label className={labelCls} style={lStyle}>Minimum Cart Amount (৳)</label>
         <input type="number" min="0" className="input" placeholder="500"
-          value={String(conditions.min_cart_amount || '')}
-          onChange={e => onCondChange({ ...conditions, min_cart_amount: parseFloat(e.target.value) || 0 })} /></div>
+          value={String(conditions.min_amount || '')}
+          onChange={e => onCondChange({ ...conditions, min_amount: parseFloat(e.target.value) || 0 })} /></div>
       <RewardFields reward={reward} onChange={onRewardChange} />
     </div>
   )
@@ -158,7 +164,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <p className="text-xs font-medium" style={lStyle}>Customer Return Tiers</p>
         <button type="button" onClick={addTier} className="btn-secondary text-xs py-1 px-2 gap-1"><Plus size={11} /> Tier যোগ</button>
       </div>
-      {tiers.length === 0 && <p className="text-xs text-center py-3" style={{ color: 'var(--c-muted)' }}>কোনো tier নেই — উপরে যোগ করুন</p>}
+      {tiers.length === 0 && <p className="text-xs text-center py-3" style={{ color: 'var(--c-muted)' }}>কোনো tier নেই</p>}
       {tiers.map((tier, i) => (
         <div key={i} className="p-3 rounded space-y-3" style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
           <div className="flex items-center justify-between">
@@ -183,8 +189,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
               <option value="same_category">Same category as previous purchase</option>
               {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
               {products.slice(0, 20).map(p => <option key={p.sku} value={`sku:${p.sku}`}>{p.sku} — {p.name}</option>)}
-            </select>
-          </div>
+            </select></div>
         </div>
       ))}
     </div>
@@ -320,7 +325,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <input type="number" min="0" step="100" className="input" placeholder="10000"
           value={String(conditions.min_lifetime_value || '')}
           onChange={e => onCondChange({ ...conditions, min_lifetime_value: parseFloat(e.target.value) || 0 })} />
-        <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>গ্রাহকের সব অর্ডারের মোট মূল্য এই পরিমাণ বা বেশি হলে discount প্রযোজ্য</p>
+        <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>গ্রাহকের মোট lifetime purchase এই পরিমাণ বা বেশি হলে discount প্রযোজ্য</p>
       </div>
       <div><label className={labelCls} style={lStyle}>Apply To</label>
         <select className="input" value={String(conditions.apply_to || 'all')}
@@ -352,53 +357,55 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
 // ── Main Page ──────────────────────────────────────────────────────────────────
 
 export default function DiscountRulesPage() {
-  const [rules, setRules] = useState<DiscountRule[]>([])
-  const [loading, setLoading] = useState(true)
+  const [rules, setRules]         = useState<DiscountRule[]>([])
+  const [loading, setLoading]     = useState(true)
   const [activeTab, setActiveTab] = useState<'rules' | 'priority'>('rules')
   const [expandedTypes, setExpandedTypes] = useState<Set<RuleType>>(new Set())
-  const [products, setProducts] = useState<{ product_id: string; sku: string; name: string; category?: string }[]>([])
+  const [products, setProducts]   = useState<{ product_id: string; sku: string; name: string; category?: string }[]>([])
 
   // Rule modal
-  const [showModal, setShowModal] = useState(false)
-  const [modalType, setModalType] = useState<RuleType>('cart_value')
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [ruleName, setRuleName] = useState('')
+  const [showModal, setShowModal]   = useState(false)
+  const [modalType, setModalType]   = useState<RuleType>('cart_value')
+  const [editingId, setEditingId]   = useState<string | null>(null)
+  const [ruleName, setRuleName]     = useState('')
   const [conditions, setConditions] = useState<Record<string, unknown>>({})
-  const [reward, setReward] = useState<Record<string, unknown>>({ discount_type: 'percentage', discount_value: 10 })
-  const [saving, setSaving] = useState(false)
+  const [reward, setReward]         = useState<Record<string, unknown>>({ discount_type: 'percentage', discount_value: 10 })
+  const [saving, setSaving]         = useState(false)
 
-  // Priority
-  const [priorityList, setPriorityList] = useState<DiscountRule[]>([])
-  const [savingPriority, setSavingPriority] = useState(false)
-  const [dragIdx, setDragIdx] = useState<number | null>(null)
-
-  // Conflict resolution
-  const [resolution, setResolution] = useState<ConflictResolution>('best_deal')
-  const [stackCap, setStackCap] = useState('30')
-  const [savingConfig, setSavingConfig] = useState(false)
+  // Priority settings (ai_config.discount_priority_settings JSONB)
+  const [prioritySettings, setPrioritySettings] = useState<Record<string, PrioritySetting>>({})
+  const [savingPriority, setSavingPriority]     = useState(false)
 
   // Preview calculator
-  const [previewCart, setPreviewCart] = useState('')
-  const [previewQty, setPreviewQty] = useState('')
+  const [previewCart, setPreviewCart]         = useState('')
+  const [previewQty, setPreviewQty]           = useState('')
+  const [previewSku, setPreviewSku]           = useState('')
+  const [previewCategory, setPreviewCategory] = useState('')
+  const [previewPhone, setPreviewPhone]       = useState('')
   const [previewDistrict, setPreviewDistrict] = useState('')
-  const [previewNewCust, setPreviewNewCust] = useState(false)
-  const [previewResult, setPreviewResult] = useState<Record<string, unknown> | null>(null)
-  const [previewing, setPreviewing] = useState(false)
+  const [previewNewCust, setPreviewNewCust]   = useState(false)
+  const [previewResult, setPreviewResult]     = useState<Record<string, unknown> | null>(null)
+  const [previewing, setPreviewing]           = useState(false)
 
   const categories = [...new Set(products.map(p => p.category).filter(Boolean))] as string[]
+
+  // Build default priority settings
+  function buildDefaults(): Record<string, PrioritySetting> {
+    return Object.fromEntries(
+      ALL_PRIORITY_TYPES.map(t => [t.key, { priority: t.defaultPriority, enabled: true }])
+    )
+  }
 
   useEffect(() => {
     Promise.all([
       discountRulesAPI.list().then(setRules),
       productsAPI.list().then((d: { product_id: string; sku: string; name: string; category?: string }[]) => setProducts(d)),
       configAPI.get().then((c: Record<string, unknown>) => {
-        if (c.conflict_resolution) setResolution(c.conflict_resolution as ConflictResolution)
-        if (c.discount_stack_cap)  setStackCap(String(c.discount_stack_cap))
+        const saved = c.discount_priority_settings as Record<string, PrioritySetting> | undefined
+        setPrioritySettings(saved && Object.keys(saved).length > 0 ? saved : buildDefaults())
       }),
-    ]).catch(() => {}).finally(() => setLoading(false))
+    ]).catch(() => setPrioritySettings(buildDefaults())).finally(() => setLoading(false))
   }, [])
-
-  useEffect(() => { setPriorityList([...rules].sort((a, b) => a.priority - b.priority)) }, [rules])
 
   function toggleExpand(t: RuleType) {
     setExpandedTypes(prev => {
@@ -409,20 +416,14 @@ export default function DiscountRulesPage() {
   }
 
   function openCreate(type: RuleType) {
-    setEditingId(null)
-    setModalType(type)
-    setRuleName('')
-    setConditions({})
-    setReward({ discount_type: 'percentage', discount_value: 10 })
+    setEditingId(null); setModalType(type); setRuleName('')
+    setConditions({}); setReward({ discount_type: 'percentage', discount_value: 10 })
     setShowModal(true)
   }
 
   function openEdit(rule: DiscountRule) {
-    setEditingId(rule.rule_id)
-    setModalType(rule.rule_type)
-    setRuleName(rule.rule_name)
-    setConditions({ ...rule.conditions })
-    setReward({ ...rule.reward })
+    setEditingId(rule.rule_id); setModalType(rule.rule_type); setRuleName(rule.rule_name)
+    setConditions({ ...rule.conditions }); setReward({ ...rule.reward })
     setShowModal(true)
   }
 
@@ -440,11 +441,8 @@ export default function DiscountRulesPage() {
         toast.success('✅ Rule তৈরি হয়েছে!')
       }
       setShowModal(false)
-    } catch {
-      toast.error('সমস্যা হয়েছে')
-    } finally {
-      setSaving(false)
-    }
+    } catch { toast.error('সমস্যা হয়েছে') }
+    finally { setSaving(false) }
   }
 
   async function handleDelete(id: string) {
@@ -459,29 +457,20 @@ export default function DiscountRulesPage() {
     if (updated) setRules(rs => rs.map(r => r.rule_id === rule.rule_id ? updated : r))
   }
 
+  function setPrioritySetting(key: string, field: keyof PrioritySetting, value: unknown) {
+    setPrioritySettings(prev => ({
+      ...prev,
+      [key]: { ...(prev[key] ?? { priority: 99, enabled: true }), [field]: value },
+    }))
+  }
+
   async function handleSavePriority() {
     setSavingPriority(true)
     try {
-      await discountRulesAPI.updatePriority(priorityList.map((r, i) => ({ id: r.rule_id, priority: i + 1 })))
-      setRules(priorityList.map((r, i) => ({ ...r, priority: i + 1 })))
+      await configAPI.update({ discount_priority_settings: prioritySettings })
       toast.success('✅ Priority সংরক্ষিত!')
-    } catch {
-      toast.error('সংরক্ষণ ব্যর্থ')
-    } finally {
-      setSavingPriority(false)
-    }
-  }
-
-  async function handleSaveConfig() {
-    setSavingConfig(true)
-    try {
-      await configAPI.update({ conflict_resolution: resolution, discount_stack_cap: parseFloat(stackCap) || 30 })
-      toast.success('✅ Conflict settings সংরক্ষিত!')
-    } catch {
-      toast.error('সংরক্ষণ ব্যর্থ')
-    } finally {
-      setSavingConfig(false)
-    }
+    } catch { toast.error('সংরক্ষণ ব্যর্থ') }
+    finally { setSavingPriority(false) }
   }
 
   async function handlePreview() {
@@ -489,59 +478,42 @@ export default function DiscountRulesPage() {
     setPreviewing(true)
     try {
       const res = await discountRulesAPI.preview({
-        cart_amount: parseFloat(previewCart),
-        quantity: previewQty ? parseInt(previewQty) : undefined,
-        district: previewDistrict || undefined,
+        cart_amount:    parseFloat(previewCart),
+        quantity:       previewQty ? parseInt(previewQty) : undefined,
+        product_skus:   previewSku ? previewSku.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        categories:     previewCategory ? previewCategory.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        district:       previewDistrict || undefined,
         is_new_customer: previewNewCust,
+        customer_phone: previewPhone || undefined,
       })
       setPreviewResult(res)
-    } catch {
-      toast.error('Preview করা যায়নি')
-    } finally {
-      setPreviewing(false)
-    }
-  }
-
-  // Drag-and-drop for priority list
-  const dragOver = useRef<number | null>(null)
-
-  function onDragStart(i: number) { setDragIdx(i) }
-  function onDragEnter(i: number) { dragOver.current = i }
-  function onDragEnd() {
-    if (dragIdx === null || dragOver.current === null || dragIdx === dragOver.current) {
-      setDragIdx(null); dragOver.current = null; return
-    }
-    const next = [...priorityList]
-    const [item] = next.splice(dragIdx, 1)
-    next.splice(dragOver.current, 0, item)
-    setPriorityList(next)
-    setDragIdx(null); dragOver.current = null
+    } catch { toast.error('Preview করা যায়নি') }
+    finally { setPreviewing(false) }
   }
 
   if (loading) return <div className="flex justify-center py-20"><div className="spinner h-8 w-8" /></div>
 
-  const rulesByType = (type: RuleType) => rules.filter(r => r.rule_type === type)
+  const rulesByType = (type: string) => rules.filter(r => r.rule_type === type)
 
   return (
     <div className="max-w-3xl space-y-5">
-      {/* Header */}
       <div>
         <h1 className="page-title">Smart Discount Rules</h1>
-        <p className="page-subtitle">৯ ধরনের dynamic discount rule + priority system</p>
+        <p className="page-subtitle">১০ ধরনের dynamic discount rule + priority system</p>
       </div>
 
       {/* Tabs */}
       <div className="flex gap-1" style={{ borderBottom: '2px solid var(--c-border)' }}>
         {(['rules', 'priority'] as const).map(t => (
           <button key={t} onClick={() => setActiveTab(t)}
-            className="px-4 py-2 text-xs font-medium rounded-t transition-all capitalize"
+            className="px-4 py-2 text-xs font-medium rounded-t transition-all"
             style={{
               color: activeTab === t ? '#04AA6D' : 'var(--c-muted)',
               borderBottom: activeTab === t ? '2px solid #04AA6D' : '2px solid transparent',
               marginBottom: -2,
               backgroundColor: activeTab === t ? 'rgba(4,170,109,0.07)' : 'transparent',
             }}>
-            {t === 'rules' ? 'Discount Rules' : 'Priority & Conflicts'}
+            {t === 'rules' ? 'Discount Rules' : 'Priority & ON/OFF'}
           </button>
         ))}
       </div>
@@ -557,7 +529,6 @@ export default function DiscountRulesPage() {
 
             return (
               <div key={type} className="card overflow-hidden">
-                {/* Section header */}
                 <div className="flex items-center justify-between px-4 py-3 cursor-pointer"
                   style={{ borderBottom: expanded ? '1px solid var(--c-border)' : 'none' }}
                   onClick={() => toggleExpand(type)}>
@@ -583,7 +554,6 @@ export default function DiscountRulesPage() {
                   </div>
                 </div>
 
-                {/* Rules list */}
                 {expanded && (
                   <div>
                     {typeRules.length === 0 ? (
@@ -648,16 +618,31 @@ export default function DiscountRulesPage() {
                   value={previewQty} onChange={e => setPreviewQty(e.target.value)} />
               </div>
               <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Product SKU(s)</label>
+                <input type="text" className="input" placeholder="SKU001, SKU002"
+                  value={previewSku} onChange={e => setPreviewSku(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Category</label>
+                <input type="text" className="input" placeholder="Electronics"
+                  value={previewCategory} onChange={e => setPreviewCategory(e.target.value)} />
+              </div>
+              <div>
                 <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>District</label>
                 <select className="input" value={previewDistrict} onChange={e => setPreviewDistrict(e.target.value)}>
                   <option value="">নির্বাচন করুন</option>
                   {BD_DISTRICTS.map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
               </div>
-              <div className="flex items-end pb-1">
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Customer Phone (ঐচ্ছিক)</label>
+                <input type="tel" className="input" placeholder="01XXXXXXXXX"
+                  value={previewPhone} onChange={e => setPreviewPhone(e.target.value)} maxLength={11} />
+              </div>
+              <div className="flex items-center col-span-2">
                 <label className="flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--c-text)' }}>
                   <input type="checkbox" checked={previewNewCust} onChange={e => setPreviewNewCust(e.target.checked)} />
-                  New Customer
+                  New Customer (phone override করে না থাকলে)
                 </label>
               </div>
             </div>
@@ -682,9 +667,10 @@ export default function DiscountRulesPage() {
                 {Array.isArray(previewResult.matched_rules) && previewResult.matched_rules.length > 0 && (
                   <div>
                     <p className="text-xs font-medium mb-1" style={{ color: 'var(--c-muted)' }}>Matched Rules:</p>
-                    {(previewResult.matched_rules as { rule_name: string; rule_type: string; discount_value: number; discount_type: string }[]).map((r, i) => (
+                    {(previewResult.matched_rules as { rule_name: string; discount_value: number; discount_type: string; reason?: string }[]).map((r, i) => (
                       <p key={i} className="text-xs" style={{ color: 'var(--c-text)' }}>
                         • {r.rule_name} — {r.discount_value}{r.discount_type === 'percentage' ? '%' : '৳'}
+                        {r.reason && <span style={{ color: 'var(--c-muted)' }}> ({r.reason})</span>}
                       </p>
                     ))}
                   </div>
@@ -697,97 +683,89 @@ export default function DiscountRulesPage() {
 
       {/* ── Priority Tab ──────────────────────────────────────────────────── */}
       {activeTab === 'priority' && (
-        <div className="space-y-4">
-          {/* Conflict Resolution */}
-          <div className="card p-5 space-y-4">
-            <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>Conflict Resolution</h2>
-            <p className="text-xs -mt-2" style={{ color: 'var(--c-muted)' }}>যখন একাধিক rule match করে তখন কোনটি প্রযোজ্য হবে</p>
-            <div className="space-y-2">
-              {([
-                { value: 'best_deal',      label: 'Best Deal Wins',       desc: 'সর্বোচ্চ discount দেওয়া rule টি apply হবে' },
-                { value: 'priority_wins',  label: 'Priority Wins',        desc: 'শুধু সর্বোচ্চ priority-র rule টি apply হবে' },
-                { value: 'stack_all',      label: 'Stack All',            desc: 'সব matching rules একসাথে যোগ হবে' },
-                { value: 'stack_with_cap', label: 'Stack with Cap',       desc: 'সব যোগ হবে কিন্তু সর্বোচ্চ cap পর্যন্ত' },
-              ] as const).map(opt => (
-                <label key={opt.value} className="flex items-start gap-3 p-3 rounded cursor-pointer"
-                  style={{
-                    border: `1px solid ${resolution === opt.value ? '#04AA6D' : 'var(--c-border)'}`,
-                    background: resolution === opt.value ? 'rgba(4,170,109,0.06)' : 'var(--c-surface)',
-                  }}>
-                  <input type="radio" name="resolution" value={opt.value} checked={resolution === opt.value}
-                    onChange={() => setResolution(opt.value)} className="mt-0.5" />
-                  <div>
-                    <p className="text-xs font-semibold" style={{ color: 'var(--c-text)' }}>{opt.label}</p>
-                    <p className="text-xs" style={{ color: 'var(--c-muted)' }}>{opt.desc}</p>
-                  </div>
-                </label>
-              ))}
+        <div className="card p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>Rule Priority Order</h2>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>
+                Priority number সম্পাদনা করুন এবং rule type ON/OFF করুন (Conflict Resolution → AI Settings → Smart AI)
+              </p>
             </div>
-            {resolution === 'stack_with_cap' && (
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Maximum Stack Cap (%)</label>
-                <input type="number" min="1" max="90" className="input w-32"
-                  value={stackCap} onChange={e => setStackCap(e.target.value)} />
-              </div>
-            )}
-            <button onClick={handleSaveConfig} disabled={savingConfig} className="btn-primary gap-2">
-              {savingConfig ? <><span className="spinner h-4 w-4" /> সংরক্ষণ...</> : <><Save size={14} /> Save Settings</>}
+            <button onClick={handleSavePriority} disabled={savingPriority} className="btn-primary text-xs py-1.5 px-3 gap-1.5">
+              {savingPriority ? <><span className="spinner h-3 w-3" /> সংরক্ষণ...</> : <><Save size={12} /> Save Order</>}
             </button>
           </div>
 
-          {/* Drag-and-drop priority list */}
-          <div className="card p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>Rule Priority Order</h2>
-                <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>Drag করে priority পরিবর্তন করুন (১ = সর্বোচ্চ)</p>
-              </div>
-              <button onClick={handleSavePriority} disabled={savingPriority} className="btn-primary text-xs py-1.5 px-3 gap-1.5">
-                {savingPriority ? <><span className="spinner h-3 w-3" /> সংরক্ষণ...</> : <><Save size={12} /> Save Order</>}
-              </button>
-            </div>
+          <div className="overflow-hidden rounded" style={{ border: '1px solid var(--c-border)' }}>
+            <table className="w-full text-sm">
+              <thead style={{ backgroundColor: 'var(--c-surface)' }}>
+                <tr>
+                  <th className="th text-center w-16" style={{ color: 'var(--c-muted)' }}>Priority</th>
+                  <th className="th text-left" style={{ color: 'var(--c-muted)' }}>Rule Type</th>
+                  <th className="th text-center" style={{ color: 'var(--c-muted)' }}>Active Rules</th>
+                  <th className="th text-center" style={{ color: 'var(--c-muted)' }}>ON / OFF</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ALL_PRIORITY_TYPES.map((type, i) => {
+                  const Icon = type.icon
+                  const setting = prioritySettings[type.key] ?? { priority: type.defaultPriority, enabled: true }
+                  const count = type.system ? null : rulesByType(type.key).length
 
-            {priorityList.length === 0 ? (
-              <p className="text-center text-xs py-8" style={{ color: 'var(--c-muted)' }}>কোনো rule নেই</p>
-            ) : (
-              <div className="space-y-1.5">
-                {priorityList.map((rule, i) => {
-                  const meta = RULE_META[rule.rule_type]
-                  const Icon = meta.icon
                   return (
-                    <div key={rule.rule_id}
-                      draggable
-                      onDragStart={() => onDragStart(i)}
-                      onDragEnter={() => onDragEnter(i)}
-                      onDragEnd={onDragEnd}
-                      onDragOver={e => e.preventDefault()}
-                      className="flex items-center gap-3 px-3 py-2.5 rounded cursor-grab active:cursor-grabbing select-none"
-                      style={{
-                        border: `1px solid ${dragIdx === i ? '#04AA6D' : 'var(--c-border)'}`,
-                        background: dragIdx === i ? 'rgba(4,170,109,0.06)' : 'var(--c-surface)',
-                        opacity: dragIdx !== null && dragIdx !== i ? 0.6 : 1,
-                      }}>
-                      <GripVertical size={14} style={{ color: 'var(--c-muted)', flexShrink: 0 }} />
-                      <span className="text-xs font-bold w-5 text-center" style={{ color: 'var(--c-muted)' }}>{i + 1}</span>
-                      <div className="w-6 h-6 rounded flex items-center justify-center flex-shrink-0"
-                        style={{ backgroundColor: `${meta.color}18` }}>
-                        <Icon size={12} style={{ color: meta.color }} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium truncate" style={{ color: 'var(--c-text)' }}>{rule.rule_name || meta.label}</p>
-                        <p className="text-2xs" style={{ color: 'var(--c-muted)' }}>{meta.label}</p>
-                      </div>
-                      <span className="text-xs px-1.5 py-0.5 rounded-full"
-                        style={rule.is_active
-                          ? { background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }
-                          : { background: 'var(--c-border)', color: 'var(--c-muted)' }}>
-                        {rule.is_active ? 'Active' : 'Off'}
-                      </span>
-                    </div>
+                    <tr key={type.key} style={{ borderTop: i > 0 ? '1px solid var(--c-border-subtle)' : 'none' }}>
+                      {/* Priority number input */}
+                      <td className="td text-center">
+                        <input
+                          type="number" min="1" max="12"
+                          className="input text-center text-xs py-1 h-auto w-14"
+                          value={setting.priority}
+                          onChange={e => setPrioritySetting(type.key, 'priority', parseInt(e.target.value) || 1)}
+                        />
+                      </td>
+                      {/* Icon + name */}
+                      <td className="td">
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded flex items-center justify-center flex-shrink-0"
+                            style={{ backgroundColor: `${type.color}18` }}>
+                            <Icon size={13} style={{ color: type.color }} />
+                          </div>
+                          <div>
+                            <span className="text-xs font-medium" style={{ color: 'var(--c-text)' }}>{type.label}</span>
+                            {type.system && (
+                              <span className="ml-1.5 text-2xs px-1 py-0.5 rounded"
+                                style={{ background: 'var(--c-border)', color: 'var(--c-muted)' }}>sys</span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      {/* Active rules count */}
+                      <td className="td text-center">
+                        {count === null ? (
+                          <span className="text-xs" style={{ color: 'var(--c-muted)' }}>—</span>
+                        ) : count > 0 ? (
+                          <span className="text-xs px-1.5 py-0.5 rounded-full font-medium"
+                            style={{ backgroundColor: `${type.color}18`, color: type.color }}>
+                            {count}
+                          </span>
+                        ) : (
+                          <span className="text-xs" style={{ color: 'var(--c-muted)' }}>0</span>
+                        )}
+                      </td>
+                      {/* ON/OFF toggle */}
+                      <td className="td text-center">
+                        <button type="button" role="switch" aria-checked={setting.enabled}
+                          onClick={() => setPrioritySetting(type.key, 'enabled', !setting.enabled)}
+                          className={`toggle-track ${setting.enabled ? 'toggle-track-on' : ''}`}
+                          style={{ transform: 'scale(0.8)' }}>
+                          <span className={`toggle-thumb ${setting.enabled ? 'toggle-thumb-on' : ''}`} />
+                        </button>
+                      </td>
+                    </tr>
                   )
                 })}
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -810,24 +788,16 @@ export default function DiscountRulesPage() {
                 <X size={18} />
               </button>
             </div>
-
             <div className="p-5 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Rule Name</label>
                 <input className="input" placeholder={RULE_META[modalType].label}
                   value={ruleName} onChange={e => setRuleName(e.target.value)} />
               </div>
-              <RuleForm
-                type={modalType}
-                conditions={conditions}
-                reward={reward}
-                onCondChange={setConditions}
-                onRewardChange={setReward}
-                products={products}
-                categories={categories}
-              />
+              <RuleForm type={modalType} conditions={conditions} reward={reward}
+                onCondChange={setConditions} onRewardChange={setReward}
+                products={products} categories={categories} />
             </div>
-
             <div className="px-5 py-4 flex justify-end gap-3 flex-shrink-0"
               style={{ borderTop: '1px solid var(--c-border)' }}>
               <button onClick={() => setShowModal(false)} className="btn-secondary">বাতিল</button>

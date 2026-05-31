@@ -504,6 +504,38 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
+
+          {/* Conflict Resolution */}
+          <SectionCard icon={TrendingDown} title="Discount Conflict Resolution" subtitle="একাধিক discount rule match হলে কোনটি প্রযোজ্য হবে">
+            <div className="space-y-2">
+              {([
+                { value: 'best_deal',      label: 'Best Deal Wins',   desc: 'সর্বোচ্চ discount দেওয়া rule টি apply হবে' },
+                { value: 'priority_wins',  label: 'Priority Wins',    desc: 'শুধু সর্বোচ্চ priority-র rule টি apply হবে' },
+                { value: 'stack_all',      label: 'Stack All',        desc: 'সব matching rules একসাথে যোগ হবে' },
+                { value: 'stack_with_cap', label: 'Stack with Cap',   desc: 'সব যোগ হবে কিন্তু সর্বোচ্চ cap পর্যন্ত' },
+              ] as const).map(opt => (
+                <label key={opt.value} className="flex items-start gap-3 p-3 rounded cursor-pointer"
+                  style={{
+                    border: `1px solid ${String(config.conflict_resolution || 'best_deal') === opt.value ? '#04AA6D' : 'var(--c-border)'}`,
+                    background: String(config.conflict_resolution || 'best_deal') === opt.value ? 'rgba(4,170,109,0.06)' : 'var(--c-surface)',
+                  }}>
+                  <input type="radio" name="conflict_resolution" value={opt.value}
+                    checked={String(config.conflict_resolution || 'best_deal') === opt.value}
+                    onChange={() => setConfig(c => ({ ...c, conflict_resolution: opt.value }))}
+                    className="mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold" style={{ color: 'var(--c-text)' }}>{opt.label}</p>
+                    <p className="text-xs" style={{ color: 'var(--c-muted)' }}>{opt.desc}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+            {String(config.conflict_resolution) === 'stack_with_cap' && (
+              <NumField label="Maximum Stack Cap (%)" value={String(config.discount_stack_cap ?? 30)}
+                onChange={v => setConfig(c => ({ ...c, discount_stack_cap: parseFloat(v) || 30 }))}
+                min={1} step={1} suffix="%" />
+            )}
+          </SectionCard>
         </div>
       )}
 

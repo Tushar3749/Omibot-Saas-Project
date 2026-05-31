@@ -56,6 +56,7 @@ class PreviewRequest(BaseModel):
     is_new_customer: Optional[bool] = None
     days_since_last_order: Optional[int] = None
     quantity: Optional[int] = None
+    customer_phone: Optional[str] = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -132,17 +133,22 @@ async def update_priority(body: PriorityBatch, tenant=Depends(get_current_tenant
 async def preview_discount(body: PreviewRequest, tenant=Depends(get_current_tenant)):
     from app.services.discount_engine import match_rules, apply_conflict_resolution
 
-    mock_metrics = {
-        "total_orders":         0 if body.is_new_customer else 5,
-        "total_lifetime_value": 0.0,
-        "avg_basket_value":     0.0,
-        "last_order_days_ago":  body.days_since_last_order,
-        "last_order_date":      None,
-        "previous_product_ids": [],
-        "previous_categories":  list(body.categories or []),
-        "current_month_orders": 0,
-        "is_new_customer":      bool(body.is_new_customer),
-    }
+    # Use real customer metrics if phone provided, otherwise mock from request
+    if body.customer_phone:
+        from app.services.discount_engine import get_customer_metrics
+        mock_metrics = get_customer_metrics(tenant["tenant_id"], customer_phone=body.customer_phone)
+    else:
+        mock_metrics = {
+            "total_orders":         0 if body.is_new_customer else 5,
+            "total_lifetime_value": 0.0,
+            "avg_basket_value":     0.0,
+            "last_order_days_ago":  body.days_since_last_order,
+            "last_order_date":      None,
+            "previous_product_ids": [],
+            "previous_categories":  list(body.categories or []),
+            "current_month_orders": 0,
+            "is_new_customer":      bool(body.is_new_customer),
+        }
     cart_ctx = {
         "cart_amount":  body.cart_amount,
         "product_skus": body.product_skus or [],
