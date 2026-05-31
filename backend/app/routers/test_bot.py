@@ -5,7 +5,10 @@ Lets the tenant owner chat with their own configured bot from the dashboard.
 POST /api/test-bot/chat  — send a message, receive the bot's reply
 """
 import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from google import genai
 from google.genai import types as genai_types
@@ -13,8 +16,12 @@ from google.genai import types as genai_types
 from app.auth.dependencies import get_current_tenant
 from app.config import settings
 from app.database import supabase
-from app.models.schemas import TestBotMessage
 from app.services.rag_service import RAGService
+
+
+class TestBotRequest(BaseModel):
+    message: str
+    customer_phone: Optional[str] = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -85,7 +92,7 @@ def _build_system_prompt(ai_cfg: dict, products: list[dict]) -> str:
 
 @router.post("/chat")
 async def test_bot_chat(
-    body:   TestBotMessage,
+    body:   TestBotRequest,
     tenant: dict = Depends(get_current_tenant),
 ):
     """
@@ -123,10 +130,23 @@ async def test_bot_chat(
     except Exception:
         rag_ctx = ""
 
+    # ── Discount context (if customer_phone provided) ─────────────────────────
+    discount_ctx: dict = {}
+    if body.customer_phone:
+        try:
+            from app.services.discount_engine import get_discount_context as _gdc
+            discount_ctx = _gdc(tenant_id=tid, customer_phone=body.customer_phone)
+        except Exception as _de:
+            logger.warning(f"Test bot discount engine error: {_de}")
+
     # ── Build system prompt ───────────────────────────────────────────────────
     system_prompt = _build_system_prompt(ai_cfg, products)
     if rag_ctx:
         system_prompt += f"\n\n## জ্ঞানভাণ্ডার থেকে প্রাসঙ্গিক তথ্য:\n{rag_ctx}"
+    if discount_ctx.get("final_discount_pct", 0) > 0 or discount_ctx.get("final_discount_flat", 0) > 0:
+        pct = discount_ctx.get("final_discount_pct", 0)
+        msg = discount_ctx.get("discount_message", "")
+        system_prompt += f"\n\n[DISCOUNT ENGINE]\n{msg or f'Customer qualifies for {pct}% discount.'}"
 
     # ── Call Gemini ───────────────────────────────────────────────────────────
     try:
@@ -148,7 +168,8 @@ async def test_bot_chat(
         )
 
     return {
-        "message": body.message,
-        "reply":   reply,
-        "model":   settings.GEMINI_MODEL,
+        "message":          body.message,
+        "reply":            reply,
+        "model":            settings.GEMINI_MODEL,
+        "discount_context": discount_ctx or None,
     }

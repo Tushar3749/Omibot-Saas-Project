@@ -13,7 +13,7 @@ import {
 type RuleType =
   | 'cart_value' | 'repeated_customer' | 'new_customer'
   | 'specific_product' | 'specific_category' | 'bulk_quantity'
-  | 'district' | 'time_based' | 'seasonal'
+  | 'district' | 'time_based' | 'seasonal' | 'lifetime_value'
 
 type ConflictResolution = 'best_deal' | 'priority_wins' | 'stack_all' | 'stack_with_cap'
 
@@ -53,6 +53,7 @@ const RULE_META: Record<RuleType, { label: string; icon: React.ElementType; colo
   district:          { label: 'District/Location',  icon: MapPin,       color: '#558B2F' },
   time_based:        { label: 'Time-Based',         icon: Clock,        color: '#F57F17' },
   seasonal:          { label: 'Seasonal',           icon: Calendar,     color: '#C62828' },
+  lifetime_value:    { label: 'Lifetime Value',     icon: Percent,      color: '#4527A0' },
 }
 
 // ── Reward input helper ────────────────────────────────────────────────────────
@@ -310,6 +311,24 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <input type="number" min="0" max="90" className="input" placeholder="10"
           value={String(conditions.discount_pct || '')}
           onChange={e => onCondChange({ ...conditions, discount_pct: parseFloat(e.target.value) || 0 })} /></div>
+    </div>
+  )
+
+  if (type === 'lifetime_value') return (
+    <div className="space-y-3">
+      <div><label className={labelCls} style={lStyle}>Minimum Lifetime Value (৳)</label>
+        <input type="number" min="0" step="100" className="input" placeholder="10000"
+          value={String(conditions.min_lifetime_value || '')}
+          onChange={e => onCondChange({ ...conditions, min_lifetime_value: parseFloat(e.target.value) || 0 })} />
+        <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>গ্রাহকের সব অর্ডারের মোট মূল্য এই পরিমাণ বা বেশি হলে discount প্রযোজ্য</p>
+      </div>
+      <div><label className={labelCls} style={lStyle}>Apply To</label>
+        <select className="input" value={String(conditions.apply_to || 'all')}
+          onChange={e => onCondChange({ ...conditions, apply_to: e.target.value })}>
+          <option value="all">All products</option>
+          {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
+        </select></div>
+      <RewardFields reward={reward} onChange={onRewardChange} />
     </div>
   )
 

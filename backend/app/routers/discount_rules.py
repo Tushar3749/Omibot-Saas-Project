@@ -16,7 +16,7 @@ router = APIRouter()
 VALID_TYPES = {
     'cart_value', 'repeated_customer', 'new_customer',
     'specific_product', 'specific_category', 'bulk_quantity',
-    'district', 'time_based', 'seasonal',
+    'district', 'time_based', 'seasonal', 'lifetime_value',
 }
 
 
@@ -130,78 +130,28 @@ async def update_priority(body: PriorityBatch, tenant=Depends(get_current_tenant
 
 @router.post("/preview")
 async def preview_discount(body: PreviewRequest, tenant=Depends(get_current_tenant)):
-    res = (supabase.table("discount_rules")
-           .select("*")
-           .eq("tenant_id", tenant["tenant_id"])
-           .eq("is_active", True)
-           .order("priority")
-           .execute())
-    all_rules = res.data or []
+    from app.services.discount_engine import match_rules, apply_conflict_resolution
 
-    matched = []
-    today = date.today()
+    mock_metrics = {
+        "total_orders":         0 if body.is_new_customer else 5,
+        "total_lifetime_value": 0.0,
+        "avg_basket_value":     0.0,
+        "last_order_days_ago":  body.days_since_last_order,
+        "last_order_date":      None,
+        "previous_product_ids": [],
+        "previous_categories":  list(body.categories or []),
+        "current_month_orders": 0,
+        "is_new_customer":      bool(body.is_new_customer),
+    }
+    cart_ctx = {
+        "cart_amount":  body.cart_amount,
+        "product_skus": body.product_skus or [],
+        "categories":   body.categories or [],
+        "district":     body.district,
+        "quantity":     body.quantity or 1,
+    }
+    matched = match_rules(tenant["tenant_id"], mock_metrics, cart_ctx)
 
-    for rule in all_rules:
-        conds = rule.get("conditions", {})
-        rtype = rule["rule_type"]
-        hit = False
-
-        if rtype == "cart_value":
-            hit = body.cart_amount >= float(conds.get("min_cart_amount", 0))
-
-        elif rtype == "new_customer":
-            hit = bool(body.is_new_customer)
-
-        elif rtype == "repeated_customer" and body.days_since_last_order is not None:
-            for tier in conds.get("tiers", []):
-                if int(tier.get("from_days", 0)) <= body.days_since_last_order <= int(tier.get("to_days", 9999)):
-                    hit = True
-                    break
-
-        elif rtype == "bulk_quantity" and body.quantity:
-            hit = body.quantity >= int(conds.get("min_quantity", 1))
-
-        elif rtype == "district" and body.district:
-            hit = body.district in conds.get("districts", [])
-
-        elif rtype == "specific_product" and body.product_skus:
-            hit = any(sku in conds.get("skus", []) for sku in body.product_skus)
-
-        elif rtype == "specific_category" and body.categories:
-            hit = any(cat in conds.get("categories", []) for cat in body.categories)
-
-        elif rtype == "time_based":
-            from datetime import datetime as dt
-            now_dt = dt.now()
-            dow = now_dt.strftime("%a").lower()  # mon, tue, …
-            active_days = [d.lower() for d in conds.get("days_of_week", [])]
-            if dow in active_days:
-                from_t = conds.get("from_time", "00:00")
-                to_t   = conds.get("to_time",   "23:59")
-                cur    = now_dt.strftime("%H:%M")
-                hit    = from_t <= cur <= to_t
-
-        elif rtype == "seasonal":
-            start = conds.get("start_date")
-            end   = conds.get("end_date")
-            if start and end:
-                try:
-                    hit = date.fromisoformat(start) <= today <= date.fromisoformat(end)
-                except ValueError:
-                    pass
-
-        if hit:
-            reward = rule.get("reward", {})
-            matched.append({
-                "rule_id":       rule["rule_id"],
-                "rule_name":     rule["rule_name"],
-                "rule_type":     rtype,
-                "priority":      rule["priority"],
-                "discount_type": reward.get("discount_type", "percentage"),
-                "discount_value": float(reward.get("discount_value", 0)),
-            })
-
-    # Fetch conflict resolution config
     cfg_res = (supabase.table("ai_config")
                .select("conflict_resolution, discount_stack_cap")
                .eq("tenant_id", tenant["tenant_id"])
@@ -211,50 +161,19 @@ async def preview_discount(body: PreviewRequest, tenant=Depends(get_current_tena
     resolution = cfg.get("conflict_resolution", "best_deal")
     stack_cap  = float(cfg.get("discount_stack_cap", 30))
 
-    if not matched:
-        return {"matched_rules": [], "final_discount_pct": 0, "final_discount_flat": 0,
-                "discount_amount": 0, "final_price": body.cart_amount, "resolution": resolution}
-
-    final_pct  = 0.0
-    final_flat = 0.0
-
-    if resolution == "priority_wins":
-        top = matched[0]
-        if top["discount_type"] == "percentage":
-            final_pct = top["discount_value"]
-        else:
-            final_flat = top["discount_value"]
-        matched = [top]
-
-    elif resolution == "best_deal":
-        best = max(matched, key=lambda r: (
-            r["discount_value"] * body.cart_amount / 100
-            if r["discount_type"] == "percentage"
-            else r["discount_value"]
-        ))
-        if best["discount_type"] == "percentage":
-            final_pct = best["discount_value"]
-        else:
-            final_flat = best["discount_value"]
-        matched = [best]
-
-    else:  # stack_all or stack_with_cap
-        for r in matched:
-            if r["discount_type"] == "percentage":
-                final_pct += r["discount_value"]
-            else:
-                final_flat += r["discount_value"]
-        if resolution == "stack_with_cap":
-            final_pct = min(final_pct, stack_cap)
-
+    final_pct, final_flat, applied = apply_conflict_resolution(
+        matched, resolution, stack_cap, body.cart_amount
+    )
     discount_amount = (body.cart_amount * final_pct / 100) + final_flat
     final_price     = max(0.0, body.cart_amount - discount_amount)
 
     return {
         "matched_rules":       matched,
+        "applied_rules":       applied,
         "final_discount_pct":  round(final_pct, 2),
         "final_discount_flat": round(final_flat, 2),
         "discount_amount":     round(discount_amount, 2),
         "final_price":         round(final_price, 2),
         "resolution":          resolution,
     }
+

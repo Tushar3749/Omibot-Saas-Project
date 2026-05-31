@@ -289,8 +289,11 @@ export const knowledgeAPI = {
 
 // ── Test Bot ─────────────────────────────────────────────────────────────────
 export const testBotAPI = {
-  chat: (message: string): Promise<{ message: string; reply: string; model: string }> =>
-    api.post('/api/test-bot/chat', { message }).then(r => r.data),
+  chat: (message: string, customer_phone?: string): Promise<{
+    message: string; reply: string; model: string
+    discount_context?: Record<string, unknown> | null
+  }> =>
+    api.post('/api/test-bot/chat', { message, customer_phone }).then(r => r.data),
 }
 
 // ── Product Image Upload ──────────────────────────────────────────────────────

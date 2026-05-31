@@ -423,7 +423,15 @@ async def process_message(
         send_reply(sender_id, reply, plain_token)
         return
 
-    # ── 5. Normal AI flow ─────────────────────────────────────────────────────
+    # ── 5. Discount context ───────────────────────────────────────────────────
+    discount_ctx: dict = {}
+    try:
+        from app.services.discount_engine import get_discount_context as _get_dc
+        discount_ctx = _get_dc(tenant_id=tenant_id, customer_platform_id=sender_id)
+    except Exception as _de:
+        logger.warning(f"Discount engine error: {_de}")
+
+    # ── 6. Normal AI flow ─────────────────────────────────────────────────────
     messages = get_recent_messages(conversation_id)
     summary  = conv.get("conversation_summary")
 
@@ -435,6 +443,7 @@ async def process_message(
         raw_messages=messages,
         conversation_state=state,
         conversation_summary=summary,
+        discount_context=discount_ctx,
     )
 
     reply_text   = result["reply"]

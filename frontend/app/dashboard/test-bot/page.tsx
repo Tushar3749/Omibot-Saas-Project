@@ -2,53 +2,56 @@
 import { useState, useRef, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { testBotAPI } from '@/lib/api'
-import { FlaskConical, Send, Bot, User, Loader2, RotateCcw } from 'lucide-react'
+import { FlaskConical, Send, Bot, User, Loader2, RotateCcw, ChevronDown, ChevronRight, Percent } from 'lucide-react'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface ChatMessage {
   role: 'user' | 'bot'
   text: string
   ts: Date
 }
 
-// ─── Chat bubble ──────────────────────────────────────────────────────────────
+interface DiscountCtx {
+  customer_metrics: {
+    total_orders: number
+    total_lifetime_value: number
+    avg_basket_value: number
+    last_order_days_ago: number | null
+    current_month_orders: number
+    is_new_customer: boolean
+  }
+  matched_rules: { rule_name: string; rule_type: string; discount_value: number; discount_type: string; reason: string }[]
+  applied_rules: { rule_name: string; discount_value: number; discount_type: string }[]
+  final_discount_pct: number
+  final_discount_flat: number
+  discount_message: string
+  resolution: string
+}
+
 function Bubble({ msg }: { msg: ChatMessage }) {
   const isUser = msg.role === 'user'
   return (
     <div className={`flex gap-2.5 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
-      {/* Avatar */}
-      <div
-        className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
-        style={{ backgroundColor: isUser ? '#04AA6D' : '#282A35' }}
-      >
-        {isUser
-          ? <User size={13} className="text-white" />
-          : <Bot  size={13} className="text-white" />}
+      <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
+        style={{ backgroundColor: isUser ? '#04AA6D' : '#282A35' }}>
+        {isUser ? <User size={13} className="text-white" /> : <Bot size={13} className="text-white" />}
       </div>
-
-      {/* Bubble */}
-      <div
-        className="max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
+      <div className="max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
         style={isUser
           ? { backgroundColor: '#04AA6D', color: '#fff', borderBottomRightRadius: 4 }
-          : { backgroundColor: '#fff', color: '#282A35', border: '1px solid #E0E0E0', borderBottomLeftRadius: 4 }}
-      >
+          : { backgroundColor: '#fff', color: '#282A35', border: '1px solid #E0E0E0', borderBottomLeftRadius: 4 }}>
         {msg.text}
       </div>
     </div>
   )
 }
 
-// ─── Typing indicator ─────────────────────────────────────────────────────────
 function TypingIndicator() {
   return (
     <div className="flex gap-2.5">
-      <div className="w-7 h-7 rounded-full flex items-center justify-center"
-           style={{ backgroundColor: '#282A35' }}>
+      <div className="w-7 h-7 rounded-full flex items-center justify-center" style={{ backgroundColor: '#282A35' }}>
         <Bot size={13} className="text-white" />
       </div>
-      <div className="px-4 py-3 rounded-2xl bg-white border border-gray-200"
-           style={{ borderBottomLeftRadius: 4 }}>
+      <div className="px-4 py-3 rounded-2xl bg-white border border-gray-200" style={{ borderBottomLeftRadius: 4 }}>
         <div className="flex gap-1 items-center">
           <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0ms' }} />
           <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -59,41 +62,124 @@ function TypingIndicator() {
   )
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+function DiscountPanel({ ctx }: { ctx: DiscountCtx }) {
+  const [open, setOpen] = useState(true)
+  const m = ctx.customer_metrics
+  const hasDiscount = ctx.final_discount_pct > 0 || ctx.final_discount_flat > 0
+
+  return (
+    <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-3"
+        style={{ backgroundColor: hasDiscount ? 'rgba(4,170,109,0.08)' : 'var(--c-surface)' }}>
+        <div className="flex items-center gap-2">
+          <Percent size={14} style={{ color: hasDiscount ? '#04AA6D' : 'var(--c-muted)' }} />
+          <span className="text-xs font-semibold" style={{ color: 'var(--c-text)' }}>
+            Discount Engine
+            {hasDiscount && (
+              <span className="ml-2 px-1.5 py-0.5 rounded text-xs font-bold"
+                style={{ background: '#04AA6D', color: '#fff' }}>
+                {ctx.final_discount_pct > 0 ? `${ctx.final_discount_pct}% OFF` : `৳${ctx.final_discount_flat} OFF`}
+              </span>
+            )}
+          </span>
+        </div>
+        {open ? <ChevronDown size={13} style={{ color: 'var(--c-muted)' }} /> : <ChevronRight size={13} style={{ color: 'var(--c-muted)' }} />}
+      </button>
+
+      {open && (
+        <div className="p-4 space-y-4" style={{ borderTop: '1px solid var(--c-border)' }}>
+
+          {/* Customer metrics */}
+          <div>
+            <p className="text-xs font-semibold mb-2 uppercase tracking-wide" style={{ color: 'var(--c-muted)' }}>Customer Metrics</p>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: 'Orders', value: m.total_orders },
+                { label: 'LTV ৳', value: m.total_lifetime_value.toLocaleString() },
+                { label: 'Avg Basket', value: `৳${m.avg_basket_value.toLocaleString()}` },
+                { label: 'Last Order', value: m.last_order_days_ago != null ? `${m.last_order_days_ago}d ago` : '—' },
+                { label: 'This Month', value: m.current_month_orders },
+                { label: 'Status', value: m.is_new_customer ? 'New' : 'Returning' },
+              ].map(({ label, value }) => (
+                <div key={label} className="p-2 rounded text-center"
+                  style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
+                  <p className="text-xs font-bold" style={{ color: 'var(--c-text)' }}>{value}</p>
+                  <p className="text-2xs" style={{ color: 'var(--c-muted)' }}>{label}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Matched rules */}
+          {ctx.matched_rules.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold mb-2 uppercase tracking-wide" style={{ color: 'var(--c-muted)' }}>Matched Rules ({ctx.matched_rules.length})</p>
+              <div className="space-y-1.5">
+                {ctx.matched_rules.map((r, i) => (
+                  <div key={i} className="flex items-center justify-between px-3 py-1.5 rounded text-xs"
+                    style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
+                    <span style={{ color: 'var(--c-text)' }}>{r.rule_name}</span>
+                    <div className="flex items-center gap-2">
+                      <span style={{ color: 'var(--c-muted)', fontSize: 10 }}>{r.reason}</span>
+                      <span className="font-bold" style={{ color: '#04AA6D' }}>
+                        {r.discount_type === 'percentage' ? `${r.discount_value}%` : `৳${r.discount_value}`}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Final result */}
+          {hasDiscount && (
+            <div className="px-3 py-2.5 rounded" style={{ background: 'rgba(4,170,109,0.08)', border: '1px solid rgba(4,170,109,0.2)' }}>
+              <p className="text-xs font-semibold" style={{ color: '#04AA6D' }}>{ctx.discount_message}</p>
+              <p className="text-2xs mt-0.5" style={{ color: 'var(--c-muted)' }}>Resolution: {ctx.resolution}</p>
+            </div>
+          )}
+
+          {!hasDiscount && ctx.matched_rules.length === 0 && (
+            <p className="text-xs text-center py-2" style={{ color: 'var(--c-muted)' }}>
+              কোনো discount rule match হয়নি
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function TestBotPage() {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [input, setInput]       = useState('')
-  const [typing, setTyping]     = useState(false)
+  const [messages, setMessages]       = useState<ChatMessage[]>([])
+  const [input, setInput]             = useState('')
+  const [typing, setTyping]           = useState(false)
+  const [customerPhone, setCustomerPhone] = useState('')
+  const [discountCtx, setDiscountCtx] = useState<DiscountCtx | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef  = useRef<HTMLInputElement>(null)
 
-  // Scroll to bottom on new message
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, typing])
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, typing])
 
-  // ── Send message ──────────────────────────────────────────────────────────
   async function send() {
     const text = input.trim()
     if (!text || typing) return
     setInput('')
-
-    const userMsg: ChatMessage = { role: 'user', text, ts: new Date() }
-    setMessages(prev => [...prev, userMsg])
+    setMessages(prev => [...prev, { role: 'user', text, ts: new Date() }])
     setTyping(true)
 
     try {
-      const res = await testBotAPI.chat(text)
-      const botMsg: ChatMessage = { role: 'bot', text: res.reply, ts: new Date() }
-      setMessages(prev => [...prev, botMsg])
+      const res = await testBotAPI.chat(text, customerPhone || undefined)
+      setMessages(prev => [...prev, { role: 'bot', text: res.reply, ts: new Date() }])
+      if (res.discount_context) setDiscountCtx(res.discount_context as unknown as DiscountCtx)
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      const errMsg: ChatMessage = {
+      setMessages(prev => [...prev, {
         role: 'bot',
         text: detail || 'দুঃখিত, AI সার্ভিস সাময়িকভাবে অনুপলব্ধ। একটু পরে আবার চেষ্টা করুন।',
         ts: new Date(),
-      }
-      setMessages(prev => [...prev, errMsg])
+      }])
       toast.error('AI response ব্যর্থ হয়েছে')
     } finally {
       setTyping(false)
@@ -102,126 +188,117 @@ export default function TestBotPage() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      send()
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
   }
 
   function clearChat() {
     if (messages.length === 0) return
     if (!confirm('পুরো কথোপকথন মুছে ফেলবেন?')) return
     setMessages([])
+    setDiscountCtx(null)
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-[calc(100vh-7rem)] max-w-2xl mx-auto">
+    <div className="flex gap-4 h-[calc(100vh-7rem)]">
 
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h1 className="page-title flex items-center gap-2">
-            <FlaskConical size={22} style={{ color: '#04AA6D' }} />
-            Test Bot
-          </h1>
-          <p className="page-subtitle">আপনার নিজের বটের সাথে কথা বলুন এবং পরীক্ষা করুন</p>
+      {/* ── Chat column ─────────────────────────────────────────────────── */}
+      <div className="flex flex-col flex-1 min-w-0">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h1 className="page-title flex items-center gap-2">
+              <FlaskConical size={22} style={{ color: '#04AA6D' }} /> Test Bot
+            </h1>
+            <p className="page-subtitle">আপনার বটের সাথে কথা বলুন এবং পরীক্ষা করুন</p>
+          </div>
+          <button onClick={clearChat} disabled={messages.length === 0} className="btn-secondary gap-1.5 text-sm">
+            <RotateCcw size={13} /> রিসেট
+          </button>
         </div>
-        <button
-          onClick={clearChat}
-          disabled={messages.length === 0}
-          className="btn-secondary gap-1.5 text-sm"
-        >
-          <RotateCcw size={13} /> রিসেট
-        </button>
+
+        {/* Customer phone (optional) */}
+        <div className="flex items-center gap-2 mb-3">
+          <input
+            type="tel"
+            className="input flex-1 text-sm"
+            placeholder="গ্রাহকের ফোন নম্বর (ঐচ্ছিক — discount engine চালু করতে)"
+            value={customerPhone}
+            onChange={e => setCustomerPhone(e.target.value)}
+            maxLength={11}
+          />
+          {customerPhone && (
+            <span className="text-xs px-2 py-1 rounded" style={{ background: 'rgba(4,170,109,0.1)', color: '#04AA6D' }}>
+              Engine Active
+            </span>
+          )}
+        </div>
+
+        {/* Chat window */}
+        <div className="flex-1 rounded-xl overflow-y-auto p-4 space-y-4"
+          style={{ backgroundColor: '#F4F6F8', border: '1px solid #E0E0E0' }}>
+          {messages.length === 0 && !typing && (
+            <div className="h-full flex flex-col items-center justify-center text-center py-10 gap-3">
+              <div className="w-16 h-16 rounded-full flex items-center justify-center" style={{ backgroundColor: '#282A35' }}>
+                <Bot size={32} className="text-white" />
+              </div>
+              <div>
+                <p className="font-semibold" style={{ color: '#282A35' }}>আপনার বট প্রস্তুত!</p>
+                <p className="text-sm mt-1" style={{ color: '#9E9E9E' }}>
+                  একটি বার্তা পাঠান — বট আপনার AI settings অনুযায়ী উত্তর দেবে
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2 justify-center mt-2">
+                {['আপনাদের পণ্যের দাম কত?', 'কি কি পণ্য আছে?', 'রিটার্ন পলিসি কি?', 'ছাড় পাওয়া যাবে?'].map(q => (
+                  <button key={q} onClick={() => { setInput(q); inputRef.current?.focus() }}
+                    className="text-xs px-3 py-1.5 rounded-full border transition-colors hover:border-green-400"
+                    style={{ borderColor: '#E0E0E0', color: '#616161', backgroundColor: '#fff' }}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {messages.map((msg, i) => <Bubble key={i} msg={msg} />)}
+          {typing && <TypingIndicator />}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Input */}
+        <div className="mt-3 flex gap-2 p-2 rounded-xl" style={{ backgroundColor: '#fff', border: '1px solid #E0E0E0' }}>
+          <input ref={inputRef} type="text"
+            className="flex-1 px-3 py-2 text-sm outline-none bg-transparent"
+            style={{ color: '#282A35' }}
+            placeholder="বার্তা লিখুন... (Enter পাঠাতে)"
+            value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown} disabled={typing} autoFocus />
+          <button onClick={send} disabled={!input.trim() || typing}
+            className="w-9 h-9 rounded-lg flex items-center justify-center transition-all flex-shrink-0"
+            style={{ backgroundColor: !input.trim() || typing ? '#E0E0E0' : '#04AA6D', color: !input.trim() || typing ? '#9E9E9E' : '#fff' }}>
+            {typing ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+          </button>
+        </div>
+        <p className="text-xs text-center mt-2" style={{ color: '#BDBDBD' }}>
+          এটি পরীক্ষামূলক — গ্রাহকের কথোপকথনে এটি প্রভাব ফেলবে না
+        </p>
       </div>
 
-      {/* Chat window */}
-      <div
-        className="flex-1 rounded-xl overflow-y-auto p-4 space-y-4"
-        style={{ backgroundColor: '#F4F6F8', border: '1px solid #E0E0E0' }}
-      >
-        {/* Welcome state */}
-        {messages.length === 0 && !typing && (
-          <div className="h-full flex flex-col items-center justify-center text-center py-10 gap-3">
-            <div className="w-16 h-16 rounded-full flex items-center justify-center"
-                 style={{ backgroundColor: '#282A35' }}>
-              <Bot size={32} className="text-white" />
-            </div>
-            <div>
-              <p className="font-semibold" style={{ color: '#282A35' }}>আপনার বট প্রস্তুত!</p>
-              <p className="text-sm mt-1" style={{ color: '#9E9E9E' }}>
-                একটি বার্তা পাঠান — বট আপনার AI settings অনুযায়ী উত্তর দেবে
-              </p>
-            </div>
-            {/* Quick prompts */}
-            <div className="flex flex-wrap gap-2 justify-center mt-2">
-              {[
-                'আপনাদের পণ্যের দাম কত?',
-                'কি কি পণ্য আছে?',
-                'রিটার্ন পলিসি কি?',
-                'ছাড় পাওয়া যাবে?',
-              ].map(q => (
-                <button
-                  key={q}
-                  onClick={() => { setInput(q); inputRef.current?.focus() }}
-                  className="text-xs px-3 py-1.5 rounded-full border transition-colors hover:border-green-400"
-                  style={{ borderColor: '#E0E0E0', color: '#616161', backgroundColor: '#fff' }}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
+      {/* ── Discount panel (right sidebar) ──────────────────────────────── */}
+      <div className="hidden lg:flex flex-col w-72 flex-shrink-0 space-y-3 overflow-y-auto">
+        <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--c-muted)' }}>
+          Discount Engine
+        </p>
+        {discountCtx ? (
+          <DiscountPanel ctx={discountCtx} />
+        ) : (
+          <div className="rounded-xl p-4 text-center" style={{ border: '1px dashed var(--c-border)' }}>
+            <Percent size={24} className="mx-auto mb-2" style={{ color: 'var(--c-border)' }} />
+            <p className="text-xs" style={{ color: 'var(--c-muted)' }}>
+              ফোন নম্বর দিয়ে message পাঠালে এখানে customer metrics ও matched discount rules দেখাবে
+            </p>
           </div>
         )}
-
-        {/* Messages */}
-        {messages.map((msg, i) => (
-          <Bubble key={i} msg={msg} />
-        ))}
-
-        {/* Typing */}
-        {typing && <TypingIndicator />}
-
-        <div ref={bottomRef} />
       </div>
 
-      {/* Input bar */}
-      <div
-        className="mt-3 flex gap-2 p-2 rounded-xl"
-        style={{ backgroundColor: '#fff', border: '1px solid #E0E0E0' }}
-      >
-        <input
-          ref={inputRef}
-          type="text"
-          className="flex-1 px-3 py-2 text-sm outline-none bg-transparent"
-          style={{ color: '#282A35' }}
-          placeholder="বার্তা লিখুন... (Enter পাঠাতে)"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={typing}
-          autoFocus
-        />
-        <button
-          onClick={send}
-          disabled={!input.trim() || typing}
-          className="w-9 h-9 rounded-lg flex items-center justify-center transition-all flex-shrink-0"
-          style={{
-            backgroundColor: !input.trim() || typing ? '#E0E0E0' : '#04AA6D',
-            color: !input.trim() || typing ? '#9E9E9E' : '#fff',
-          }}
-        >
-          {typing
-            ? <Loader2 size={15} className="animate-spin" />
-            : <Send size={15} />}
-        </button>
-      </div>
-
-      {/* Disclaimer */}
-      <p className="text-xs text-center mt-2" style={{ color: '#BDBDBD' }}>
-        এটি পরীক্ষামূলক — গ্রাহকের কথোপকথনে এটি প্রভাব ফেলবে না
-      </p>
     </div>
   )
 }
