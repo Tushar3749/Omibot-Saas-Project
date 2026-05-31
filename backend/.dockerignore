@@ -1,0 +1,29 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Version control
+.git/
+.gitignore
+
+# Koyeb / Railway / Docker artifacts
+koyeb.yaml
+railway.toml
+Procfile
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Migrations (only if you don't run them at startup)
+# migrations/

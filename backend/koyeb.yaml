@@ -1,0 +1,35 @@
+name: omnibot-backend
+services:
+  - name: api
+    type: web
+    instance_type: nano
+    regions:
+      - fra
+    ports:
+      - port: 8000
+        protocol: http
+    routes:
+      - port: 8000
+        path: /
+    checks:
+      - http:
+          path: /health
+          port: 8000
+          interval: 30
+          timeout: 5
+          success_threshold: 1
+          failure_threshold: 3
+    scaling:
+      min: 1
+      max: 1
+    git:
+      repository: github.com/YOUR_USERNAME/YOUR_REPO
+      branch: main
+      build_command: ""
+      run_command: ""
+    env:
+      - key: PORT
+        value: "8000"
+      - key: DEBUG
+        value: "false"
+      # All other secrets should be set in the Koyeb dashboard, not here

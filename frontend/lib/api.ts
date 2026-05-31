@@ -6,17 +6,21 @@
 import axios, { AxiosInstance } from 'axios'
 import type { CSVImportType, CSVImportResult } from '@/types'
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const LOCAL_API_URL  = process.env.NEXT_PUBLIC_API_URL         || 'http://localhost:8000'
+const NGROK_API_URL  = process.env.NEXT_PUBLIC_BACKEND_NGROK_URL || ''
 
 // ── Axios instance ────────────────────────────────────────────────────────────
 const api: AxiosInstance = axios.create({
-  baseURL: BASE_URL,
+  baseURL: LOCAL_API_URL,
   headers: { 'ngrok-skip-browser-warning': 'true' },
 })
 
-// Attach JWT on every request
+// Attach JWT + switch to ngrok baseURL when accessed from a non-localhost hostname
 api.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
+    const isRemote = window.location.hostname !== 'localhost' &&
+                     window.location.hostname !== '127.0.0.1'
+    if (isRemote && NGROK_API_URL) config.baseURL = NGROK_API_URL
     const token = localStorage.getItem('omnibot_token')
     if (token) config.headers.Authorization = `Bearer ${token}`
   }
@@ -43,7 +47,17 @@ api.interceptors.response.use(
     }
 
     const originalRequest = err.config
-    if (err.response?.status !== 401 || originalRequest._retry) {
+    const storedToken = localStorage.getItem('omnibot_token')
+    // Skip refresh if: not a 401, already retried, no token to refresh,
+    // or the failing request is any auth endpoint (prevents loops on wrong credentials)
+    if (
+      err.response?.status !== 401 ||
+      originalRequest._retry ||
+      !storedToken ||
+      originalRequest.url?.includes('/api/auth/refresh') ||
+      originalRequest.url?.includes('/api/auth/login') ||
+      originalRequest.url?.includes('/api/auth/register')
+    ) {
       return Promise.reject(err)
     }
 
