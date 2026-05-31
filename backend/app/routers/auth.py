@@ -15,7 +15,7 @@ import bcrypt as _bcrypt
 
 from fastapi import APIRouter, HTTPException, status, Depends
 
-from app.auth.jwt_handler import create_access_token
+from app.auth.jwt_handler import create_access_token, decode_access_token
 from app.auth.dependencies import get_current_tenant
 from app.database import supabase
 from app.models.schemas import (
@@ -121,6 +121,14 @@ async def login(body: LoginRequest):
 async def me(tenant: dict = Depends(get_current_tenant)):
     tenant.pop("password_hash", None)
     return tenant
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(tenant: dict = Depends(get_current_tenant)):
+    """Issue a fresh 7-day JWT for the authenticated tenant."""
+    token = create_access_token(tenant["tenant_id"], tenant["email"])
+    tenant.pop("password_hash", None)
+    return {"access_token": token, "token_type": "bearer", "tenant": tenant}
 
 
 @router.post("/forgot-password")

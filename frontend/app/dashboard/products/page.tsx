@@ -293,6 +293,7 @@ export default function ProductsPage() {
   //  RENDER
   // ════════════════════════════════════════════════════════════════════════════
   return (
+    <>
     <div className="space-y-5">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
@@ -1002,5 +1003,6 @@ export default function ProductsPage() {
         onClose={() => setImageManagerProduct(null)}
       />
     )}
+    </>
   )
 }

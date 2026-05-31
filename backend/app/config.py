@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # ── JWT ──────────────────────────────────────
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 1440  # 24 h
+    JWT_EXPIRE_MINUTES: int = 10080  # 7 days
 
     # ── Gemini ───────────────────────────────────
     GEMINI_API_KEY: str

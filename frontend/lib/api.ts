@@ -9,7 +9,10 @@ import type { CSVImportType, CSVImportResult } from '@/types'
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 // ── Axios instance ────────────────────────────────────────────────────────────
-const api: AxiosInstance = axios.create({ baseURL: BASE_URL })
+const api: AxiosInstance = axios.create({
+  baseURL: BASE_URL,
+  headers: { 'ngrok-skip-browser-warning': 'true' },
+})
 
 // Attach JWT on every request
 api.interceptors.request.use((config) => {
@@ -20,20 +23,61 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// Auto-logout on 401; redirect to subscription on 402
+// Auto-refresh on 401; redirect to subscription on 402
+let isRefreshing = false
+let failedQueue: Array<{ resolve: (token: string) => void; reject: (err: unknown) => void }> = []
+
+const processQueue = (error: unknown, token: string | null = null) => {
+  failedQueue.forEach(({ resolve, reject }) => (error ? reject(error) : resolve(token!)))
+  failedQueue = []
+}
+
 api.interceptors.response.use(
   (res) => res,
-  (err) => {
-    if (typeof window !== 'undefined') {
-      if (err.response?.status === 401) {
-        localStorage.removeItem('omnibot_token')
-        localStorage.removeItem('omnibot_tenant')
-        window.location.href = '/login'
-      } else if (err.response?.status === 402) {
-        window.location.href = '/dashboard/subscription?expired=true'
-      }
+  async (err) => {
+    if (typeof window === 'undefined') return Promise.reject(err)
+
+    if (err.response?.status === 402) {
+      window.location.href = '/dashboard/subscription?expired=true'
+      return Promise.reject(err)
     }
-    return Promise.reject(err)
+
+    const originalRequest = err.config
+    if (err.response?.status !== 401 || originalRequest._retry) {
+      return Promise.reject(err)
+    }
+
+    // Queue concurrent requests while a refresh is in progress
+    if (isRefreshing) {
+      return new Promise<string>((resolve, reject) => {
+        failedQueue.push({ resolve, reject })
+      }).then((token) => {
+        originalRequest.headers.Authorization = `Bearer ${token}`
+        return api(originalRequest)
+      })
+    }
+
+    originalRequest._retry = true
+    isRefreshing = true
+
+    try {
+      const { data } = await api.post('/api/auth/refresh')
+      const newToken: string = data.access_token
+      localStorage.setItem('omnibot_token', newToken)
+      if (data.tenant) localStorage.setItem('omnibot_tenant', JSON.stringify(data.tenant))
+      api.defaults.headers.common.Authorization = `Bearer ${newToken}`
+      processQueue(null, newToken)
+      originalRequest.headers.Authorization = `Bearer ${newToken}`
+      return api(originalRequest)
+    } catch (refreshErr) {
+      processQueue(refreshErr, null)
+      localStorage.removeItem('omnibot_token')
+      localStorage.removeItem('omnibot_tenant')
+      window.location.href = '/login'
+      return Promise.reject(refreshErr)
+    } finally {
+      isRefreshing = false
+    }
   }
 )
 
