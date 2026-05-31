@@ -389,6 +389,21 @@ export const otpAPI = {
     api.post('/api/otp/test-send', { phone }).then(r => r.data),
 }
 
+// ── Smart Discount Rules ──────────────────────────────────────────────────────
+export const discountRulesAPI = {
+  list: () => api.get('/api/discount-rules/').then(r => r.data),
+  create: (data: Record<string, unknown>) =>
+    api.post('/api/discount-rules/', data).then(r => r.data),
+  update: (id: string, data: Record<string, unknown>) =>
+    api.put(`/api/discount-rules/${id}`, data).then(r => r.data),
+  delete: (id: string) =>
+    api.delete(`/api/discount-rules/${id}`).then(r => r.data),
+  updatePriority: (rules: { id: string; priority: number }[]) =>
+    api.put('/api/discount-rules/priority/batch', { rules }).then(r => r.data),
+  preview: (data: Record<string, unknown>) =>
+    api.post('/api/discount-rules/preview', data).then(r => r.data),
+}
+
 // ── Negotiation Rules ─────────────────────────────────────────────────────────
 export const negotiationAPI = {
   list:   () => api.get('/api/negotiation/').then(r => r.data),

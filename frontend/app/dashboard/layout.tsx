@@ -10,7 +10,7 @@ import {
   LogOut, Bot, Megaphone, BookOpen, FlaskConical,
   ChevronLeft, ChevronRight, Sun, Moon,
   RotateCcw, Layers, AlertTriangle, MoreHorizontal,
-  RefreshCw,
+  RefreshCw, Percent,
 } from 'lucide-react'
 
 // ─── Nav configuration ────────────────────────────────────────────────────────
@@ -28,7 +28,8 @@ const NAV_GROUPS = [
       { href: '/dashboard/conversations', icon: MessageSquare,   label: 'Conversations' },
       { href: '/dashboard/orders',        icon: ShoppingBag,     label: 'Orders' },
       { href: '/dashboard/products',      icon: Package,         label: 'Products' },
-      { href: '/dashboard/campaigns',     icon: Megaphone,       label: 'Campaigns' },
+      { href: '/dashboard/campaigns',      icon: Megaphone,       label: 'Campaigns' },
+      { href: '/dashboard/discount-rules', icon: Percent,        label: 'Discount Rules' },
       { href: '/dashboard/combos',        icon: Layers,          label: 'Combos' },
       { href: '/dashboard/stock',         icon: Package,         label: 'Stock' },
       { href: '/dashboard/returns',       icon: RotateCcw,       label: 'Returns' },

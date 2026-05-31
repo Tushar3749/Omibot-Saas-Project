@@ -53,6 +53,7 @@ const TABS = [
   { id: 'bangladesh',  label: '🇧🇩 বাংলাদেশ',  icon: MapPin },
   { id: 'loyalty',     label: 'Loyalty',       icon: Heart },
   { id: 'negotiation', label: 'দামাদামি',       icon: TrendingDown },
+  { id: 'templates',   label: 'Templates',     icon: MessageSquare },
   { id: 'security',    label: 'Security',      icon: Shield },
 ] as const
 type TabId = typeof TABS[number]['id']
@@ -412,33 +413,10 @@ export default function SettingsPage() {
               <p className="text-xs mb-2" style={{ color: 'var(--c-muted)' }}>Security headers স্বয়ংক্রিয়ভাবে যোগ হবে</p>
               <textarea className="input h-28 resize-none font-mono text-xs leading-relaxed" value={String(config.system_prompt || '')} onChange={e => setConfig(c => ({ ...c, system_prompt: e.target.value }))} placeholder="আপনার bot-এর instructions এখানে লিখুন..." />
             </div>
-            <Toggle checked={Boolean(config.allow_negotiation)} onChange={v => setConfig(c => ({ ...c, allow_negotiation: v }))} label="দামাদামি Allow" sub="AI সর্বোচ্চ নির্ধারিত % পর্যন্ত ছাড় দিতে পারবে" />
-            <div className="grid grid-cols-2 gap-4">
-              <NumField label="সর্বোচ্চ ছাড় (%)" value={String(config.max_discount_pct ?? '')} onChange={v => setConfig(c => ({ ...c, max_discount_pct: parseFloat(v) || 0 }))} min={0} step={0.5} suffix="%" />
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Negotiation Style</label>
-                <select className="input" value={String(config.negotiation_style || 'moderate')} onChange={e => setConfig(c => ({ ...c, negotiation_style: e.target.value }))}>
-                  <option value="aggressive">Aggressive — কম ছাড়</option>
-                  <option value="moderate">Moderate — ভারসাম্য</option>
-                  <option value="soft">Soft — বেশি নমনীয়</option>
-                </select>
-              </div>
-            </div>
             <div>
-              <p className="text-sm font-medium mb-0.5" style={{ color: 'var(--c-text)' }}>কাস্টম দামাদামি বাক্য</p>
-              <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>AI এই বাক্যগুলো ব্যবহার করে দামাদামি করবে।</p>
-              <TagList tags={config.negotiation_phrases as string[] || []} onRemove={removePhrase} inputValue={newPhrase} onInputChange={setNewPhrase} onAdd={addPhrase} placeholder="যেমন: ভাই, এইটুকু ছাড় দিতে পারলে নিয়ে নেন..." tagStyle={{ backgroundColor: '#E8F5E9', color: '#2E7D32', borderColor: '#A5D6A7' }} />
-            </div>
-          </SectionCard>
-
-          <SectionCard icon={MessageSquare} title="Message Templates" subtitle="AI এই template দিয়ে গ্রাহকদের message পাঠাবে">
-            <div className="grid grid-cols-1 gap-4">
-              <TemplateField label="📦 Shipping Confirmation" value={String(config.tpl_shipping_confirm || '')} onChange={v => setConfig(c => ({ ...c, tpl_shipping_confirm: v }))} placeholder="আপনার অর্ডার #{{order_id}} শিপ করা হয়েছে। Tracking: {{tracking}}..." />
-              <TemplateField label="⏳ Delay Notification" value={String(config.tpl_delay_notify || '')} onChange={v => setConfig(c => ({ ...c, tpl_delay_notify: v }))} placeholder="দুঃখিত, আপনার অর্ডার {{delay_days}} দিন দেরি হবে কারণ..." />
-              <TemplateField label="❌ Out of Stock Reply" value={String(config.tpl_out_of_stock || '')} onChange={v => setConfig(c => ({ ...c, tpl_out_of_stock: v }))} placeholder="দুঃখিত, {{product_name}} বর্তমানে stock নেই। Pre-order/Waitlist-এ যোগ করবেন?" />
-              <TemplateField label="📫 Wrong Item Complaint" value={String(config.tpl_wrong_item || '')} onChange={v => setConfig(c => ({ ...c, tpl_wrong_item: v }))} placeholder="আমরা সমস্যাটি সমাধান করব। ছবি পাঠান, আমরা দ্রুত ব্যবস্থা নেব।" />
-              <TemplateField label="⭐ Review Request" value={String(config.tpl_review_request || '')} onChange={v => setConfig(c => ({ ...c, tpl_review_request: v }))} placeholder="আপনার অর্ডার পেয়েছেন? একটু review দিলে ভালো হতো! 😊" />
-              <TemplateField label="🎁 Referral Program" value={String(config.tpl_referral || '')} onChange={v => setConfig(c => ({ ...c, tpl_referral: v }))} placeholder="বন্ধুকে refer করুন, আপনি পাবেন {{discount}}% ছাড়!" />
+              <label className="block text-sm font-medium mb-1" style={{ color: 'var(--c-text)' }}>Greeting Message</label>
+              <p className="text-xs mb-2" style={{ color: 'var(--c-muted)' }}>নতুন conversation শুরুতে bot এই message দেবে</p>
+              <textarea className="input h-20 resize-none text-sm" value={String(config.greeting_message || '')} onChange={e => setConfig(c => ({ ...c, greeting_message: e.target.value }))} placeholder="স্বাগতম! আমি OmniBot, আপনাকে কীভাবে সাহায্য করতে পারি?" />
             </div>
           </SectionCard>
         </div>
@@ -796,19 +774,40 @@ export default function SettingsPage() {
 
       {/* ══ TAB: Negotiation Rules ══════════════════════════════════════════ */}
       {activeTab === 'negotiation' && (
-        <div className="card p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded flex items-center justify-center" style={{ backgroundColor: 'rgba(4,170,109,0.12)' }}>
-                <TrendingDown size={16} style={{ color: '#04AA6D' }} />
-              </div>
+        <div className="space-y-4">
+          <SectionCard icon={TrendingDown} title="Global Negotiation Settings" subtitle="সব পণ্যের জন্য ডিফল্ট দামাদামির নিয়ম">
+            <Toggle checked={Boolean(config.allow_negotiation)} onChange={v => setConfig(c => ({ ...c, allow_negotiation: v }))} label="দামাদামি Allow" sub="AI সর্বোচ্চ নির্ধারিত % পর্যন্ত ছাড় দিতে পারবে" />
+            <div className="grid grid-cols-2 gap-4">
+              <NumField label="সর্বোচ্চ ছাড় (%)" value={String(config.max_discount_pct ?? '')} onChange={v => setConfig(c => ({ ...c, max_discount_pct: parseFloat(v) || 0 }))} min={0} step={0.5} suffix="%" />
               <div>
-                <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>পণ্য-ভিত্তিক Negotiation Rules</h2>
-                <p className="text-xs" style={{ color: 'var(--c-muted)' }}>প্রতিটি পণ্যের জন্য আলাদা দামাদামির নিয়ম</p>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Negotiation Style</label>
+                <select className="input" value={String(config.negotiation_style || 'moderate')} onChange={e => setConfig(c => ({ ...c, negotiation_style: e.target.value }))}>
+                  <option value="aggressive">Aggressive — কম ছাড়</option>
+                  <option value="moderate">Moderate — ভারসাম্য</option>
+                  <option value="soft">Soft — বেশি নমনীয়</option>
+                </select>
               </div>
             </div>
-            <button onClick={openCreateRule} className="btn-primary gap-1.5 text-xs py-1.5 px-3"><Plus size={13} /> Rule যোগ করুন</button>
-          </div>
+            <div>
+              <p className="text-sm font-medium mb-0.5" style={{ color: 'var(--c-text)' }}>কাস্টম দামাদামি বাক্য</p>
+              <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>AI এই বাক্যগুলো ব্যবহার করে দামাদামি করবে।</p>
+              <TagList tags={config.negotiation_phrases as string[] || []} onRemove={removePhrase} inputValue={newPhrase} onInputChange={setNewPhrase} onAdd={addPhrase} placeholder="যেমন: ভাই, এইটুকু ছাড় দিতে পারলে নিয়ে নেন..." tagStyle={{ backgroundColor: '#E8F5E9', color: '#2E7D32', borderColor: '#A5D6A7' }} />
+            </div>
+          </SectionCard>
+
+          <div className="card p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded flex items-center justify-center" style={{ backgroundColor: 'rgba(4,170,109,0.12)' }}>
+                  <TrendingDown size={16} style={{ color: '#04AA6D' }} />
+                </div>
+                <div>
+                  <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>পণ্য-ভিত্তিক Negotiation Rules</h2>
+                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>প্রতিটি পণ্যের জন্য আলাদা দামাদামির নিয়ম</p>
+                </div>
+              </div>
+              <button onClick={openCreateRule} className="btn-primary gap-1.5 text-xs py-1.5 px-3"><Plus size={13} /> Rule যোগ করুন</button>
+            </div>
 
           {rulesLoading ? (
             <div className="flex justify-center py-8"><div className="spinner h-6 w-6" /></div>
@@ -857,6 +856,23 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
+        </div>
+        </div>
+      )}
+
+      {/* ══ TAB: Templates ══════════════════════════════════════════════════ */}
+      {activeTab === 'templates' && (
+        <div className="space-y-4">
+          <SectionCard icon={MessageSquare} title="Message Templates" subtitle="AI এই template দিয়ে গ্রাহকদের message পাঠাবে">
+            <div className="grid grid-cols-1 gap-4">
+              <TemplateField label="📦 Shipping Confirmation" value={String(config.tpl_shipping_confirm || '')} onChange={v => setConfig(c => ({ ...c, tpl_shipping_confirm: v }))} placeholder="আপনার অর্ডার #{{order_id}} শিপ করা হয়েছে। Tracking: {{tracking}}..." />
+              <TemplateField label="⏳ Delay Notification" value={String(config.tpl_delay_notify || '')} onChange={v => setConfig(c => ({ ...c, tpl_delay_notify: v }))} placeholder="দুঃখিত, আপনার অর্ডার {{delay_days}} দিন দেরি হবে কারণ..." />
+              <TemplateField label="❌ Out of Stock Reply" value={String(config.tpl_out_of_stock || '')} onChange={v => setConfig(c => ({ ...c, tpl_out_of_stock: v }))} placeholder="দুঃখিত, {{product_name}} বর্তমানে stock নেই। Pre-order/Waitlist-এ যোগ করবেন?" />
+              <TemplateField label="📫 Wrong Item Complaint" value={String(config.tpl_wrong_item || '')} onChange={v => setConfig(c => ({ ...c, tpl_wrong_item: v }))} placeholder="আমরা সমস্যাটি সমাধান করব। ছবি পাঠান, আমরা দ্রুত ব্যবস্থা নেব।" />
+              <TemplateField label="⭐ Review Request" value={String(config.tpl_review_request || '')} onChange={v => setConfig(c => ({ ...c, tpl_review_request: v }))} placeholder="আপনার অর্ডার পেয়েছেন? একটু review দিলে ভালো হতো! 😊" />
+              <TemplateField label="🎁 Referral Program" value={String(config.tpl_referral || '')} onChange={v => setConfig(c => ({ ...c, tpl_referral: v }))} placeholder="বন্ধুকে refer করুন, আপনি পাবেন {{discount}}% ছাড়!" />
+            </div>
+          </SectionCard>
         </div>
       )}
 
