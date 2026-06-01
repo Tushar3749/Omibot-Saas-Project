@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
-import { discountRulesAPI, configAPI, productsAPI } from '@/lib/api'
+import { discountRulesAPI, configAPI, productsAPI, campaignsAPI, combosAPI } from '@/lib/api'
 import {
   Plus, Trash2, Edit2, Save, ChevronDown, ChevronRight,
   ShoppingCart, RefreshCw, User, Tag, Layers, Hash,
@@ -375,6 +375,8 @@ export default function DiscountRulesPage() {
   // Priority settings (ai_config.discount_priority_settings JSONB)
   const [prioritySettings, setPrioritySettings] = useState<Record<string, PrioritySetting>>({})
   const [savingPriority, setSavingPriority]     = useState(false)
+  const [campaignCount, setCampaignCount]       = useState(0)
+  const [comboCount, setComboCount]             = useState(0)
 
   // Preview calculator
   const [previewCart, setPreviewCart]         = useState('')
@@ -404,6 +406,8 @@ export default function DiscountRulesPage() {
         const saved = c.discount_priority_settings as Record<string, PrioritySetting> | undefined
         setPrioritySettings(saved && Object.keys(saved).length > 0 ? saved : buildDefaults())
       }),
+      campaignsAPI.list().then((d: unknown[]) => setCampaignCount(d.length)).catch(() => {}),
+      combosAPI.list().then((d: unknown[]) => setComboCount(d.length)).catch(() => {}),
     ]).catch(() => setPrioritySettings(buildDefaults())).finally(() => setLoading(false))
   }, [])
 
@@ -710,7 +714,9 @@ export default function DiscountRulesPage() {
                 {ALL_PRIORITY_TYPES.map((type, i) => {
                   const Icon = type.icon
                   const setting = prioritySettings[type.key] ?? { priority: type.defaultPriority, enabled: true }
-                  const count = type.system ? null : rulesByType(type.key).length
+                  const count = type.key === 'campaign' ? campaignCount
+                    : type.key === 'combo' ? comboCount
+                    : rulesByType(type.key).length
 
                   return (
                     <tr key={type.key} style={{ borderTop: i > 0 ? '1px solid var(--c-border-subtle)' : 'none' }}>
@@ -732,18 +738,12 @@ export default function DiscountRulesPage() {
                           </div>
                           <div>
                             <span className="text-xs font-medium" style={{ color: 'var(--c-text)' }}>{type.label}</span>
-                            {type.system && (
-                              <span className="ml-1.5 text-2xs px-1 py-0.5 rounded"
-                                style={{ background: 'var(--c-border)', color: 'var(--c-muted)' }}>sys</span>
-                            )}
                           </div>
                         </div>
                       </td>
                       {/* Active rules count */}
                       <td className="td text-center">
-                        {count === null ? (
-                          <span className="text-xs" style={{ color: 'var(--c-muted)' }}>—</span>
-                        ) : count > 0 ? (
+                        {count > 0 ? (
                           <span className="text-xs px-1.5 py-0.5 rounded-full font-medium"
                             style={{ backgroundColor: `${type.color}18`, color: type.color }}>
                             {count}

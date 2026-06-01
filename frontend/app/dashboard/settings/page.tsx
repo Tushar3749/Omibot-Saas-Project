@@ -16,7 +16,6 @@ interface NegotiationRule {
   negotiation_style: 'aggressive' | 'moderate' | 'soft'; is_active: boolean; created_at: string
 }
 interface RawProduct { product_id: string; sku: string; name: string; mrp: number }
-interface BulkRule { id: string; min_quantity: number; discount_pct: number; product_name?: string; is_active: boolean }
 interface DeliveryCharge { district: string; charge: number }
 
 type RuleForm = {
@@ -183,13 +182,6 @@ export default function SettingsPage() {
   const [savingCharges, setSavingCharges]   = useState(false)
   const [districtSearch, setDistrictSearch] = useState('')
 
-  // Bulk discount rules
-  const [bulkRules, setBulkRules]         = useState<BulkRule[]>([])
-  const [bulkLoading, setBulkLoading]     = useState(true)
-  const [showBulkModal, setShowBulkModal] = useState(false)
-  const [bulkForm, setBulkForm]           = useState({ min_quantity: '', discount_pct: '', product_name: '' })
-  const [savingBulk, setSavingBulk]       = useState(false)
-
   // SMS / OTP test
   const [testPhone, setTestPhone]     = useState('')
   const [testingSms, setTestingSms]   = useState(false)
@@ -203,8 +195,6 @@ export default function SettingsPage() {
     productsAPI.list().then(d => setProducts(d.filter((p: RawProduct & { is_active?: boolean }) => p.is_active !== false))).catch(() => {})
 
     settingsAPI.getDeliveryCharges().then(d => setCharges(d)).catch(() => {}).finally(() => setChargesLoading(false))
-
-    settingsAPI.listBulkDiscounts().then(d => setBulkRules(d)).catch(() => {}).finally(() => setBulkLoading(false))
   }, [])
 
   useEffect(() => {
@@ -247,26 +237,6 @@ export default function SettingsPage() {
     setCharges(prev => prev.map(c => c.district === district ? { ...c, charge: parseFloat(value) || 0 } : c))
   }
 
-  // ── Bulk discount ─────────────────────────────────────────────────────────
-  async function handleSaveBulk() {
-    const qty = parseInt(bulkForm.min_quantity)
-    const pct = parseFloat(bulkForm.discount_pct)
-    if (!qty || qty < 1) { toast.error('Minimum quantity দিন'); return }
-    if (!pct || pct < 0 || pct > 90) { toast.error('Discount 0-90% দিন'); return }
-    setSavingBulk(true)
-    try {
-      const created = await settingsAPI.createBulkDiscount({ min_quantity: qty, discount_pct: pct, product_name: bulkForm.product_name || null })
-      setBulkRules(prev => [created, ...prev])
-      setBulkForm({ min_quantity: '', discount_pct: '', product_name: '' })
-      setShowBulkModal(false)
-      toast.success('✅ Rule তৈরি হয়েছে!')
-    } catch {
-      toast.error('সমস্যা হয়েছে')
-    } finally {
-      setSavingBulk(false)
-    }
-  }
-
   async function handleTestOTP() {
     if (!testPhone.trim()) { toast.error('ফোন নম্বর দিন'); return }
     setTestingSms(true)
@@ -279,13 +249,6 @@ export default function SettingsPage() {
     } finally {
       setTestingSms(false)
     }
-  }
-
-  async function deleteBulkRule(id: string) {
-    if (!confirm('এই rule মুছে ফেলবেন?')) return
-    await settingsAPI.deleteBulkDiscount(id).catch(() => {})
-    setBulkRules(prev => prev.filter(r => r.id !== id))
-    toast.success('মুছে ফেলা হয়েছে')
   }
 
   // ── Tag helpers ───────────────────────────────────────────────────────────
@@ -457,53 +420,6 @@ export default function SettingsPage() {
               <textarea className="input h-24 resize-none text-sm" value={String(config.competitor_response_template || '')} onChange={e => setConfig(c => ({ ...c, competitor_response_template: e.target.value }))} placeholder="আমরা বিশ্বাস করি আমাদের মানের সাথে কেউ প্রতিযোগিতা করতে পারবে না..." />
             </div>
           </SectionCard>
-
-          {/* Bulk Discount Rules */}
-          <div className="card p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded flex items-center justify-center" style={{ backgroundColor: 'rgba(4,170,109,0.12)' }}>
-                  <Package size={16} style={{ color: '#04AA6D' }} />
-                </div>
-                <div>
-                  <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>Bulk Order Discount Rules</h2>
-                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>বড় অর্ডারে স্বয়ংক্রিয় ছাড়ের নিয়ম</p>
-                </div>
-              </div>
-              <button onClick={() => setShowBulkModal(true)} className="btn-primary gap-1.5 text-xs py-1.5 px-3"><Plus size={13} /> Rule যোগ</button>
-            </div>
-
-            {bulkLoading ? (
-              <div className="flex justify-center py-6"><div className="spinner h-5 w-5" /></div>
-            ) : bulkRules.length === 0 ? (
-              <p className="text-center text-xs py-6" style={{ color: 'var(--c-muted)' }}>কোনো bulk discount rule নেই</p>
-            ) : (
-              <div className="overflow-hidden rounded" style={{ border: '1px solid var(--c-border)' }}>
-                <table className="w-full text-sm">
-                  <thead style={{ backgroundColor: 'var(--c-surface)' }}>
-                    <tr>
-                      <th className="th text-left" style={{ color: 'var(--c-muted)' }}>Min Qty</th>
-                      <th className="th text-left" style={{ color: 'var(--c-muted)' }}>Discount</th>
-                      <th className="th text-left" style={{ color: 'var(--c-muted)' }}>Product</th>
-                      <th className="th text-right" style={{ color: 'var(--c-muted)' }}>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {bulkRules.map((r, i) => (
-                      <tr key={r.id} style={{ borderTop: i > 0 ? '1px solid var(--c-border-subtle)' : 'none' }}>
-                        <td className="td"><span className="font-bold" style={{ color: '#04AA6D' }}>{r.min_quantity}+</span></td>
-                        <td className="td"><span className="font-semibold" style={{ color: '#C62828' }}>{r.discount_pct}% OFF</span></td>
-                        <td className="td text-xs" style={{ color: 'var(--c-muted)' }}>{r.product_name || 'সব পণ্য'}</td>
-                        <td className="td text-right">
-                          <button onClick={() => deleteBulkRule(r.id)} className="p-1.5 rounded" style={{ color: '#EF5350' }}><Trash2 size={13} /></button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
 
           {/* Conflict Resolution */}
           <SectionCard icon={TrendingDown} title="Discount Conflict Resolution" subtitle="একাধিক discount rule match হলে কোনটি প্রযোজ্য হবে">
@@ -1042,39 +958,6 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* ── Bulk Discount Modal ──────────────────────────────────────────────── */}
-      {showBulkModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/50" onClick={() => setShowBulkModal(false)} />
-          <div className="relative w-full max-w-sm rounded-xl shadow-2xl" style={{ backgroundColor: 'var(--c-card)' }}>
-            <div className="flex items-center justify-between px-5 py-4" style={{ backgroundColor: '#282A35', borderRadius: '12px 12px 0 0' }}>
-              <h2 className="font-semibold text-white text-sm">➕ Bulk Discount Rule</h2>
-              <button onClick={() => setShowBulkModal(false)} className="text-gray-400 hover:text-white transition-colors"><X size={18} /></button>
-            </div>
-            <div className="p-5 space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>Minimum Quantity <span style={{ color: '#EF5350' }}>*</span></label>
-                <input type="number" min="2" className="input" placeholder="যেমন: 5" value={bulkForm.min_quantity} onChange={e => setBulkForm(f => ({ ...f, min_quantity: e.target.value }))} />
-                <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>এই পরিমাণ বা বেশি অর্ডারে discount</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>Discount (%) <span style={{ color: '#EF5350' }}>*</span></label>
-                <input type="number" min="0" max="90" step="0.5" className="input" placeholder="যেমন: 10" value={bulkForm.discount_pct} onChange={e => setBulkForm(f => ({ ...f, discount_pct: e.target.value }))} />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>Product (ঐচ্ছিক)</label>
-                <input className="input" placeholder="নির্দিষ্ট পণ্যের নাম, খালি = সব পণ্য" value={bulkForm.product_name} onChange={e => setBulkForm(f => ({ ...f, product_name: e.target.value }))} />
-              </div>
-            </div>
-            <div className="px-5 py-4 flex justify-end gap-3" style={{ borderTop: '1px solid var(--c-border)' }}>
-              <button onClick={() => setShowBulkModal(false)} className="btn-secondary">বাতিল</button>
-              <button onClick={handleSaveBulk} disabled={savingBulk} className="btn-primary gap-2">
-                {savingBulk ? <><span className="spinner h-4 w-4" /> সংরক্ষণ...</> : <><Save size={14} /> সংরক্ষণ</>}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

@@ -146,16 +146,6 @@ export default function OnboardingPage() {
                   </select>
                 </div>
               </div>
-              <label className="flex items-center gap-3 p-3.5 rounded cursor-pointer transition-colors"
-                     style={{ backgroundColor: '#F9F9F9', border: '1px solid #E0E0E0' }}>
-                <input type="checkbox" className="w-4 h-4 rounded"
-                  checked={aiConfig.allow_negotiation}
-                  onChange={e => setAIConfig(c => ({ ...c, allow_negotiation: e.target.checked }))} />
-                <div>
-                  <p className="text-sm font-medium" style={{ color: '#282A35' }}>দামাদামি Allow করবেন?</p>
-                  <p className="text-xs" style={{ color: '#757575' }}>AI নিজেই সর্বোচ্চ ১৫% ছাড় দেবে</p>
-                </div>
-              </label>
               <button onClick={saveAIConfig} disabled={saving} className="btn-primary w-full py-2.5">
                 {saving ? <><span className="spinner h-4 w-4" /> সংরক্ষণ...</> : <>পরবর্তী <ArrowRight size={15} /></>}
               </button>
