@@ -141,6 +141,7 @@ class ProductCreate(BaseModel):
     sku: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=500)
     mrp: float = Field(gt=0)
+    weight: Optional[str] = None
     initial_stock: Optional[int] = 0
     category: Optional[str] = None
     image_url: Optional[str] = None
@@ -150,6 +151,7 @@ class ProductUpdate(BaseModel):
     sku: Optional[str] = None
     name: Optional[str] = None
     mrp: Optional[float] = None
+    weight: Optional[str] = None
     category: Optional[str] = None
     image_url: Optional[str] = None
     extra_fields: Optional[dict] = None
@@ -307,19 +309,16 @@ class LowStockThreshold(BaseModel):
 
 # ─── Returns ─────────────────────────────────────────────────────────────────
 
-class ReturnCreate(BaseModel):
-    sku: str
-    product_name: str
+class ReturnItem(BaseModel):
+    product_id: Optional[str] = None
+    sku: Optional[str] = None
+    name: str
+    weight: Optional[str] = None
     quantity: int = Field(ge=1)
-    return_type: str = Field(default='return', pattern=r'^(return|damage|expiry)$')
     reason: Optional[str] = None
-    order_id: Optional[str] = None
-    customer_name: Optional[str] = None
-    notes: Optional[str] = None
 
-class ReturnStatusUpdate(BaseModel):
-    status: str = Field(pattern=r'^(pending|processed|rejected)$')
-    notes: Optional[str] = None
+class ReturnRejectRequest(BaseModel):
+    owner_note: Optional[str] = None
 
 
 # ─── Complaints ───────────────────────────────────────────────────────────────

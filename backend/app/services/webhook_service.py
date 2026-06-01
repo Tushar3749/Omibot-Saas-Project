@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import httpx
@@ -30,6 +31,393 @@ logger = logging.getLogger(__name__)
 META_GRAPH_API = "https://graph.facebook.com/v19.0"
 ai_service     = AIService()
 memory_service = MemoryService()
+
+# ── Return flow trigger keywords ──────────────────────────────────────────────
+
+_RETURN_TRIGGERS = [
+    "নষ্ট", "ভাঙা", "ভুল পণ্য", "ফেরত", "রিটার্ন",
+    "damaged", "wrong product", "return",
+    "ফেরত দিতে চাই", "পণ্য ফেরত", "return করতে চাই",
+]
+
+
+def _is_return_trigger(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in _RETURN_TRIGGERS)
+
+
+def _get_delivered_orders_for_return(tenant_id: str, phone: str, window_days: int) -> list[dict]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+    result = (
+        supabase.table("orders")
+        .select("order_id, product_name, product_id, quantity, agreed_price, created_at, status")
+        .eq("tenant_id", tenant_id)
+        .eq("customer_phone", phone)
+        .eq("status", "delivered")
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .limit(10)
+        .execute()
+    )
+    return result.data or []
+
+
+def _order_already_returned(tenant_id: str, order_id: str) -> bool:
+    try:
+        result = (
+            supabase.table("returns")
+            .select("return_id")
+            .eq("tenant_id", tenant_id)
+            .eq("order_id", order_id)
+            .maybe_single()
+            .execute()
+        )
+        return result is not None and result.data is not None
+    except Exception:
+        return False
+
+
+def _within_return_window(order_created_at: str, window_days: int) -> bool:
+    try:
+        created = datetime.fromisoformat(order_created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created >= datetime.now(timezone.utc) - timedelta(days=window_days)
+    except Exception:
+        return True
+
+
+def _get_product_weight(tenant_id: str, product_id: str) -> str:
+    if not product_id:
+        return ""
+    try:
+        res = (
+            supabase.table("products")
+            .select("weight")
+            .eq("product_id", product_id)
+            .maybe_single()
+            .execute()
+        )
+        return (res.data or {}).get("weight") or "" if res else ""
+    except Exception:
+        return ""
+
+
+def _save_return_request(
+    tenant_id: str, order_id: str, phone: str,
+    return_type: str, items: list,
+) -> str:
+    return_id = str(uuid.uuid4())
+    short_id  = return_id.replace("-", "")[:8].upper()
+    supabase.table("returns").insert({
+        "return_id":      return_id,
+        "tenant_id":      tenant_id,
+        "order_id":       order_id,
+        "customer_phone": phone,
+        "return_type":    return_type,
+        "status":         "pending",
+        "items":          items,
+    }).execute()
+    return f"RET-{short_id}"
+
+
+def _fmt_order_date(created_at: str) -> str:
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        return dt.strftime("%d %b")
+    except Exception:
+        return created_at[:10]
+
+
+def _handle_return_flow(
+    tenant_id: str,
+    conversation_id: str,
+    message_text: str,
+    state: dict,
+    return_flow: dict,
+    ai_config: dict,
+) -> Optional[str]:
+    """
+    Return-request state machine.
+    Returns reply text, or None if this state doesn't consume the message.
+    """
+    flow_state  = return_flow.get("state", "")
+    msg         = message_text.strip()
+    msg_lower   = msg.lower()
+    window_days = int(return_flow.get("window_days") or ai_config.get("return_window_days") or 7)
+
+    # Universal cancel
+    if any(w in msg_lower for w in ["বাতিল", "cancel"]):
+        _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+        return "রিটার্ন প্রক্রিয়া বাতিল করা হয়েছে।"
+
+    # ── STEP 1: Collect phone ─────────────────────────────────────────────────
+    if flow_state == "asking_phone":
+        phone  = normalize_bd_phone(msg)
+        misses = return_flow.get("misses", 0)
+        if not phone:
+            misses += 1
+            if misses >= 3:
+                _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+                return "দুঃখিত, বৈধ ফোন নম্বর পাইনি। অন্য সাহায্য লাগলে বলুন।"
+            _set_conv_state(conversation_id, {**state, "return_flow": {**return_flow, "misses": misses}})
+            return "সঠিক বাংলাদেশি ফোন নম্বর দিন (যেমন: 01712345678)"
+        _set_conv_state(conversation_id, {**state, "return_flow": {
+            **return_flow, "state": "asking_order_known", "phone": phone, "misses": 0,
+        }})
+        return "আপনার Order ID জানা আছে? (হ্যাঁ / না)"
+
+    # ── STEP 2: Know order ID? ────────────────────────────────────────────────
+    if flow_state == "asking_order_known":
+        yes = any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "জানি", "আছে", "হ্যা"])
+        no  = any(w in msg_lower for w in ["না", "no", "নেই", "মনে নেই", "জানি না", "জানিনা"])
+        if yes:
+            _set_conv_state(conversation_id, {**state, "return_flow": {
+                **return_flow, "state": "asking_order_id", "misses": 0,
+            }})
+            return "Order ID টি দিন:"
+        if no:
+            _set_conv_state(conversation_id, {**state, "return_flow": {
+                **return_flow, "state": "asking_product_name", "misses": 0,
+            }})
+            return "ঠিক আছে। পণ্যের নাম বলুন (যেমন: মধু ৫০০ গ্রাম, সরিষার তেল):"
+        return "অনুগ্রহ করে 'হ্যাঁ' অথবা 'না' বলুন।"
+
+    # ── STEP 3a: Explicit order ID ────────────────────────────────────────────
+    if flow_state == "asking_order_id":
+        phone     = return_flow.get("phone", "")
+        misses    = return_flow.get("misses", 0)
+        order_in  = msg.strip()
+
+        res = (
+            supabase.table("orders")
+            .select("order_id,product_name,product_id,quantity,agreed_price,created_at,status,customer_phone")
+            .eq("tenant_id", tenant_id)
+            .eq("order_id", order_in)
+            .maybe_single()
+            .execute()
+        )
+        order = res.data if res and res.data else None
+
+        if not order:
+            misses += 1
+            if misses >= 3:
+                _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+                return "এই Order ID পাওয়া যায়নি। রিটার্ন প্রক্রিয়া বাতিল।"
+            _set_conv_state(conversation_id, {**state, "return_flow": {**return_flow, "misses": misses}})
+            return f"এই Order ID পাওয়া যায়নি। আবার চেষ্টা করুন। ({3 - misses}টি সুযোগ বাকি)"
+
+        if order.get("customer_phone") != phone:
+            misses += 1
+            if misses >= 3:
+                _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+                return "এই অর্ডারটি আপনার ফোন নম্বরের সাথে মিলছে না।"
+            _set_conv_state(conversation_id, {**state, "return_flow": {**return_flow, "misses": misses}})
+            return "এই অর্ডারটি আপনার ফোন নম্বরে নেই। অন্য Order ID দিন।"
+
+        if order.get("status") != "delivered":
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return "শুধুমাত্র ডেলিভারি হয়ে যাওয়া অর্ডার ফেরত দেওয়া যায়।"
+
+        if not _within_return_window(order["created_at"], window_days):
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return f"দুঃখিত, এই অর্ডারের রিটার্ন উইন্ডো ({window_days} দিন) পার হয়ে গেছে।"
+
+        if _order_already_returned(tenant_id, order["order_id"]):
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return "এই অর্ডারে আগেই রিটার্ন রিকোয়েস্ট করা হয়েছে।"
+
+        return _go_to_full_partial(conversation_id, state, return_flow, order, tenant_id)
+
+    # ── STEP 3b: Search by product name ──────────────────────────────────────
+    if flow_state == "asking_product_name":
+        phone  = return_flow.get("phone", "")
+        orders = _get_delivered_orders_for_return(tenant_id, phone, window_days)
+
+        if not orders:
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return f"গত {window_days} দিনে ডেলিভারি হওয়া কোনো অর্ডার পাওয়া যায়নি।"
+
+        # Filter by name similarity; fall back to all
+        filtered = [o for o in orders if msg_lower in o.get("product_name", "").lower()]
+        if not filtered:
+            filtered = orders
+
+        if len(filtered) == 1:
+            # Skip the list, go directly
+            order = filtered[0]
+            if _order_already_returned(tenant_id, order["order_id"]):
+                _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+                return "এই অর্ডারে আগেই রিটার্ন রিকোয়েস্ট করা হয়েছে।"
+            return _go_to_full_partial(conversation_id, state, return_flow, order, tenant_id)
+
+        lines = ["আপনার সাম্প্রতিক অর্ডারগুলো:\n"]
+        for i, o in enumerate(filtered[:5], 1):
+            lines.append(f"{i}. {o.get('product_name', 'পণ্য')} ({_fmt_order_date(o.get('created_at', ''))})")
+        lines.append("\nকোন অর্ডারটি ফেরত দিতে চান? নম্বর বলুন।")
+
+        _set_conv_state(conversation_id, {**state, "return_flow": {
+            **return_flow, "state": "showing_orders", "recent_orders": filtered[:5], "misses": 0,
+        }})
+        return "\n".join(lines)
+
+    # ── STEP 3c: Pick from list ───────────────────────────────────────────────
+    if flow_state == "showing_orders":
+        orders = return_flow.get("recent_orders", [])
+        try:
+            idx = int(msg.strip()) - 1
+            if not (0 <= idx < len(orders)):
+                raise ValueError()
+        except (ValueError, TypeError):
+            return f"১ থেকে {len(orders)} এর মধ্যে নম্বর বলুন।"
+
+        order = orders[idx]
+        if _order_already_returned(tenant_id, order["order_id"]):
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return "এই অর্ডারে আগেই রিটার্ন রিকোয়েস্ট করা হয়েছে।"
+
+        return _go_to_full_partial(conversation_id, state, return_flow, order, tenant_id)
+
+    # ── STEP 4: Full or partial ───────────────────────────────────────────────
+    if flow_state == "asking_full_partial":
+        order = return_flow.get("order", {})
+        qty   = order.get("quantity", 1)
+
+        is_full    = any(w in msg_lower for w in ["সম্পূর্ণ", "পুরো", "full", "সব", "সকল"])
+        is_partial = any(w in msg_lower for w in ["আংশিক", "কিছু", "partial", "নির্দিষ্ট"])
+
+        if is_full or qty == 1:
+            _set_conv_state(conversation_id, {**state, "return_flow": {
+                **return_flow, "state": "asking_reason", "return_type": "full", "return_quantity": qty,
+            }})
+            return "কারণ বলুন (নষ্ট / ভুল পণ্য / অন্য কারণ):"
+
+        if is_partial:
+            _set_conv_state(conversation_id, {**state, "return_flow": {
+                **return_flow, "state": "asking_partial_qty", "return_type": "partial",
+            }})
+            return f"কতটি ফেরত দিতে চান?\n(অর্ডার ছিল {qty}টি, ১ থেকে {qty - 1} এর মধ্যে)"
+
+        return "অনুগ্রহ করে 'সম্পূর্ণ' বা 'আংশিক' বলুন।"
+
+    # ── STEP 4b: Partial quantity ─────────────────────────────────────────────
+    if flow_state == "asking_partial_qty":
+        max_qty = return_flow.get("order", {}).get("quantity", 1)
+        try:
+            return_qty = int(msg.strip())
+            if not (1 <= return_qty < max_qty):
+                raise ValueError()
+        except (ValueError, TypeError):
+            return f"সঠিক সংখ্যা দিন (১ থেকে {max_qty - 1})"
+
+        _set_conv_state(conversation_id, {**state, "return_flow": {
+            **return_flow, "state": "asking_reason", "return_quantity": return_qty,
+        }})
+        return "কারণ বলুন (নষ্ট / ভুল পণ্য / অন্য কারণ):"
+
+    # ── STEP 5: Reason ────────────────────────────────────────────────────────
+    if flow_state == "asking_reason":
+        if len(msg.strip()) < 2:
+            return "অনুগ্রহ করে কারণটি বলুন।"
+
+        order        = return_flow.get("order", {})
+        return_type  = return_flow.get("return_type", "full")
+        return_qty   = return_flow.get("return_quantity", order.get("quantity", 1))
+        product_name = order.get("product_name", "পণ্য")
+        weight       = _get_product_weight(tenant_id, order.get("product_id", ""))
+        item_label   = f"{product_name}{' ' + weight if weight else ''} × {return_qty}"
+        order_id     = order.get("order_id", "")
+        type_label   = "সম্পূর্ণ" if return_type == "full" else "আংশিক"
+
+        _set_conv_state(conversation_id, {**state, "return_flow": {
+            **return_flow, "state": "confirming", "reason": msg.strip(),
+        }})
+        return (
+            f"নিশ্চিত করুন:\n"
+            f"📦 অর্ডার: #{order_id[:8]}\n"
+            f"🔄 ফেরতের ধরন: {type_label}\n"
+            f"📋 পণ্য: {item_label}\n"
+            f"📝 কারণ: {msg.strip()}\n\n"
+            f"সঠিক হলে 'হ্যাঁ' বলুন, বাতিল করতে 'না' বলুন।"
+        )
+
+    # ── STEP 6: Confirm & save ────────────────────────────────────────────────
+    if flow_state == "confirming":
+        yes = any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "ঠিক", "confirm", "হ্যা"])
+        no  = any(w in msg_lower for w in ["না", "no", "বাতিল"])
+
+        if no:
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return "রিটার্ন রিকোয়েস্ট বাতিল করা হয়েছে।"
+
+        if yes:
+            order        = return_flow.get("order", {})
+            return_type  = return_flow.get("return_type", "full")
+            return_qty   = return_flow.get("return_quantity", order.get("quantity", 1))
+            reason       = return_flow.get("reason", "")
+            phone        = return_flow.get("phone", "")
+            order_id     = order.get("order_id", "")
+            product_id   = order.get("product_id", "")
+            product_name = order.get("product_name", "পণ্য")
+            weight       = _get_product_weight(tenant_id, product_id)
+
+            try:
+                sku_res = (
+                    supabase.table("products").select("sku")
+                    .eq("product_id", product_id).maybe_single().execute()
+                )
+                sku = (sku_res.data or {}).get("sku", "") if sku_res else ""
+            except Exception:
+                sku = ""
+
+            items = [{
+                "product_id": product_id,
+                "sku":        sku,
+                "name":       product_name,
+                "weight":     weight,
+                "quantity":   return_qty,
+                "reason":     reason,
+            }]
+            try:
+                ret_label = _save_return_request(tenant_id, order_id, phone, return_type, items)
+            except Exception as exc:
+                logger.error(f"Return save failed: {exc}")
+                _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+                return "দুঃখিত, রিটার্ন সংরক্ষণ করতে সমস্যা হয়েছে। একটু পরে চেষ্টা করুন।"
+
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "return_flow"})
+            return (
+                f"✅ আপনার রিটার্ন রিকোয়েস্ট ({ret_label}) নেওয়া হয়েছে।\n"
+                f"আমরা শীঘ্রই যোগাযোগ করব।"
+            )
+
+        return "অনুগ্রহ করে 'হ্যাঁ' বা 'না' বলুন।"
+
+    return None
+
+
+def _go_to_full_partial(
+    conversation_id: str,
+    state: dict,
+    return_flow: dict,
+    order: dict,
+    tenant_id: str,
+) -> str:
+    """Build the full/partial choice prompt and update state."""
+    product_name = order.get("product_name", "পণ্য")
+    quantity     = order.get("quantity", 1)
+    weight       = _get_product_weight(tenant_id, order.get("product_id", ""))
+    item_label   = f"{product_name}{' ' + weight if weight else ''} × {quantity}"
+
+    _set_conv_state(conversation_id, {**state, "return_flow": {
+        **return_flow, "state": "asking_full_partial", "order": order, "misses": 0,
+    }})
+    return (
+        f"এই অর্ডারে ছিল:\n1. {item_label}\n\n"
+        f"পুরো অর্ডার ফেরত দিতে চান নাকি আংশিক?\n"
+        f"(সম্পূর্ণ / আংশিক)"
+    )
+
 
 # OTP flow trigger keywords
 _ORDER_TRACKING_TRIGGERS = [
@@ -416,9 +804,10 @@ async def process_message(
     from app.utils.security import decrypt_token
     plain_token = decrypt_token(access_token)
 
-    ai_config = get_ai_config(tenant_id)
-    state     = conv.get("conversation_state") or {}
-    otp_flow  = state.get("otp_flow")
+    ai_config   = get_ai_config(tenant_id)
+    state       = conv.get("conversation_state") or {}
+    otp_flow    = state.get("otp_flow")
+    return_flow = state.get("return_flow")
 
     # ── 1. OTP Flow ───────────────────────────────────────────────────────────
     if otp_flow and message_text:
@@ -428,7 +817,17 @@ async def process_message(
             send_reply(sender_id, reply, plain_token)
             return
 
-    # ── 2. Customer sent an image ─────────────────────────────────────────────
+    # ── 2. Return Flow (active) ───────────────────────────────────────────────
+    if return_flow and message_text:
+        reply = _handle_return_flow(
+            tenant_id, conversation_id, message_text, state, return_flow, ai_config
+        )
+        if reply is not None:
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
+
+    # ── 3. Customer sent an image ─────────────────────────────────────────────
     if image_urls:
         handled = await _handle_customer_image(
             tenant_id, conversation_id, sender_id, image_urls[0], plain_token
@@ -439,7 +838,7 @@ async def process_message(
     if not message_text:
         return
 
-    # ── 3. Text "দেখাও" → image search ───────────────────────────────────────
+    # ── 4. Text "দেখাও" → image search ───────────────────────────────────────
     if ai_config.get("product_image_auto_send") and img_svc.should_trigger_image_search(message_text):
         handled = await _handle_text_image_request(
             tenant_id, conversation_id, sender_id, message_text, plain_token
@@ -447,7 +846,19 @@ async def process_message(
         if handled:
             return
 
-    # ── 4. OTP order-tracking start ───────────────────────────────────────────
+    # ── 5. Return trigger (start new flow) ───────────────────────────────────
+    if message_text and _is_return_trigger(message_text) and not return_flow:
+        window_days = ai_config.get("return_window_days", 7)
+        _set_conv_state(conversation_id, {
+            **state,
+            "return_flow": {"state": "asking_phone", "window_days": window_days},
+        })
+        reply = "আপনার ফোন নম্বরটি দিন (01XXXXXXXXX)"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return
+
+    # ── 6. OTP order-tracking start ───────────────────────────────────────────
     if _should_start_tracking(message_text) and ai_config.get("sms_enabled"):
         new_state = {**state, "otp_flow": {"state": "awaiting_phone"}}
         _set_conv_state(conversation_id, new_state)
@@ -456,14 +867,14 @@ async def process_message(
         send_reply(sender_id, reply, plain_token)
         return
 
-    # ── 5. Discount context ───────────────────────────────────────────────────
+    # ── 7. Discount context ───────────────────────────────────────────────────
     discount_ctx: dict = {}
     try:
         discount_ctx = get_discount_ctx(tenant_id=tenant_id, customer_platform_id=sender_id)
     except Exception as _de:
         logger.warning(f"Discount engine error: {_de}")
 
-    # ── 6. Normal AI flow ─────────────────────────────────────────────────────
+    # ── 8. Normal AI flow ─────────────────────────────────────────────────────
     messages = get_recent_messages(conversation_id)
     summary  = conv.get("conversation_summary")
 

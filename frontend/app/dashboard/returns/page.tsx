@@ -2,67 +2,47 @@
 import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
 import { returnsAPI } from '@/lib/api'
-import { RotateCcw, Plus, X, Check, XCircle, Clock, AlertTriangle, Trash2 } from 'lucide-react'
+import {
+  RotateCcw, Check, XCircle, Clock, AlertTriangle,
+  Trash2, X, Loader2, Package, ChevronDown, ChevronUp,
+} from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+interface ReturnItem {
+  product_id?: string
+  sku?: string
+  name: string
+  weight?: string
+  quantity: number
+  reason?: string
+}
+
 interface Return {
   return_id: string
   tenant_id: string
-  product_id: string | null
-  sku: string
-  product_name: string
-  quantity: number
-  return_type: 'return' | 'damage' | 'expiry'
-  reason: string | null
   order_id: string | null
-  customer_name: string | null
-  status: 'pending' | 'processed' | 'rejected'
-  notes: string | null
+  customer_phone: string | null
+  return_type: 'full' | 'partial'
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  items: ReturnItem[]
+  owner_note: string | null
   created_at: string
-  processed_at: string | null
+  updated_at: string
 }
 
-type ReturnType = 'all' | 'return' | 'damage' | 'expiry'
+type StatusTab = 'pending' | 'approved' | 'rejected'
 
-type ReturnForm = {
-  sku: string
-  product_name: string
-  quantity: string
-  return_type: 'return' | 'damage' | 'expiry'
-  reason: string
-  order_id: string
-  customer_name: string
-  notes: string
-}
+interface Counts { pending: number; approved: number; rejected: number; cancelled: number }
 
-const EMPTY_FORM: ReturnForm = {
-  sku: '', product_name: '', quantity: '1',
-  return_type: 'return', reason: '', order_id: '',
-  customer_name: '', notes: '',
-}
-
-// ─── Badge helpers ─────────────────────────────────────────────────────────
-function TypeBadge({ type }: { type: Return['return_type'] }) {
-  const map = {
-    return: { label: 'রিটার্ন',   bg: '#E3F2FD', color: '#1565C0' },
-    damage: { label: 'ক্ষতিগ্রস্ত', bg: '#FFF3E0', color: '#E65100' },
-    expiry: { label: 'মেয়াদ শেষ',  bg: '#FFEBEE', color: '#C62828' },
-  }
-  const { label, bg, color } = map[type]
-  return (
-    <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: bg, color }}>
-      {label}
-    </span>
-  )
-}
-
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: Return['status'] }) {
   const map = {
-    pending:   { label: 'অপেক্ষায়',   bg: '#FFF8E1', color: '#F57F17', Icon: Clock },
-    processed: { label: 'সম্পন্ন',    bg: '#E8F5E9', color: '#2E7D32', Icon: Check },
-    rejected:  { label: 'প্রত্যাখ্যাত', bg: '#FFEBEE', color: '#C62828', Icon: XCircle },
+    pending:   { label: 'অপেক্ষায়',      bg: '#FFF8E1', color: '#F57F17', Icon: Clock },
+    approved:  { label: 'অনুমোদিত',      bg: '#E8F5E9', color: '#2E7D32', Icon: Check },
+    rejected:  { label: 'প্রত্যাখ্যাত',   bg: '#FFEBEE', color: '#C62828', Icon: XCircle },
+    cancelled: { label: 'বাতিল',          bg: '#ECEFF1', color: '#546E7A', Icon: X },
   }
-  const { label, bg, color, Icon } = map[status]
+  const { label, bg, color, Icon } = map[status] ?? map.pending
   return (
     <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium"
           style={{ backgroundColor: bg, color }}>
@@ -71,21 +51,54 @@ function StatusBadge({ status }: { status: Return['status'] }) {
   )
 }
 
+function TypeBadge({ type }: { type: Return['return_type'] }) {
+  return type === 'full'
+    ? <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: '#E3F2FD', color: '#1565C0' }}>সম্পূর্ণ</span>
+    : <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: '#FFF3E0', color: '#E65100' }}>আংশিক</span>
+}
+
+function ItemsList({ items }: { items: ReturnItem[] }) {
+  if (!items?.length) return <span className="text-xs" style={{ color: 'var(--c-muted)' }}>—</span>
+  return (
+    <div className="space-y-0.5">
+      {items.map((item, i) => (
+        <div key={i} className="text-xs" style={{ color: 'var(--c-text)' }}>
+          <span className="font-medium">{item.name}</span>
+          {item.weight && <span style={{ color: 'var(--c-muted)' }}> {item.weight}</span>}
+          <span style={{ color: 'var(--c-muted)' }}> × {item.quantity}</span>
+          {item.reason && (
+            <span className="ml-1.5 italic" style={{ color: 'var(--c-muted)' }}>— {item.reason}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function ReturnsPage() {
-  const [returns, setReturns]     = useState<Return[]>([])
-  const [loading, setLoading]     = useState(true)
-  const [typeFilter, setTypeFilter] = useState<ReturnType>('all')
-  const [showModal, setShowModal] = useState(false)
-  const [form, setForm]           = useState<ReturnForm>(EMPTY_FORM)
-  const [saving, setSaving]       = useState(false)
+  const [returns,    setReturns]    = useState<Return[]>([])
+  const [counts,     setCounts]     = useState<Counts>({ pending: 0, approved: 0, rejected: 0, cancelled: 0 })
+  const [loading,    setLoading]    = useState(true)
+  const [tab,        setTab]        = useState<StatusTab>('pending')
   const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  async function load() {
+  // Reject modal
+  const [rejectTarget, setRejectTarget] = useState<string | null>(null)
+  const [rejectNote,   setRejectNote]   = useState('')
+  const [rejecting,    setRejecting]    = useState(false)
+
+  async function load(status: StatusTab) {
+    setLoading(true)
     try {
-      const data = await returnsAPI.list()
+      const [data, cnts] = await Promise.all([
+        returnsAPI.list(status),
+        returnsAPI.counts(),
+      ])
       setReturns(data)
+      setCounts(cnts)
     } catch {
       toast.error('Returns লোড করা যায়নি')
     } finally {
@@ -93,66 +106,48 @@ export default function ReturnsPage() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load(tab) }, [tab]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const filtered = typeFilter === 'all'
-    ? returns
-    : returns.filter(r => r.return_type === typeFilter)
-
-  async function handleCreate() {
-    if (!form.sku.trim() || !form.product_name.trim()) {
-      toast.error('SKU ও পণ্যের নাম আবশ্যক')
-      return
-    }
-    const qty = parseInt(form.quantity)
-    if (!qty || qty < 1) {
-      toast.error('সঠিক পরিমাণ লিখুন')
-      return
-    }
-    setSaving(true)
-    try {
-      const payload = {
-        sku:          form.sku.trim(),
-        product_name: form.product_name.trim(),
-        quantity:     qty,
-        return_type:  form.return_type,
-        reason:       form.reason || undefined,
-        order_id:     form.order_id || undefined,
-        customer_name: form.customer_name || undefined,
-        notes:        form.notes || undefined,
-      }
-      const created = await returnsAPI.create(payload)
-      setReturns(rs => [created, ...rs])
-      toast.success('Return তৈরি হয়েছে!')
-      setShowModal(false)
-      setForm(EMPTY_FORM)
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      toast.error(msg || 'সমস্যা হয়েছে')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function updateStatus(id: string, status: 'processed' | 'rejected') {
+  async function handleApprove(id: string) {
     setUpdatingId(id)
     try {
-      const updated = await returnsAPI.update(id, { status })
-      setReturns(rs => rs.map(r => r.return_id === id ? updated : r))
-      toast.success(status === 'processed' ? 'Return সম্পন্ন করা হয়েছে' : 'Return প্রত্যাখ্যান করা হয়েছে')
-    } catch {
-      toast.error('আপডেট ব্যর্থ')
+      const updated: Return = await returnsAPI.approve(id)
+      setReturns(rs => rs.filter(r => r.return_id !== id))
+      setCounts(c => ({ ...c, pending: Math.max(0, c.pending - 1), approved: c.approved + 1 }))
+      toast.success('রিটার্ন অনুমোদিত হয়েছে — স্টক পুনরুদ্ধার হয়েছে')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg || 'অনুমোদন ব্যর্থ হয়েছে')
     } finally {
       setUpdatingId(null)
     }
   }
 
+  async function handleReject() {
+    if (!rejectTarget) return
+    setRejecting(true)
+    try {
+      await returnsAPI.reject(rejectTarget, rejectNote || undefined)
+      setReturns(rs => rs.filter(r => r.return_id !== rejectTarget))
+      setCounts(c => ({ ...c, pending: Math.max(0, c.pending - 1), rejected: c.rejected + 1 }))
+      toast.success('রিটার্ন প্রত্যাখ্যান করা হয়েছে')
+      setRejectTarget(null)
+      setRejectNote('')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg || 'প্রত্যাখ্যান ব্যর্থ')
+    } finally {
+      setRejecting(false)
+    }
+  }
+
   async function handleDelete(id: string) {
-    if (!confirm('এই return মুছে ফেলবেন?')) return
+    if (!confirm('এই রিটার্ন রেকর্ড মুছে ফেলবেন?')) return
     setDeletingId(id)
     try {
       await returnsAPI.delete(id)
       setReturns(rs => rs.filter(r => r.return_id !== id))
+      setCounts(c => ({ ...c, [tab]: Math.max(0, c[tab] - 1) }))
       toast.success('মুছে ফেলা হয়েছে')
     } catch {
       toast.error('মুছতে পারা যায়নি')
@@ -161,11 +156,10 @@ export default function ReturnsPage() {
     }
   }
 
-  const TABS: { key: ReturnType; label: string }[] = [
-    { key: 'all',    label: 'সব' },
-    { key: 'return', label: 'রিটার্ন' },
-    { key: 'damage', label: 'ক্ষতিগ্রস্ত' },
-    { key: 'expiry', label: 'মেয়াদ শেষ' },
+  const TABS: { key: StatusTab; label: string }[] = [
+    { key: 'pending',  label: 'অপেক্ষায়' },
+    { key: 'approved', label: 'অনুমোদিত' },
+    { key: 'rejected', label: 'প্রত্যাখ্যাত' },
   ]
 
   return (
@@ -176,30 +170,43 @@ export default function ReturnsPage() {
         <div>
           <h1 className="page-title flex items-center gap-2">
             <RotateCcw size={22} style={{ color: '#04AA6D' }} />
-            Returns & Damage
+            Return Management
+            {counts.pending > 0 && (
+              <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+                    style={{ backgroundColor: '#FFEBEE', color: '#C62828' }}>
+                {counts.pending} নতুন
+              </span>
+            )}
           </h1>
-          <p className="page-subtitle">রিটার্ন, ক্ষতিগ্রস্ত ও মেয়াদ শেষ পণ্য ব্যবস্থাপনা</p>
+          <p className="page-subtitle">বট-এর মাধ্যমে গ্রাহকের রিটার্ন রিকোয়েস্ট পরিচালনা করুন</p>
         </div>
-        <button onClick={() => { setForm(EMPTY_FORM); setShowModal(true) }} className="btn-primary gap-2">
-          <Plus size={15} /> নতুন Return
-        </button>
       </div>
 
-      {/* Type filter tabs */}
+      {/* Status tabs */}
       <div className="flex gap-1 p-1 rounded-lg w-fit" style={{ backgroundColor: 'var(--c-surface)' }}>
         {TABS.map(t => (
           <button
             key={t.key}
-            onClick={() => setTypeFilter(t.key)}
-            className="px-4 py-2 rounded text-xs font-medium transition-all"
-            style={typeFilter === t.key
+            onClick={() => setTab(t.key)}
+            className="px-4 py-2 rounded text-xs font-medium transition-all flex items-center gap-1.5"
+            style={tab === t.key
               ? { backgroundColor: 'var(--c-card)', color: '#04AA6D', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }
               : { color: 'var(--c-muted)' }}
           >
             {t.label}
-            <span className="ml-1.5 text-xs opacity-70">
-              ({t.key === 'all' ? returns.length : returns.filter(r => r.return_type === t.key).length})
-            </span>
+            {counts[t.key] > 0 && (
+              <span className="text-xs px-1.5 py-0.5 rounded-full font-semibold min-w-[20px] text-center"
+                    style={{
+                      backgroundColor: tab === t.key
+                        ? (t.key === 'pending' ? '#FFEBEE' : t.key === 'approved' ? '#E8F5E9' : '#FFEBEE')
+                        : 'var(--c-border)',
+                      color: tab === t.key
+                        ? (t.key === 'pending' ? '#C62828' : t.key === 'approved' ? '#2E7D32' : '#C62828')
+                        : 'var(--c-muted)',
+                    }}>
+                {counts[t.key]}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -207,204 +214,210 @@ export default function ReturnsPage() {
       {/* Table */}
       {loading ? (
         <div className="flex justify-center py-20"><div className="spinner h-8 w-8" /></div>
-      ) : filtered.length === 0 ? (
+      ) : returns.length === 0 ? (
         <div className="card p-12 text-center">
-          <AlertTriangle size={40} className="mx-auto mb-3" style={{ color: 'var(--c-border)' }} />
-          <p className="text-sm font-medium" style={{ color: 'var(--c-text)' }}>কোনো রেকর্ড নেই</p>
-          <p className="text-xs mt-1 mb-4" style={{ color: 'var(--c-muted)' }}>নতুন return / damage তৈরি করুন</p>
-          <button onClick={() => { setForm(EMPTY_FORM); setShowModal(true) }} className="btn-primary gap-2 mx-auto">
-            <Plus size={14} /> নতুন Return
-          </button>
+          <Package size={40} className="mx-auto mb-3" style={{ color: 'var(--c-border)' }} />
+          <p className="text-sm font-medium" style={{ color: 'var(--c-text)' }}>কোনো রিটার্ন রিকোয়েস্ট নেই</p>
+          <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>
+            গ্রাহক বট-এ "ফেরত" বললে এখানে রিকোয়েস্ট আসবে
+          </p>
         </div>
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead style={{ borderBottom: '1px solid var(--c-border)' }}>
               <tr>
-                <th className="th text-left">SKU</th>
-                <th className="th text-left">পণ্য</th>
-                <th className="th text-center">পরিমাণ</th>
+                <th className="th text-left" style={{ width: 28 }}></th>
+                <th className="th text-left">Return ID</th>
+                <th className="th text-left">Order</th>
+                <th className="th text-left">গ্রাহকের ফোন</th>
+                <th className="th text-left">পণ্যসমূহ</th>
                 <th className="th text-center">ধরন</th>
-                <th className="th text-left">কারণ</th>
-                <th className="th text-left">Customer</th>
-                <th className="th text-center">Status</th>
+                <th className="th text-center">অবস্থা</th>
                 <th className="th text-right">তারিখ</th>
                 <th className="th text-right">Action</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((r, i) => (
-                <tr key={r.return_id} style={{ borderTop: i > 0 ? '1px solid var(--c-border)' : 'none' }}>
-                  <td className="td font-mono text-xs" style={{ color: 'var(--c-muted)' }}>{r.sku}</td>
-                  <td className="td">
-                    <p className="font-medium text-xs" style={{ color: 'var(--c-text)' }}>{r.product_name}</p>
-                    {r.order_id && (
-                      <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>Order: {r.order_id}</p>
-                    )}
-                  </td>
-                  <td className="td text-center font-semibold">{r.quantity}</td>
-                  <td className="td text-center"><TypeBadge type={r.return_type} /></td>
-                  <td className="td text-xs max-w-[140px] truncate" style={{ color: 'var(--c-muted)' }}>
-                    {r.reason || '—'}
-                  </td>
-                  <td className="td text-xs" style={{ color: 'var(--c-muted)' }}>{r.customer_name || '—'}</td>
-                  <td className="td text-center"><StatusBadge status={r.status} /></td>
-                  <td className="td text-right text-xs" style={{ color: 'var(--c-muted)' }}>
-                    {new Date(r.created_at).toLocaleDateString('bn-BD')}
-                  </td>
-                  <td className="td">
-                    <div className="flex items-center justify-end gap-1">
-                      {r.status === 'pending' && (
-                        <>
-                          <button
-                            onClick={() => updateStatus(r.return_id, 'processed')}
-                            disabled={updatingId === r.return_id}
-                            className="text-xs px-2 py-1 rounded border transition-colors"
-                            style={{ backgroundColor: '#E8F5E9', color: '#2E7D32', borderColor: '#A5D6A7' }}
-                            title="সম্পন্ন করুন"
-                          >
-                            {updatingId === r.return_id ? <span className="spinner h-3 w-3" /> : <Check size={11} />}
-                          </button>
-                          <button
-                            onClick={() => updateStatus(r.return_id, 'rejected')}
-                            disabled={updatingId === r.return_id}
-                            className="text-xs px-2 py-1 rounded border transition-colors"
-                            style={{ backgroundColor: '#FFEBEE', color: '#C62828', borderColor: '#EF9A9A' }}
-                            title="প্রত্যাখ্যান করুন"
-                          >
-                            <XCircle size={11} />
-                          </button>
-                        </>
-                      )}
+              {returns.map((r, i) => (
+                <>
+                  <tr
+                    key={r.return_id}
+                    style={{
+                      borderTop: i > 0 ? '1px solid var(--c-border)' : 'none',
+                      backgroundColor: r.status === 'pending' ? 'rgba(245,127,23,0.02)' : 'transparent',
+                    }}
+                  >
+                    {/* Expand toggle */}
+                    <td className="td pl-3 pr-1">
                       <button
-                        onClick={() => handleDelete(r.return_id)}
-                        disabled={deletingId === r.return_id}
-                        className="p-1.5 rounded hover:bg-red-50 transition-colors"
-                        style={{ color: '#EF5350' }}
+                        onClick={() => setExpandedId(expandedId === r.return_id ? null : r.return_id)}
+                        className="p-0.5 rounded transition-colors"
+                        style={{ color: 'var(--c-muted)' }}
                       >
-                        {deletingId === r.return_id
-                          ? <span className="spinner h-3.5 w-3.5" />
-                          : <Trash2 size={13} />}
+                        {expandedId === r.return_id
+                          ? <ChevronUp size={13} />
+                          : <ChevronDown size={13} />}
                       </button>
-                    </div>
-                  </td>
-                </tr>
+                    </td>
+
+                    <td className="td">
+                      <code className="text-xs font-mono" style={{ color: 'var(--c-text)' }}>
+                        {r.return_id.slice(0, 8).toUpperCase()}
+                      </code>
+                    </td>
+
+                    <td className="td">
+                      {r.order_id
+                        ? <code className="text-xs font-mono" style={{ color: 'var(--c-muted)' }}>
+                            {r.order_id.slice(0, 8)}…
+                          </code>
+                        : <span style={{ color: 'var(--c-muted)' }}>—</span>
+                      }
+                    </td>
+
+                    <td className="td text-xs" style={{ color: 'var(--c-text)' }}>
+                      {r.customer_phone || '—'}
+                    </td>
+
+                    <td className="td max-w-[220px]">
+                      <ItemsList items={r.items} />
+                    </td>
+
+                    <td className="td text-center"><TypeBadge type={r.return_type} /></td>
+                    <td className="td text-center"><StatusBadge status={r.status} /></td>
+
+                    <td className="td text-right text-xs" style={{ color: 'var(--c-muted)' }}>
+                      {new Date(r.created_at).toLocaleDateString('bn-BD')}
+                    </td>
+
+                    <td className="td">
+                      <div className="flex items-center justify-end gap-1">
+                        {r.status === 'pending' && (
+                          <>
+                            <button
+                              onClick={() => handleApprove(r.return_id)}
+                              disabled={updatingId === r.return_id}
+                              className="flex items-center gap-1 text-xs px-2 py-1 rounded border font-medium transition-colors"
+                              style={{ backgroundColor: '#E8F5E9', color: '#2E7D32', borderColor: '#A5D6A7' }}
+                              title="অনুমোদন করুন"
+                            >
+                              {updatingId === r.return_id
+                                ? <Loader2 size={11} className="animate-spin" />
+                                : <Check size={11} />}
+                              অনুমোদন
+                            </button>
+                            <button
+                              onClick={() => { setRejectTarget(r.return_id); setRejectNote('') }}
+                              disabled={updatingId === r.return_id}
+                              className="flex items-center gap-1 text-xs px-2 py-1 rounded border font-medium transition-colors"
+                              style={{ backgroundColor: '#FFEBEE', color: '#C62828', borderColor: '#EF9A9A' }}
+                              title="প্রত্যাখ্যান করুন"
+                            >
+                              <XCircle size={11} /> প্রত্যাখ্যান
+                            </button>
+                          </>
+                        )}
+                        <button
+                          onClick={() => handleDelete(r.return_id)}
+                          disabled={deletingId === r.return_id}
+                          className="p-1.5 rounded hover:bg-red-50 transition-colors"
+                          style={{ color: '#EF5350' }}
+                        >
+                          {deletingId === r.return_id
+                            ? <Loader2 size={13} className="animate-spin" />
+                            : <Trash2 size={13} />}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+
+                  {/* Expanded detail row */}
+                  {expandedId === r.return_id && (
+                    <tr key={`${r.return_id}-detail`} style={{ borderTop: '1px solid var(--c-border-subtle)' }}>
+                      <td colSpan={9} className="px-6 py-3"
+                          style={{ backgroundColor: 'var(--c-surface)' }}>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
+                          <div>
+                            <p className="font-semibold mb-1" style={{ color: 'var(--c-muted)' }}>পূর্ণ Order ID</p>
+                            <code style={{ color: 'var(--c-text)' }}>{r.order_id || '—'}</code>
+                          </div>
+                          <div>
+                            <p className="font-semibold mb-1" style={{ color: 'var(--c-muted)' }}>ফেরতের ধরন</p>
+                            <p style={{ color: 'var(--c-text)' }}>{r.return_type === 'full' ? 'সম্পূর্ণ ফেরত' : 'আংশিক ফেরত'}</p>
+                          </div>
+                          <div>
+                            <p className="font-semibold mb-1" style={{ color: 'var(--c-muted)' }}>কারণ</p>
+                            <p style={{ color: 'var(--c-text)' }}>{r.items?.[0]?.reason || '—'}</p>
+                          </div>
+                          {r.owner_note && (
+                            <div className="col-span-2 md:col-span-3">
+                              <p className="font-semibold mb-1" style={{ color: 'var(--c-muted)' }}>মালিকের নোট</p>
+                              <p style={{ color: 'var(--c-text)' }}>{r.owner_note}</p>
+                            </div>
+                          )}
+                          <div>
+                            <p className="font-semibold mb-1" style={{ color: 'var(--c-muted)' }}>তৈরির সময়</p>
+                            <p style={{ color: 'var(--c-text)' }}>{new Date(r.created_at).toLocaleString('bn-BD')}</p>
+                          </div>
+                          <div>
+                            <p className="font-semibold mb-1" style={{ color: 'var(--c-muted)' }}>শেষ আপডেট</p>
+                            <p style={{ color: 'var(--c-text)' }}>{new Date(r.updated_at).toLocaleString('bn-BD')}</p>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
               ))}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/40" onClick={() => setShowModal(false)} />
-          <div className="relative w-full max-w-md rounded-xl shadow-2xl overflow-hidden"
-               style={{ backgroundColor: 'var(--c-card)' }}>
-            <div className="flex items-center justify-between px-5 py-4"
-                 style={{ backgroundColor: '#282A35' }}>
-              <h2 className="font-semibold text-white text-sm">নতুন Return / Damage</h2>
-              <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-white">
-                <X size={18} />
-              </button>
+      {/* ── MODAL: Reject with note ──────────────────────────────────────────── */}
+      {rejectTarget && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl">
+            <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+              <h2 className="text-base font-bold text-slate-900">রিটার্ন প্রত্যাখ্যান করুন</h2>
+              <button onClick={() => setRejectTarget(null)} className="btn-ghost p-1.5"><X size={16} /></button>
             </div>
-
-            <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>SKU *</label>
-                  <input
-                    className="input"
-                    placeholder="পণ্যের SKU"
-                    value={form.sku}
-                    onChange={e => setForm(f => ({ ...f, sku: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>পরিমাণ *</label>
-                  <input
-                    type="number" min="1" className="input"
-                    value={form.quantity}
-                    onChange={e => setForm(f => ({ ...f, quantity: e.target.value }))}
-                  />
-                </div>
-              </div>
-
+            <div className="p-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>পণ্যের নাম *</label>
-                <input
-                  className="input"
-                  placeholder="পণ্যের নাম"
-                  value={form.product_name}
-                  onChange={e => setForm(f => ({ ...f, product_name: e.target.value }))}
+                <label className="text-sm font-medium text-slate-700 mb-1.5 block">
+                  প্রত্যাখ্যানের কারণ <span className="text-slate-400 font-normal">(ঐচ্ছিক)</span>
+                </label>
+                <textarea
+                  className="input h-20 resize-none text-sm"
+                  placeholder="গ্রাহককে জানানোর জন্য কারণ লিখুন..."
+                  value={rejectNote}
+                  onChange={e => setRejectNote(e.target.value)}
                 />
               </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>ধরন *</label>
-                <select
-                  className="input"
-                  value={form.return_type}
-                  onChange={e => setForm(f => ({ ...f, return_type: e.target.value as ReturnForm['return_type'] }))}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setRejectTarget(null)}
+                  className="btn-secondary flex-1"
                 >
-                  <option value="return">রিটার্ন (ফিরিয়ে দেওয়া)</option>
-                  <option value="damage">ক্ষতিগ্রস্ত</option>
-                  <option value="expiry">মেয়াদ শেষ</option>
-                </select>
+                  বাতিল
+                </button>
+                <button
+                  onClick={handleReject}
+                  disabled={rejecting}
+                  className="flex-1 flex items-center justify-center gap-2 text-sm font-medium py-2.5 px-4 rounded-xl transition-colors"
+                  style={{ backgroundColor: '#FFEBEE', color: '#C62828' }}
+                >
+                  {rejecting
+                    ? <><Loader2 size={14} className="animate-spin" /> প্রক্রিয়া...</>
+                    : <><XCircle size={14} /> প্রত্যাখ্যান নিশ্চিত করুন</>}
+                </button>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>কারণ</label>
-                <textarea
-                  className="input h-16 resize-none"
-                  placeholder="Return-এর কারণ..."
-                  value={form.reason}
-                  onChange={e => setForm(f => ({ ...f, reason: e.target.value }))}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>Order ID</label>
-                  <input
-                    className="input"
-                    placeholder="ঐচ্ছিক"
-                    value={form.order_id}
-                    onChange={e => setForm(f => ({ ...f, order_id: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>Customer নাম</label>
-                  <input
-                    className="input"
-                    placeholder="ঐচ্ছিক"
-                    value={form.customer_name}
-                    onChange={e => setForm(f => ({ ...f, customer_name: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--c-text)' }}>নোট</label>
-                <textarea
-                  className="input h-14 resize-none"
-                  placeholder="অতিরিক্ত নোট..."
-                  value={form.notes}
-                  onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
-                />
-              </div>
-            </div>
-
-            <div className="px-5 py-4 flex justify-end gap-3"
-                 style={{ borderTop: '1px solid var(--c-border)' }}>
-              <button onClick={() => setShowModal(false)} className="btn-secondary">বাতিল</button>
-              <button onClick={handleCreate} disabled={saving} className="btn-primary gap-2">
-                {saving ? <><span className="spinner h-4 w-4" /> তৈরি হচ্ছে...</> : 'তৈরি করুন'}
-              </button>
             </div>
           </div>
         </div>
       )}
+
     </div>
   )
 }

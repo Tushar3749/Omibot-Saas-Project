@@ -49,7 +49,7 @@ _SKIP_COLS: set[str] = {
 }
 
 _KNOWN_COLS: set[str] = {
-    "sku", "name", "mrp", "category", "image_url",
+    "sku", "name", "mrp", "weight", "category", "image_url",
 }
 
 _REQUIRED_COLS: dict[str, list[str]] = {
@@ -146,6 +146,7 @@ async def create_product(
         "sku":          body.sku,
         "name":         body.name,
         "mrp":          body.mrp,
+        "weight":       body.weight,
         "category":     body.category,
         "image_url":    body.image_url,
         "extra_fields": body.extra_fields or {},
@@ -266,9 +267,9 @@ async def download_template(
     custom_cols = custom_cols_res.data or []
 
     if template_type == "products":
-        headers = ["sku", "name", "mrp", "category", "image_url"]
+        headers = ["sku", "name", "mrp", "category", "weight", "image_url"]
         headers += [c["column_name"] for c in custom_cols]
-        example  = ["SKU001", "Sample Product", "500", "Electronics", "https://example.com/image.jpg"]
+        example  = ["SKU001", "Sample Product", "500", "Electronics", "500 গ্রাম", "https://example.com/image.jpg"]
         example += ["" for _ in custom_cols]
         instructions = [
             "# PRODUCT IMPORT TEMPLATE | পণ্য আমদানি টেমপ্লেট",
@@ -277,6 +278,7 @@ async def download_template(
             "# name: পণ্যের নাম | Product name",
             "# mrp: সর্বোচ্চ খুচরা মূল্য | Maximum retail price (must be > 0)",
             "# category: পণ্য বিভাগ (ঐচ্ছিক) | Product category (optional)",
+            "# weight: পরিমাণ/ওজন যেমন '500 গ্রাম', '১ কেজি' (ঐচ্ছিক) | Weight/volume (optional)",
             "# image_url: পণ্যের ছবির লিঙ্ক (ঐচ্ছিক) | Product image URL (optional)",
             "# Stock is managed separately from /dashboard/stock",
             "# If SKU already exists, the row will UPDATE that product | SKU থাকলে পণ্য আপডেট হবে",
@@ -440,6 +442,8 @@ async def import_csv(
 
             if "category" in headers and row.get("category"):
                 product_data["category"] = row["category"]
+            if "weight" in headers and row.get("weight"):
+                product_data["weight"] = row["weight"]
             if "image_url" in headers and row.get("image_url"):
                 product_data["image_url"] = row["image_url"]
 

@@ -341,10 +341,12 @@ export const stockAPI = {
 
 // ── Returns ───────────────────────────────────────────────────────────────────
 export const returnsAPI = {
-  list:   () => api.get('/api/returns/').then(r => r.data),
-  create: (data: Record<string, unknown>) => api.post('/api/returns/', data).then(r => r.data),
-  update: (id: string, data: Record<string, unknown>) => api.patch(`/api/returns/${id}`, data).then(r => r.data),
-  delete: (id: string) => api.delete(`/api/returns/${id}`).then(r => r.data),
+  list:    (status?: string) => api.get('/api/returns/', { params: status ? { status } : {} }).then(r => r.data),
+  counts:  ()                => api.get('/api/returns/counts').then(r => r.data),
+  approve: (id: string)      => api.patch(`/api/returns/${id}/approve`).then(r => r.data),
+  reject:  (id: string, owner_note?: string) =>
+    api.patch(`/api/returns/${id}/reject`, { owner_note: owner_note ?? null }).then(r => r.data),
+  delete:  (id: string)      => api.delete(`/api/returns/${id}`).then(r => r.data),
 }
 
 // ── Complaints ────────────────────────────────────────────────────────────────
