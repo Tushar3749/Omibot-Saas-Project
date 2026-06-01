@@ -49,7 +49,7 @@ _SKIP_COLS: set[str] = {
 }
 
 _KNOWN_COLS: set[str] = {
-    "sku", "name", "mrp", "stock", "category", "image_url",
+    "sku", "name", "mrp", "category", "image_url",
 }
 
 _REQUIRED_COLS: dict[str, list[str]] = {
@@ -266,9 +266,9 @@ async def download_template(
     custom_cols = custom_cols_res.data or []
 
     if template_type == "products":
-        headers = ["sku", "name", "mrp", "stock", "category", "image_url"]
+        headers = ["sku", "name", "mrp", "category", "image_url"]
         headers += [c["column_name"] for c in custom_cols]
-        example  = ["SKU001", "Sample Product", "500", "10", "Electronics", "https://example.com/image.jpg"]
+        example  = ["SKU001", "Sample Product", "500", "Electronics", "https://example.com/image.jpg"]
         example += ["" for _ in custom_cols]
         instructions = [
             "# PRODUCT IMPORT TEMPLATE | পণ্য আমদানি টেমপ্লেট",
@@ -276,9 +276,9 @@ async def download_template(
             "# sku: পণ্যের অনন্য কোড | Unique product code",
             "# name: পণ্যের নাম | Product name",
             "# mrp: সর্বোচ্চ খুচরা মূল্য | Maximum retail price (must be > 0)",
-            "# stock: প্রারম্ভিক মজুদ (ঐচ্ছিক) | Initial stock quantity (optional)",
             "# category: পণ্য বিভাগ (ঐচ্ছিক) | Product category (optional)",
             "# image_url: পণ্যের ছবির লিঙ্ক (ঐচ্ছিক) | Product image URL (optional)",
+            "# Stock is managed separately from /dashboard/stock",
             "# If SKU already exists, the row will UPDATE that product | SKU থাকলে পণ্য আপডেট হবে",
             "#",
         ]
@@ -453,29 +453,16 @@ async def import_csv(
             if extra_fields:
                 product_data["extra_fields"] = extra_fields
 
-            # Parse stock value for the stock table
-            stock_for_row: Optional[int] = None
-            if "stock" in headers and row.get("stock"):
-                try:
-                    stock_for_row = int(float(row["stock"]))
-                except ValueError:
-                    warnings.append({"row": row_num, "message": f"Invalid stock '{row['stock']}' — skipping stock"})
-
             if exists_id:
                 update_payload = {k: v for k, v in product_data.items() if k != "sku"}
                 supabase.table("products").update(update_payload) \
                     .eq("tenant_id", tid).eq("product_id", exists_id).execute()
-                pid = exists_id
             else:
                 pid = str(uuid.uuid4())
                 product_data["product_id"] = pid
                 product_data["tenant_id"]  = tid
                 supabase.table("products").insert(product_data).execute()
                 existing_map[sku] = pid
-
-            # Upsert stock row if stock value provided
-            if stock_for_row is not None:
-                _upsert_stock(tid, pid, stock_for_row)
 
             imported += 1
 

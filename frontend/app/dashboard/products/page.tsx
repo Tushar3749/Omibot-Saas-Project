@@ -38,7 +38,7 @@ export default function ProductsPage() {
   const [editing, setEditing] = useState<Product | null>(null)
   const [saving,  setSaving]  = useState(false)
   const [form, setForm] = useState({
-    sku: '', name: '', mrp: '', category: '', image_url: '', initial_stock: '',
+    sku: '', name: '', mrp: '', category: '', image_url: '',
   })
   const [uploadingImg, setUploadingImg] = useState(false)
   const imgInputRef = useRef<HTMLInputElement>(null)
@@ -85,7 +85,7 @@ export default function ProductsPage() {
 
   function openCreate() {
     setEditing(null)
-    setForm({ sku: '', name: '', mrp: '', category: '', image_url: '', initial_stock: '' })
+    setForm({ sku: '', name: '', mrp: '', category: '', image_url: '' })
     setExtraFieldForm({})
     setShowForm(true)
   }
@@ -98,7 +98,6 @@ export default function ProductsPage() {
       mrp:           String(p.mrp),
       category:      p.category   ?? '',
       image_url:     p.image_url  ?? '',
-      initial_stock: '',
     })
     const extra: Record<string, string> = {}
     for (const col of customColumns) {
@@ -127,9 +126,6 @@ export default function ProductsPage() {
         mrp:      parseFloat(form.mrp),
         category: form.category || null,
         image_url: form.image_url || null,
-      }
-      if (!editing && form.initial_stock) {
-        data.initial_stock = parseInt(form.initial_stock)
       }
       if (Object.keys(extra).length > 0) data.extra_fields = extra
 
@@ -501,20 +497,6 @@ export default function ProductsPage() {
                   />
                 </div>
               </div>
-
-              {/* Initial stock (create only) */}
-              {!editing && (
-                <div>
-                  <label className="text-sm font-medium text-slate-700 mb-1.5 block">প্রারম্ভিক Stock</label>
-                  <input
-                    type="number" min="0" className="input"
-                    placeholder="0"
-                    value={form.initial_stock}
-                    onChange={e => setForm(f => ({ ...f, initial_stock: e.target.value }))}
-                  />
-                  <p className="text-xs mt-1 text-slate-400">Stock পরে /stock পেজ থেকে ম্যানেজ করুন</p>
-                </div>
-              )}
 
               {/* Image upload */}
               <div>

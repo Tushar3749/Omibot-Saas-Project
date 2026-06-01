@@ -21,12 +21,11 @@ const GUIDES: Record<CsvGuideType, { title: string; note?: string; columns: Colu
     title: 'পণ্য আমদানি — Products Import',
     note: 'বিদ্যমান SKU → আপডেট হবে। নতুন SKU → নতুন পণ্য তৈরি হবে।',
     columns: [
-      { name_en: 'sku',       name_bn: 'SKU',             required: true,  description: 'পণ্যের অনন্য পরিচয় কোড। একবার সেট করলে পরিবর্তন করবেন না।', example: 'SHIRT-001' },
-      { name_en: 'name',      name_bn: 'পণ্যের নাম',      required: true,  description: 'পণ্যের সম্পূর্ণ নাম',                                           example: 'কটন শার্ট সাদা' },
-      { name_en: 'mrp',       name_bn: 'সর্বোচ্চ মূল্য',  required: true,  description: 'সর্বোচ্চ খুচরা মূল্য — টাকায় সংখ্যা',                         example: '500' },
-      { name_en: 'stock',     name_bn: 'প্রারম্ভিক স্টক', required: false, description: 'প্রারম্ভিক মজুদ সংখ্যা (stock table-এ সংরক্ষিত)',               example: '100' },
-      { name_en: 'category',  name_bn: 'ক্যাটাগরি',       required: false, description: 'পণ্যের শ্রেণী বা গ্রুপ',                                        example: 'পোশাক' },
-      { name_en: 'image_url', name_bn: 'ছবির লিংক',       required: false, description: 'পণ্যের ছবির সম্পূর্ণ URL (https://...)',                         example: 'https://example.com/img.jpg' },
+      { name_en: 'sku',       name_bn: 'SKU',            required: true,  description: 'পণ্যের অনন্য পরিচয় কোড। একবার সেট করলে পরিবর্তন করবেন না।', example: 'SHIRT-001' },
+      { name_en: 'name',      name_bn: 'পণ্যের নাম',     required: true,  description: 'পণ্যের সম্পূর্ণ নাম',                                            example: 'কটন শার্ট সাদা' },
+      { name_en: 'mrp',       name_bn: 'সর্বোচ্চ মূল্য', required: true,  description: 'সর্বোচ্চ খুচরা মূল্য — টাকায় সংখ্যা',                          example: '500' },
+      { name_en: 'category',  name_bn: 'ক্যাটাগরি',      required: false, description: 'পণ্যের শ্রেণী বা গ্রুপ',                                         example: 'পোশাক' },
+      { name_en: 'image_url', name_bn: 'ছবির লিংক',      required: false, description: 'পণ্যের ছবির সম্পূর্ণ URL (https://...)',                          example: 'https://example.com/img.jpg' },
     ],
   },
   stock: {
