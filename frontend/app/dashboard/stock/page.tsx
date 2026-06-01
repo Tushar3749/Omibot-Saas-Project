@@ -1,8 +1,9 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { stockAPI } from '@/lib/api'
-import { Package, AlertTriangle, Edit2, Save, X, Clock, TrendingDown, TrendingUp, Settings } from 'lucide-react'
+import { Package, AlertTriangle, Edit2, Save, X, Clock, TrendingDown, TrendingUp, Settings, Upload, CheckCircle, Loader2, Download } from 'lucide-react'
+import CsvGuide from '@/components/ui/CsvGuide'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface StockProduct {
@@ -31,6 +32,14 @@ interface StockHistory {
 }
 
 type Tab = 'stock' | 'history'
+
+interface CSVImportResult {
+  imported:   number
+  skipped:    number
+  errors:     number
+  total_rows: number
+  warnings:   { row: number; message: string }[]
+}
 
 // ─── Badge helpers ────────────────────────────────────────────────────────────
 function StockBadge({ p }: { p: StockProduct }) {
@@ -74,6 +83,11 @@ export default function StockPage() {
   const [savingId, setSavingId]     = useState<string | null>(null)
   const [thresholdInput, setThresholdInput] = useState<number>(5)
   const [savingThreshold, setSavingThreshold] = useState(false)
+
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [importing,       setImporting]       = useState(false)
+  const [importResult,    setImportResult]    = useState<CSVImportResult | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   async function loadStock() {
     try {
@@ -147,6 +161,48 @@ export default function StockPage() {
     }
   }
 
+  async function handleStockCSV(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setImporting(true)
+    setImportResult(null)
+    try {
+      const result: CSVImportResult = await stockAPI.importCSV(file)
+      setImportResult(result)
+      if (result.imported > 0) {
+        toast.success(`✅ ${result.imported} row${result.imported > 1 ? 's' : ''} imported!`)
+        await loadStock()
+      } else {
+        toast.error('No rows imported — check warnings below')
+      }
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg || 'CSV import failed')
+    } finally {
+      setImporting(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  function downloadTemplate() {
+    const rows = [
+      '# Stock Bulk Update Template',
+      '# Required: sku, current_stock',
+      '# Optional: low_stock_threshold',
+      '#',
+      'sku,current_stock,low_stock_threshold',
+      'FMCG-001,50,10',
+      'FMCG-002,30,5',
+    ].join('\n')
+    const blob = new Blob([rows], { type: 'text/csv;charset=utf-8;' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = 'stock-bulk-template.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // Stat calculations
   const totalProducts = products.length
   const lowStockCount = products.filter(p => p.low_stock && !p.out_of_stock).length
@@ -173,6 +229,12 @@ export default function StockPage() {
           </h1>
           <p className="page-subtitle">পণ্যের মজুদ পর্যবেক্ষণ ও আপডেট করুন</p>
         </div>
+        <button
+          onClick={() => { setShowImportModal(true); setImportResult(null) }}
+          className="btn-secondary flex items-center gap-1.5 text-sm"
+        >
+          <Upload size={15} /> CSV Import
+        </button>
       </div>
 
       {/* Stats */}
@@ -388,6 +450,123 @@ export default function StockPage() {
           </table>
         </div>
       )}
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv"
+        className="hidden"
+        onChange={handleStockCSV}
+      />
+
+      {/* ── MODAL: CSV Import ───────────────────────────────────────────────── */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl">
+
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">CSV Stock Import</h2>
+                <p className="text-xs text-slate-500">একসাথে অনেক পণ্যের স্টক আপডেট করুন</p>
+              </div>
+              <button
+                onClick={() => { setShowImportModal(false); setImportResult(null) }}
+                className="btn-ghost p-1.5"
+              >
+                <X size={17} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+
+              {/* CSV guide */}
+              <CsvGuide type="stock-bulk" defaultOpen />
+
+              {/* Result summary */}
+              {importResult && (
+                <div className={`rounded-lg p-4 ${
+                  importResult.errors > 0 || importResult.skipped > 0
+                    ? 'bg-amber-50 border border-amber-200'
+                    : 'bg-green-50 border border-green-200'
+                }`}>
+                  <div className="flex items-center gap-2 mb-3">
+                    {importResult.errors > 0
+                      ? <AlertTriangle size={16} className="text-amber-600" />
+                      : <CheckCircle   size={16} className="text-green-600" />
+                    }
+                    <span className="font-semibold text-sm">Import Complete</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center mb-3">
+                    <div className="bg-white rounded-lg p-2 border border-slate-100">
+                      <p className="text-xl font-bold text-emerald-700">{importResult.imported}</p>
+                      <p className="text-xs text-slate-500">Imported</p>
+                    </div>
+                    <div className="bg-white rounded-lg p-2 border border-slate-100">
+                      <p className="text-xl font-bold text-amber-600">{importResult.skipped}</p>
+                      <p className="text-xs text-slate-500">Skipped</p>
+                    </div>
+                    <div className="bg-white rounded-lg p-2 border border-slate-100">
+                      <p className="text-xl font-bold text-red-600">{importResult.errors}</p>
+                      <p className="text-xs text-slate-500">Errors</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-center text-slate-500 mb-2">
+                    Total: {importResult.total_rows} rows
+                  </p>
+                  {importResult.warnings.length > 0 && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer font-medium text-slate-700 hover:text-slate-900">
+                        Show {importResult.warnings.length} warning(s)
+                      </summary>
+                      <div className="mt-2 max-h-36 overflow-y-auto space-y-1">
+                        {importResult.warnings.map((w, i) => (
+                          <p key={i} className="text-amber-700 bg-white rounded px-2 py-1">
+                            <strong>Row {w.row}:</strong> {w.message}
+                          </p>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+
+              {/* Upload area */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importing}
+                className="w-full border-2 border-dashed border-slate-200 hover:border-green-400 rounded-xl p-6 text-center transition-colors flex flex-col items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {importing ? (
+                  <>
+                    <Loader2 size={24} className="text-green-500 animate-spin" />
+                    <p className="text-sm font-medium text-slate-700">Importing…</p>
+                  </>
+                ) : (
+                  <>
+                    <Upload size={24} className="text-slate-400" />
+                    <p className="text-sm font-medium text-slate-700">Click to choose CSV file</p>
+                    <p className="text-xs text-slate-400">Max 5 MB · UTF-8 or Excel CSV</p>
+                  </>
+                )}
+              </button>
+
+              {/* Template download */}
+              <div className="flex items-center justify-between text-xs text-slate-500 border-t pt-3">
+                <span>টেমপ্লেট দরকার?</span>
+                <button
+                  onClick={downloadTemplate}
+                  className="flex items-center gap-1 hover:underline"
+                  style={{ color: '#04AA6D' }}
+                >
+                  <Download size={12} /> Download Template
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

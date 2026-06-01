@@ -2,8 +2,10 @@
 OmniBot SaaS — Stock Management Router
 Reads and writes from the dedicated `stock` table.
 """
+import csv
+import io
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from app.auth.dependencies import get_current_tenant
 from app.database import supabase
 from app.models.schemas import StockManualUpdate, LowStockThreshold
@@ -115,6 +117,144 @@ async def update_stock(body: StockManualUpdate, tenant: dict = Depends(get_curre
         note=body.note,
     )
     return {"product_id": body.product_id, "sku": product["sku"], "stock": after}
+
+
+@router.post("/import/csv")
+async def import_stock_csv(
+    tenant: dict = Depends(get_current_tenant),
+    file:   UploadFile = File(...),
+):
+    """
+    Bulk-update stock from CSV.
+    Required columns: sku, current_stock
+    Optional column:  low_stock_threshold
+    """
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are accepted")
+
+    tid = tenant["tenant_id"]
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CSV file must be under 5 MB")
+
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        content = raw.decode("latin-1")
+
+    clean_lines = [
+        line for line in content.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not clean_lines:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+
+    reader  = csv.DictReader(io.StringIO("\n".join(clean_lines)))
+    headers = [h.strip().lower() for h in (reader.fieldnames or [])]
+    if "sku" not in headers or "current_stock" not in headers:
+        raise HTTPException(
+            status_code=422,
+            detail="CSV must have columns: sku, current_stock  (low_stock_threshold optional)",
+        )
+    reader.fieldnames = headers
+
+    # Pre-fetch active SKU → product_id map
+    sku_res = (
+        supabase.table("products")
+        .select("product_id, sku")
+        .eq("tenant_id", tid)
+        .eq("is_active", True)
+        .execute()
+    )
+    sku_map: dict[str, str] = {
+        row["sku"]: row["product_id"]
+        for row in (sku_res.data or [])
+    }
+
+    imported = 0
+    skipped  = 0
+    errors   = 0
+    warnings: list[dict] = []
+
+    for row_num, raw_row in enumerate(list(reader), start=2):
+        row = {k.strip().lower(): (v.strip() if v else "") for k, v in raw_row.items() if k}
+
+        sku = row.get("sku", "")
+        if not sku:
+            skipped += 1
+            warnings.append({"row": row_num, "message": "Skipped — missing SKU"})
+            continue
+
+        product_id = sku_map.get(sku)
+        if not product_id:
+            skipped += 1
+            warnings.append({"row": row_num, "message": f"Skipped — SKU '{sku}' not found"})
+            continue
+
+        stock_val = row.get("current_stock", "")
+        if not stock_val:
+            skipped += 1
+            warnings.append({"row": row_num, "message": f"Skipped — missing current_stock for SKU '{sku}'"})
+            continue
+
+        try:
+            new_stock = int(float(stock_val))
+        except ValueError:
+            skipped += 1
+            warnings.append({"row": row_num, "message": f"Skipped — invalid current_stock '{stock_val}'"})
+            continue
+
+        try:
+            before_res = (
+                supabase.table("stock")
+                .select("current_stock")
+                .eq("tenant_id", tid)
+                .eq("product_id", product_id)
+                .maybe_single()
+                .execute()
+            )
+            before = (before_res.data or {}).get("current_stock", 0) if before_res else 0
+
+            upsert_data: dict = {
+                "tenant_id":     tid,
+                "product_id":    product_id,
+                "current_stock": new_stock,
+            }
+
+            threshold_val = row.get("low_stock_threshold", "")
+            if threshold_val:
+                try:
+                    upsert_data["low_stock_threshold"] = int(float(threshold_val))
+                except ValueError:
+                    warnings.append({
+                        "row": row_num,
+                        "message": f"low_stock_threshold '{threshold_val}' invalid — ignored",
+                    })
+
+            supabase.table("stock").upsert(
+                upsert_data,
+                on_conflict="tenant_id,product_id",
+            ).execute()
+
+            _log_stock_change(
+                tid, product_id, sku,
+                "import", new_stock - before, before, new_stock,
+                note="CSV bulk import",
+            )
+            imported += 1
+
+        except Exception as exc:
+            errors += 1
+            logger.warning(f"Stock CSV import row {row_num} error: {exc}")
+            warnings.append({"row": row_num, "message": f"Error — {str(exc)}"})
+
+    return {
+        "imported":   imported,
+        "skipped":    skipped,
+        "errors":     errors,
+        "total_rows": imported + skipped + errors,
+        "warnings":   warnings,
+    }
 
 
 @router.get("/history")

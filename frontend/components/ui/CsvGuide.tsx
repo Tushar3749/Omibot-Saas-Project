@@ -12,7 +12,7 @@ type ColumnGuide = {
   example: string
 }
 
-export type CsvGuideType = 'products' | 'stock' | 'combo'
+export type CsvGuideType = 'products' | 'stock' | 'stock-bulk' | 'combo'
 
 // ─── Guide definitions ────────────────────────────────────────────────────────
 
@@ -34,6 +34,15 @@ const GUIDES: Record<CsvGuideType, { title: string; note?: string; columns: Colu
     columns: [
       { name_en: 'sku',   name_bn: 'SKU',          required: true, description: 'পণ্যের অনন্য কোড — সিস্টেমে আগে থেকে থাকতে হবে', example: 'SHIRT-001' },
       { name_en: 'stock', name_bn: 'নতুন স্টক',    required: true, description: 'নতুন মজুদ সংখ্যা। পুরনো মানটি সম্পূর্ণ replace হবে।',   example: '75' },
+    ],
+  },
+  'stock-bulk': {
+    title: 'স্টক বাল্ক আপডেট — Bulk Stock Update',
+    note: 'SKU ম্যাচ হলে current_stock আপডেট হবে। low_stock_threshold ঐচ্ছিক।',
+    columns: [
+      { name_en: 'sku',                 name_bn: 'SKU',              required: true,  description: 'পণ্যের অনন্য কোড — সিস্টেমে আগে থেকে থাকতে হবে',    example: 'FMCG-001' },
+      { name_en: 'current_stock',       name_bn: 'বর্তমান স্টক',    required: true,  description: 'নতুন মজুদ সংখ্যা। পুরনো মানটি সম্পূর্ণ replace হবে।', example: '50' },
+      { name_en: 'low_stock_threshold', name_bn: 'কম স্টক সীমা',    required: false, description: 'এর নিচে নামলে low stock alert দেখাবে',                example: '10' },
     ],
   },
   combo: {
