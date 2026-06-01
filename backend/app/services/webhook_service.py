@@ -20,6 +20,7 @@ import httpx
 from app.config import settings
 from app.database import supabase
 from app.services.ai_service import AIService
+from app.services.discount_engine import get_discount_context as get_discount_ctx
 from app.services.memory_service import MemoryService
 from app.services.otp_service import normalize_bd_phone, request_otp, verify_otp
 from app.services import image_search_service as img_svc
@@ -426,8 +427,7 @@ async def process_message(
     # ── 5. Discount context ───────────────────────────────────────────────────
     discount_ctx: dict = {}
     try:
-        from app.services.discount_engine import get_discount_context as _get_dc
-        discount_ctx = _get_dc(tenant_id=tenant_id, customer_platform_id=sender_id)
+        discount_ctx = get_discount_ctx(tenant_id=tenant_id, customer_platform_id=sender_id)
     except Exception as _de:
         logger.warning(f"Discount engine error: {_de}")
 

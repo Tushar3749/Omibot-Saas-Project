@@ -1,10 +1,16 @@
 """
 OmniBot SaaS — Discount Engine
 Pipeline:
-  1. get_customer_metrics  — query orders table for lifetime stats
-  2. match_rules           — check all active discount rules against metrics + cart
-  3. apply_conflict_resolution — best_deal / priority_wins / stack_all / stack_with_cap
-  4. get_discount_context  — full pipeline, returns dict ready for Gemini injection
+  1. get_customer_metrics   — query orders table for lifetime stats
+  2. match_rules            — check all active discount rules against metrics + cart
+  3. _match_campaigns       — check active campaigns table
+  4. _match_combos          — check active combo offers table
+  5. apply_conflict_resolution — best_deal / priority_wins / stack_all / stack_with_cap
+  6. get_discount_context   — full pipeline, returns dict ready for Gemini injection
+
+Priority settings are read from ai_config.discount_priority_settings (JSONB):
+  {"campaign": {"priority": 1, "enabled": true}, "cart_value": {"priority": 3, "enabled": false}, ...}
+Any type with enabled=false is skipped entirely.
 """
 import logging
 from datetime import date, datetime, timezone
@@ -52,7 +58,6 @@ def get_customer_metrics(
     total_ltv    = sum(prices)
     avg_basket   = total_ltv / total_orders if total_orders else 0.0
 
-    # Last order date
     last_order_days_ago, last_order_date = None, None
     try:
         last_str = (orders[-1].get("created_at") or "").replace("Z", "+00:00")
@@ -66,7 +71,6 @@ def get_customer_metrics(
 
     product_ids = list({o["product_id"] for o in orders if o.get("product_id")})
 
-    # Category lookup from products table
     previous_categories: list = []
     if product_ids:
         try:
@@ -79,8 +83,8 @@ def get_customer_metrics(
             pass
 
     today = date.today()
-    current_month_prefix  = f"{today.year}-{today.month:02d}"
-    current_month_orders  = sum(
+    current_month_prefix = f"{today.year}-{today.month:02d}"
+    current_month_orders = sum(
         1 for o in orders if (o.get("created_at") or "").startswith(current_month_prefix)
     )
 
@@ -111,16 +115,126 @@ def _empty_metrics() -> dict:
     }
 
 
+# ── Campaign Matching ─────────────────────────────────────────────────────────
+
+def _match_campaigns(tenant_id: str, type_priority: int) -> list[dict]:
+    """
+    Check active campaigns within their date range.
+    Campaign type field: percentage | flat | bonus
+    Campaign amount field: the discount value.
+    """
+    today = date.today()
+    matched = []
+    try:
+        campaigns = (
+            supabase.table("campaigns")
+            .select("campaign_id, name, type, amount, start_date, end_date")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .execute()
+        ).data or []
+    except Exception as e:
+        logger.warning(f"Campaign fetch error: {e}")
+        return []
+
+    logger.info(f"  Campaigns: {len(campaigns)} active found")
+
+    for c in campaigns:
+        start = c.get("start_date")
+        end   = c.get("end_date")
+        try:
+            if start and today < date.fromisoformat(str(start)[:10]):
+                logger.debug(f"  ✗ Campaign '{c['name']}' not started yet")
+                continue
+            if end and today > date.fromisoformat(str(end)[:10]):
+                logger.debug(f"  ✗ Campaign '{c['name']}' expired")
+                continue
+        except ValueError:
+            pass
+
+        ctype  = c.get("type", "percentage")
+        amount = float(c.get("amount") or 0)
+        if amount <= 0:
+            continue
+
+        disc_type = "percentage" if ctype in ("percentage", "bonus") else "flat"
+        matched.append({
+            "rule_id":        c["campaign_id"],
+            "rule_name":      c["name"],
+            "rule_type":      "campaign",
+            "priority":       type_priority,
+            "discount_type":  disc_type,
+            "discount_value": amount,
+            "reason":         f"Campaign: {c['name']}",
+        })
+        logger.info(f"  ✓ Campaign matched: '{c['name']}' → {disc_type} {amount}")
+
+    return matched
+
+
+# ── Combo Matching ────────────────────────────────────────────────────────────
+
+def _match_combos(tenant_id: str, type_priority: int) -> list[dict]:
+    """
+    Check active combo offers. A combo qualifies if offer_price < price and stock > 0.
+    The implicit discount percentage = (price - offer_price) / price * 100.
+    """
+    matched = []
+    try:
+        combos = (
+            supabase.table("combos")
+            .select("combo_id, name, price, offer_price, stock")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .execute()
+        ).data or []
+    except Exception as e:
+        logger.warning(f"Combo fetch error: {e}")
+        return []
+
+    logger.info(f"  Combos: {len(combos)} active found")
+
+    for combo in combos:
+        price       = float(combo.get("price") or 0)
+        offer_price = float(combo.get("offer_price") or 0)
+        stock       = combo.get("stock")
+
+        if price <= 0 or offer_price <= 0 or offer_price >= price:
+            logger.debug(f"  ✗ Combo '{combo['name']}' no discount (price={price} offer={offer_price})")
+            continue
+        if stock is not None and stock <= 0:
+            logger.debug(f"  ✗ Combo '{combo['name']}' out of stock")
+            continue
+
+        disc_pct = round((price - offer_price) / price * 100, 2)
+        matched.append({
+            "rule_id":        combo["combo_id"],
+            "rule_name":      f"Combo: {combo['name']}",
+            "rule_type":      "combo",
+            "priority":       type_priority,
+            "discount_type":  "percentage",
+            "discount_value": disc_pct,
+            "reason":         f"Combo offer '{combo['name']}' (৳{price:.0f}→৳{offer_price:.0f})",
+        })
+        logger.info(f"  ✓ Combo matched: '{combo['name']}' → {disc_pct:.1f}% off")
+
+    return matched
+
+
 # ── Rule Matching ─────────────────────────────────────────────────────────────
 
 def match_rules(
     tenant_id: str,
     metrics: dict,
     cart_context: Optional[dict] = None,
+    enabled_type_keys: Optional[set] = None,
 ) -> list[dict]:
     """
     Check all active discount rules against customer metrics + cart context.
-    Returns sorted list of matched rules (by priority asc).
+    Returns a list of matched rules sorted by priority (ascending).
+
+    enabled_type_keys: set of rule-type strings that are switched ON in the
+                       Priority tab.  None means all types are allowed.
     """
     try:
         rules = (supabase.table("discount_rules")
@@ -133,6 +247,8 @@ def match_rules(
         logger.warning(f"Discount engine rule fetch error: {e}")
         return []
 
+    logger.info(f"  Discount rules: {len(rules)} active fetched")
+
     ctx          = cart_context or {}
     cart_amount  = float(ctx.get("cart_amount", 0))
     product_skus = list(ctx.get("product_skus") or [])
@@ -141,14 +257,18 @@ def match_rules(
     quantity     = int(ctx.get("quantity") or 1)
 
     today  = date.today()
-    from datetime import datetime as _dt
-    now_dt = _dt.now()
+    now_dt = datetime.now()
 
     matched = []
 
     for rule in rules:
+        rtype = rule["rule_type"]
+
+        if enabled_type_keys is not None and rtype not in enabled_type_keys:
+            logger.debug(f"  ✗ Rule '{rule.get('rule_name', rtype)}' skipped — type '{rtype}' disabled")
+            continue
+
         conds  = rule.get("conditions") or {}
-        rtype  = rule["rule_type"]
         reward = dict(rule.get("reward") or {})
         hit    = False
         reason = ""
@@ -233,7 +353,7 @@ def match_rules(
                 try:
                     if date.fromisoformat(start) <= today <= date.fromisoformat(end):
                         hit    = True
-                        reason = f"Seasonal: {conds.get('rule_name', 'Sale')}"
+                        reason = f"Seasonal: {rule.get('rule_name', 'Sale')}"
                 except ValueError:
                     pass
 
@@ -246,15 +366,24 @@ def match_rules(
                 reason = f"LTV ৳{actual_ltv:.0f} ≥ ৳{min_ltv:.0f}"
 
         if hit:
+            disc_type = reward.get("discount_type", "percentage")
+            disc_val  = float(reward.get("discount_value", 0))
             matched.append({
                 "rule_id":        rule["rule_id"],
                 "rule_name":      rule["rule_name"] or rtype,
                 "rule_type":      rtype,
                 "priority":       rule["priority"],
-                "discount_type":  reward.get("discount_type", "percentage"),
-                "discount_value": float(reward.get("discount_value", 0)),
+                "discount_type":  disc_type,
+                "discount_value": disc_val,
                 "reason":         reason,
             })
+            logger.info(
+                f"  ✓ Rule matched: '{rule['rule_name'] or rtype}' "
+                f"({rtype}) p={rule['priority']} "
+                f"→ {disc_type} {disc_val} | {reason}"
+            )
+        else:
+            logger.debug(f"  ✗ Rule no match: '{rule.get('rule_name', rtype)}' ({rtype})")
 
     return matched
 
@@ -269,12 +398,18 @@ def apply_conflict_resolution(
 ) -> tuple[float, float, list[dict]]:
     """
     Returns (final_discount_pct, final_discount_flat, applied_rules).
+    Strategies:
+      priority_wins  — highest-priority (lowest number) rule wins
+      best_deal      — rule that gives the largest monetary discount wins
+      stack_all      — all percentage + flat amounts summed
+      stack_with_cap — same as stack_all but percentage capped at stack_cap
     """
     if not matched:
         return 0.0, 0.0, []
 
     if resolution == "priority_wins":
-        top = matched[0]
+        top = matched[0]   # already sorted by priority asc
+        logger.info(f"  conflict=priority_wins → applying: '{top['rule_name']}'")
         if top["discount_type"] == "percentage":
             return float(top["discount_value"]), 0.0, [top]
         return 0.0, float(top["discount_value"]), [top]
@@ -285,6 +420,7 @@ def apply_conflict_resolution(
             if r["discount_type"] == "percentage"
             else r["discount_value"]
         ))
+        logger.info(f"  conflict=best_deal → applying: '{best['rule_name']}'")
         if best["discount_type"] == "percentage":
             return float(best["discount_value"]), 0.0, [best]
         return 0.0, float(best["discount_value"]), [best]
@@ -294,7 +430,14 @@ def apply_conflict_resolution(
     total_flat = sum(r["discount_value"] for r in matched if r["discount_type"] == "flat")
 
     if resolution == "stack_with_cap":
+        original_pct = total_pct
         total_pct = min(total_pct, stack_cap)
+        logger.info(
+            f"  conflict=stack_with_cap → pct {original_pct}% capped to {total_pct}%, "
+            f"flat ৳{total_flat}"
+        )
+    else:
+        logger.info(f"  conflict=stack_all → pct {total_pct}%, flat ৳{total_flat}")
 
     return total_pct, total_flat, matched
 
@@ -308,29 +451,114 @@ def get_discount_context(
     cart_context: Optional[dict] = None,
 ) -> dict:
     """
-    Full pipeline: customer metrics → rule matching → conflict resolution.
-    Returns a dict ready to inject into the Gemini system prompt.
+    Full pipeline: customer metrics → rule matching (incl. campaigns & combos)
+    → conflict resolution.  Returns a dict ready to inject into the Gemini
+    system prompt.
     """
-    metrics = get_customer_metrics(tenant_id, customer_platform_id, customer_phone)
-    matched = match_rules(tenant_id, metrics, cart_context)
+    logger.info(
+        f"[DiscountEngine] START tenant={tenant_id} "
+        f"psid={'***' if customer_platform_id else '-'} "
+        f"phone={'***' if customer_phone else '-'} "
+        f"cart={cart_context}"
+    )
 
-    resolution = "best_deal"
-    stack_cap  = 30.0
+    # ── Customer metrics ──────────────────────────────────────────────────────
+    metrics = get_customer_metrics(tenant_id, customer_platform_id, customer_phone)
+    logger.info(
+        f"[DiscountEngine] Metrics: new={metrics['is_new_customer']} "
+        f"orders={metrics['total_orders']} "
+        f"ltv=৳{metrics['total_lifetime_value']} "
+        f"last_order_days={metrics['last_order_days_ago']}"
+    )
+
+    # ── Load config (conflict resolution + priority settings) ─────────────────
+    resolution        = "best_deal"
+    stack_cap         = 30.0
+    priority_settings: dict = {}
     try:
         cfg = (supabase.table("ai_config")
-               .select("conflict_resolution, discount_stack_cap")
+               .select("conflict_resolution, discount_stack_cap, discount_priority_settings")
                .eq("tenant_id", tenant_id)
                .maybe_single()
                .execute())
         if cfg and cfg.data:
-            resolution = cfg.data.get("conflict_resolution") or "best_deal"
-            stack_cap  = float(cfg.data.get("discount_stack_cap") or 30)
+            resolution        = cfg.data.get("conflict_resolution") or "best_deal"
+            stack_cap         = float(cfg.data.get("discount_stack_cap") or 30)
+            priority_settings = cfg.data.get("discount_priority_settings") or {}
     except Exception as e:
-        logger.warning(f"Discount engine config fetch error: {e}")
+        logger.warning(f"[DiscountEngine] Config fetch error: {e}")
 
+    logger.info(
+        f"[DiscountEngine] Config: resolution={resolution} "
+        f"stack_cap={stack_cap} "
+        f"priority_types_configured={len(priority_settings)}"
+    )
+
+    # ── Build enabled-type set from priority settings ─────────────────────────
+    # If nothing configured yet, all types are on by default.
+    enabled_type_keys: Optional[set] = None
+    campaign_priority = 1
+    combo_priority    = 2
+
+    if priority_settings:
+        enabled_type_keys = {
+            key for key, val in priority_settings.items()
+            if isinstance(val, dict) and val.get("enabled", True)
+        }
+        logger.info(
+            f"[DiscountEngine] Enabled types ({len(enabled_type_keys)}): "
+            f"{sorted(enabled_type_keys)}"
+        )
+        cp = priority_settings.get("campaign", {})
+        if isinstance(cp, dict):
+            campaign_priority = int(cp.get("priority", 1))
+        co = priority_settings.get("combo", {})
+        if isinstance(co, dict):
+            combo_priority = int(co.get("priority", 2))
+    else:
+        logger.info("[DiscountEngine] No priority settings — all types enabled")
+
+    # ── Match standard discount rules ─────────────────────────────────────────
+    matched = match_rules(tenant_id, metrics, cart_context, enabled_type_keys)
+
+    # ── Match campaigns ───────────────────────────────────────────────────────
+    campaign_on = enabled_type_keys is None or "campaign" in enabled_type_keys
+    if campaign_on:
+        cam = _match_campaigns(tenant_id, campaign_priority)
+        matched.extend(cam)
+        logger.info(f"[DiscountEngine] Campaigns: {len(cam)} matched")
+    else:
+        logger.info("[DiscountEngine] Campaign type OFF — skipped")
+
+    # ── Match combos ──────────────────────────────────────────────────────────
+    combo_on = enabled_type_keys is None or "combo" in enabled_type_keys
+    if combo_on:
+        com = _match_combos(tenant_id, combo_priority)
+        matched.extend(com)
+        logger.info(f"[DiscountEngine] Combos: {len(com)} matched")
+    else:
+        logger.info("[DiscountEngine] Combo type OFF — skipped")
+
+    # Sort all matched rules by priority (campaigns/combos already carry their type priority)
+    matched.sort(key=lambda r: r["priority"])
+
+    logger.info(f"[DiscountEngine] Total matched: {len(matched)}")
+    for r in matched:
+        logger.info(
+            f"  [{r['priority']:>2}] {r['rule_type']:<20} | "
+            f"{r['discount_type']:<10} {r['discount_value']:>6} | "
+            f"{r['rule_name']} — {r['reason']}"
+        )
+
+    # ── Conflict resolution ───────────────────────────────────────────────────
     cart_amount = float((cart_context or {}).get("cart_amount", 0))
     final_pct, final_flat, applied = apply_conflict_resolution(
         matched, resolution, stack_cap, cart_amount
+    )
+
+    logger.info(
+        f"[DiscountEngine] Applied ({len(applied)} rules): "
+        f"pct={final_pct}% flat=৳{final_flat}"
     )
 
     discount_message = ""
@@ -342,6 +570,11 @@ def get_discount_context(
 
     discount_amount = (cart_amount * final_pct / 100) + final_flat if cart_amount > 0 else 0.0
     final_price     = max(0.0, cart_amount - discount_amount) if cart_amount > 0 else 0.0
+
+    logger.info(
+        f"[DiscountEngine] RESULT: {discount_message or 'no discount'} | "
+        f"discount_amount=৳{discount_amount:.2f} final_price=৳{final_price:.2f}"
+    )
 
     return {
         "customer_metrics":    metrics,

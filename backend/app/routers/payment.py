@@ -162,6 +162,8 @@ async def update_ai_config(
         "sms_enabled", "sms_provider",
         "ssl_wireless_api_key", "ssl_wireless_sid",
         "twilio_account_sid", "twilio_auth_token", "twilio_from_number",
+        # Discount engine
+        "discount_priority_settings", "conflict_resolution", "discount_stack_cap",
     }
     update_data = {k: v for k, v in body.items() if k in allowed}
     if not update_data:

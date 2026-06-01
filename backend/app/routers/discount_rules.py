@@ -92,6 +92,7 @@ async def create_rule(body: RuleCreate, tenant=Depends(get_current_tenant)):
 
 
 @router.put("/{rule_id}")
+@router.patch("/{rule_id}")
 async def update_rule(rule_id: str, body: RuleUpdate, tenant=Depends(get_current_tenant)):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
