@@ -1,6 +1,7 @@
 """
 OmniBot SaaS — Campaigns Router
 CRUD + CSV bulk import for promotional campaigns.
+reward JSONB: {"reward_type": "percentage|flat|bonus", "discount_value": N, "bonus_items": [...]}
 """
 import csv
 import io
@@ -55,6 +56,15 @@ def _parse_date(s: str):
     return None
 
 
+def _normalize_reward(reward: dict) -> dict:
+    """Ensure reward JSONB has the canonical shape."""
+    return {
+        "reward_type":    reward.get("reward_type", "percentage"),
+        "discount_value": float(reward.get("discount_value", 0)),
+        "bonus_items":    reward.get("bonus_items") or [],
+    }
+
+
 # ─── List ─────────────────────────────────────────────────────────────────────
 @router.get("/")
 async def list_campaigns(tenant: dict = Depends(get_current_tenant)):
@@ -68,24 +78,30 @@ async def list_campaigns(tenant: dict = Depends(get_current_tenant)):
     campaigns = result.data or []
     for c in campaigns:
         c["status"] = _compute_status(c)
+        if c.get("reward"):
+            c["reward"] = _normalize_reward(c["reward"])
     return campaigns
 
 
 # ─── Create ───────────────────────────────────────────────────────────────────
 @router.post("/", status_code=201)
 async def create_campaign(body: CampaignCreate, tenant: dict = Depends(get_current_tenant)):
+    reward = _normalize_reward(body.reward)
     row = {
-        "campaign_id": str(uuid.uuid4()),
-        "tenant_id":   tenant["tenant_id"],
-        "name":        body.name,
-        "description": body.description,
-        "type":        body.type,
-        "amount":      body.amount,
-        "start_date":  body.start_date.isoformat() if body.start_date else None,
-        "end_date":    body.end_date.isoformat()   if body.end_date   else None,
-        "apply_to":    body.apply_to,
-        "product_ids": body.product_ids or [],
-        "is_active":   body.is_active,
+        "campaign_id":          str(uuid.uuid4()),
+        "tenant_id":            tenant["tenant_id"],
+        "name":                 body.name,
+        "description":          body.description,
+        "reward":               reward,
+        # Keep legacy columns for backward compat with older discount engine calls
+        "type":                 reward["reward_type"],
+        "amount":               reward["discount_value"],
+        "start_date":           body.start_date.isoformat() if body.start_date else None,
+        "end_date":             body.end_date.isoformat()   if body.end_date   else None,
+        "apply_to":             body.apply_to,
+        "product_ids":          body.product_ids or [],
+        "discount_category_id": body.discount_category_id,
+        "is_active":            body.is_active,
     }
     result = supabase.table("campaigns").insert(row).execute()
     campaign = result.data[0]
@@ -101,6 +117,11 @@ async def update_campaign(
     tenant: dict = Depends(get_current_tenant),
 ):
     update_data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "reward" in update_data:
+        r = _normalize_reward(update_data["reward"])
+        update_data["reward"] = r
+        update_data["type"]   = r["reward_type"]
+        update_data["amount"] = r["discount_value"]
     if "start_date" in update_data and update_data["start_date"]:
         update_data["start_date"] = update_data["start_date"].isoformat()
     if "end_date" in update_data and update_data["end_date"]:
@@ -140,7 +161,7 @@ async def import_campaigns_csv(
     file: UploadFile = File(...),
 ):
     """
-    CSV columns: name, type(percentage/flat/bonus), amount,
+    CSV columns: name, reward_type(percentage/flat/bonus), discount_value,
                  description, start_date(YYYY-MM-DD), end_date(YYYY-MM-DD),
                  apply_to(all/specific), product_skus(comma-separated), is_active(true/false)
     """
@@ -160,31 +181,26 @@ async def import_campaigns_csv(
     reader = csv.DictReader(io.StringIO("\n".join(lines)))
     reader.fieldnames = [h.strip().lower() for h in (reader.fieldnames or [])]
 
-    if not {"name", "type", "amount"}.issubset(set(reader.fieldnames or [])):
-        raise HTTPException(status_code=422, detail="CSV must include: name, type, amount")
+    if "name" not in (reader.fieldnames or []):
+        raise HTTPException(status_code=422, detail="CSV must include: name")
 
     imported, errors, warnings = 0, 0, []
 
     for row_num, raw_row in enumerate(reader, start=2):
         row = {k.strip().lower(): (v.strip() if v else "") for k, v in raw_row.items() if k}
         name = row.get("name", "")
-        typ  = row.get("type", "percentage")
-        amt  = row.get("amount", "")
-
-        if not name or not amt:
-            warnings.append({"row": row_num, "message": "Skipped — missing name or amount"})
+        if not name:
+            warnings.append({"row": row_num, "message": "Skipped — missing name"})
             errors += 1
             continue
 
+        reward_type = row.get("reward_type", row.get("type", "percentage"))
+        if reward_type not in ("percentage", "flat", "bonus"):
+            reward_type = "percentage"
         try:
-            amount_val = float(amt)
+            disc_val = float(row.get("discount_value", row.get("amount", "0")) or 0)
         except ValueError:
-            warnings.append({"row": row_num, "message": f"Skipped — invalid amount '{amt}'"})
-            errors += 1
-            continue
-
-        if typ not in ("percentage", "flat", "bonus"):
-            typ = "percentage"
+            disc_val = 0.0
 
         apply_to = row.get("apply_to", "all")
         if apply_to not in ("all", "specific"):
@@ -199,14 +215,16 @@ async def import_campaigns_csv(
                 product_ids = [p["product_id"] for p in (pr.data or [])]
 
         is_active = row.get("is_active", "true").lower() not in ("false", "0", "no")
+        reward = {"reward_type": reward_type, "discount_value": disc_val, "bonus_items": []}
 
         supabase.table("campaigns").insert({
             "campaign_id": str(uuid.uuid4()),
             "tenant_id":   tid,
             "name":        name,
             "description": row.get("description", ""),
-            "type":        typ,
-            "amount":      amount_val,
+            "reward":      reward,
+            "type":        reward_type,
+            "amount":      disc_val,
             "start_date":  _parse_date(row.get("start_date", "")),
             "end_date":    _parse_date(row.get("end_date", "")),
             "apply_to":    apply_to,

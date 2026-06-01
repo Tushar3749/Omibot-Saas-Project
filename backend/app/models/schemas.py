@@ -158,28 +158,41 @@ class ProductUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+# ─── Discount Categories ─────────────────────────────────────────────────────
+
+class DiscountCategoryCreate(BaseModel):
+    category_name: str = Field(min_length=1, max_length=100)
+    description: Optional[str] = None
+    is_active: bool = True
+
+class DiscountCategoryUpdate(BaseModel):
+    category_name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 # ─── Campaigns ────────────────────────────────────────────────────────────────
 
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: Optional[str] = None
-    type: str = Field(pattern=r'^(percentage|flat|bonus)$')
-    amount: float = Field(gt=0)
+    reward: dict = Field(default_factory=lambda: {"reward_type": "percentage", "discount_value": 0, "bonus_items": []})
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     apply_to: str = Field(default='all', pattern=r'^(all|specific)$')
     product_ids: Optional[list[str]] = None
+    discount_category_id: Optional[str] = None
     is_active: bool = True
 
 class CampaignUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    type: Optional[str] = None
-    amount: Optional[float] = None
+    reward: Optional[dict] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     apply_to: Optional[str] = None
     product_ids: Optional[list[str]] = None
+    discount_category_id: Optional[str] = None
     is_active: Optional[bool] = None
 
 
@@ -271,17 +284,12 @@ class AnalyticsResponse(BaseModel):
 
 class ComboProductItem(BaseModel):
     product_id: str
-    sku: str
-    name: str
-    mrp: Optional[float] = None
-    quantity: int = 1
+    quantity: int = Field(ge=1)
 
 class ComboCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: Optional[str] = None
     price: float = Field(gt=0)
-    offer_price: float = Field(gt=0)
-    stock: int = 0
     image_url: Optional[str] = None
     products: list[ComboProductItem] = []
 
@@ -289,8 +297,6 @@ class ComboUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     price: Optional[float] = None
-    offer_price: Optional[float] = None
-    stock: Optional[int] = None
     image_url: Optional[str] = None
     is_active: Optional[bool] = None
     products: Optional[list[ComboProductItem]] = None

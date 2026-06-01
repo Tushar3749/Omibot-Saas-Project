@@ -311,18 +311,10 @@ export const uploadAPI = {
 // ── Combos ────────────────────────────────────────────────────────────────────
 export const combosAPI = {
   list:   () => api.get('/api/combos/').then(r => r.data),
+  get:    (id: string) => api.get(`/api/combos/${id}`).then(r => r.data),
   create: (data: Record<string, unknown>) => api.post('/api/combos/', data).then(r => r.data),
   update: (id: string, data: Record<string, unknown>) => api.patch(`/api/combos/${id}`, data).then(r => r.data),
   delete: (id: string) => api.delete(`/api/combos/${id}`).then(r => r.data),
-  downloadTemplate: async () => {
-    const response = await api.get('/api/combos/templates/combo', { responseType: 'blob' })
-    const blob = new Blob([response.data], { type: 'text/csv' })
-    const url = window.URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url; link.download = 'combo-template.csv'
-    document.body.appendChild(link); link.click()
-    document.body.removeChild(link); window.URL.revokeObjectURL(url)
-  },
 }
 
 // ── Stock ─────────────────────────────────────────────────────────────────────
@@ -412,6 +404,17 @@ export const discountRulesAPI = {
     api.put('/api/discount-rules/priority/batch', { rules }).then(r => r.data),
   preview: (data: Record<string, unknown>) =>
     api.post('/api/discount-rules/preview', data).then(r => r.data),
+}
+
+// ── Discount Categories ───────────────────────────────────────────────────────
+export const discountCategoriesAPI = {
+  list:   () => api.get('/api/discount-categories/').then(r => r.data),
+  create: (data: Record<string, unknown>) =>
+    api.post('/api/discount-categories/', data).then(r => r.data),
+  update: (id: string, data: Record<string, unknown>) =>
+    api.patch(`/api/discount-categories/${id}`, data).then(r => r.data),
+  delete: (id: string) =>
+    api.delete(`/api/discount-categories/${id}`).then(r => r.data),
 }
 
 // ── Negotiation Rules ─────────────────────────────────────────────────────────

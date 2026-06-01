@@ -1,11 +1,11 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import toast from 'react-hot-toast'
-import { discountRulesAPI, configAPI, productsAPI, campaignsAPI, combosAPI } from '@/lib/api'
+import { discountRulesAPI, configAPI, productsAPI, campaignsAPI } from '@/lib/api'
 import {
   Plus, Trash2, Edit2, Save, ChevronDown, ChevronRight,
   ShoppingCart, RefreshCw, User, Tag, Layers, Hash,
-  MapPin, Clock, Calendar, X, Percent, Megaphone,
+  MapPin, Clock, Calendar, X, Percent, Megaphone, Gift, Search,
 } from 'lucide-react'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -15,12 +15,22 @@ type RuleType =
   | 'specific_product' | 'specific_category' | 'bulk_quantity'
   | 'district' | 'time_based' | 'seasonal' | 'lifetime_value'
 
+interface Product { product_id: string; sku: string; name: string; category?: string }
+
+interface BonusItem { product_id: string; sku: string; name: string; quantity: number }
+
+interface Reward {
+  reward_type: 'percentage' | 'flat' | 'bonus' | 'free_delivery'
+  discount_value: number
+  bonus_items: BonusItem[]
+}
+
 interface DiscountRule {
   rule_id: string
   rule_type: RuleType
   rule_name: string
   conditions: Record<string, unknown>
-  reward: Record<string, unknown>
+  reward: Reward
   priority: number
   is_active: boolean
 }
@@ -49,55 +59,210 @@ const RULE_META: Record<RuleType, { label: string; icon: React.ElementType; colo
   new_customer:      { label: 'New Customer',       icon: User,         color: '#00695C' },
   specific_product:  { label: 'Specific Product',   icon: Tag,          color: '#E65100' },
   specific_category: { label: 'Specific Category',  icon: Layers,       color: '#AD1457' },
-  bulk_quantity:     { label: 'Bulk Quantity',      icon: Hash,         color: '#2E7D32' },
+  bulk_quantity:     { label: 'Bulk Quantity',       icon: Hash,         color: '#2E7D32' },
   district:          { label: 'District/Location',  icon: MapPin,       color: '#558B2F' },
   time_based:        { label: 'Time-Based',         icon: Clock,        color: '#F57F17' },
   seasonal:          { label: 'Seasonal',           icon: Calendar,     color: '#C62828' },
   lifetime_value:    { label: 'Lifetime Value',     icon: Percent,      color: '#4527A0' },
 }
 
-// All 12 rule types for the priority table (including system types)
+// Combo removed from priority table — combos are now standalone product bundles
 const ALL_PRIORITY_TYPES = [
   { key: 'campaign',          label: 'Campaign',          icon: Megaphone,    color: '#F57F17', defaultPriority: 1,  system: true  },
-  { key: 'combo',             label: 'Combo Offer',       icon: Layers,       color: '#AD1457', defaultPriority: 2,  system: true  },
-  { key: 'cart_value',        label: 'Cart Value',        icon: ShoppingCart, color: '#1565C0', defaultPriority: 3,  system: false },
-  { key: 'repeated_customer', label: 'Repeated Customer', icon: RefreshCw,    color: '#6A1B9A', defaultPriority: 4,  system: false },
-  { key: 'new_customer',      label: 'New Customer',      icon: User,         color: '#00695C', defaultPriority: 5,  system: false },
-  { key: 'specific_product',  label: 'Specific Product',  icon: Tag,          color: '#E65100', defaultPriority: 6,  system: false },
-  { key: 'specific_category', label: 'Specific Category', icon: Layers,       color: '#AD1457', defaultPriority: 7,  system: false },
-  { key: 'bulk_quantity',     label: 'Bulk Quantity',     icon: Hash,         color: '#2E7D32', defaultPriority: 8,  system: false },
-  { key: 'district',          label: 'District/Location', icon: MapPin,       color: '#558B2F', defaultPriority: 9,  system: false },
-  { key: 'time_based',        label: 'Time Based',        icon: Clock,        color: '#F57F17', defaultPriority: 10, system: false },
-  { key: 'seasonal',          label: 'Seasonal',          icon: Calendar,     color: '#C62828', defaultPriority: 11, system: false },
-  { key: 'lifetime_value',    label: 'Lifetime Value',    icon: Percent,      color: '#4527A0', defaultPriority: 12, system: false },
+  { key: 'cart_value',        label: 'Cart Value',        icon: ShoppingCart, color: '#1565C0', defaultPriority: 2,  system: false },
+  { key: 'repeated_customer', label: 'Repeated Customer', icon: RefreshCw,    color: '#6A1B9A', defaultPriority: 3,  system: false },
+  { key: 'new_customer',      label: 'New Customer',      icon: User,         color: '#00695C', defaultPriority: 4,  system: false },
+  { key: 'specific_product',  label: 'Specific Product',  icon: Tag,          color: '#E65100', defaultPriority: 5,  system: false },
+  { key: 'specific_category', label: 'Specific Category', icon: Layers,       color: '#AD1457', defaultPriority: 6,  system: false },
+  { key: 'bulk_quantity',     label: 'Bulk Quantity',     icon: Hash,         color: '#2E7D32', defaultPriority: 7,  system: false },
+  { key: 'district',          label: 'District/Location', icon: MapPin,       color: '#558B2F', defaultPriority: 8,  system: false },
+  { key: 'time_based',        label: 'Time Based',        icon: Clock,        color: '#F57F17', defaultPriority: 9,  system: false },
+  { key: 'seasonal',          label: 'Seasonal',          icon: Calendar,     color: '#C62828', defaultPriority: 10, system: false },
+  { key: 'lifetime_value',    label: 'Lifetime Value',    icon: Percent,      color: '#4527A0', defaultPriority: 11, system: false },
 ]
 
-// ── Reward input helper ────────────────────────────────────────────────────────
+const EMPTY_REWARD: Reward = { reward_type: 'percentage', discount_value: 10, bonus_items: [] }
 
-function RewardFields({ reward, onChange }: {
-  reward: Record<string, unknown>
-  onChange: (r: Record<string, unknown>) => void
+// ── Reward Selector ────────────────────────────────────────────────────────────
+
+function RewardSelector({
+  reward, onChange, products, includeDelivery = false,
+}: {
+  reward: Reward
+  onChange: (r: Reward) => void
+  products: Product[]
+  includeDelivery?: boolean
 }) {
+  const [bonusSearch, setBonusSearch]           = useState('')
+  const [bonusQty, setBonusQty]                 = useState(1)
+  const [selectedProduct, setSelectedProduct]   = useState<Product | null>(null)
+  const [showDropdown, setShowDropdown]         = useState(false)
+  const dropRef = useRef<HTMLDivElement>(null)
+
+  const rtype      = reward.reward_type || 'percentage'
+  const bonusItems = reward.bonus_items || []
+
+  const filtered = bonusSearch.trim().length > 0
+    ? products.filter(p =>
+        p.sku.toLowerCase().includes(bonusSearch.toLowerCase()) ||
+        p.name.toLowerCase().includes(bonusSearch.toLowerCase())
+      ).slice(0, 8)
+    : []
+
+  function addBonusItem() {
+    if (!selectedProduct) return
+    const exists = bonusItems.find(b => b.product_id === selectedProduct.product_id)
+    if (exists) {
+      onChange({
+        ...reward,
+        bonus_items: bonusItems.map(b =>
+          b.product_id === selectedProduct.product_id
+            ? { ...b, quantity: b.quantity + bonusQty }
+            : b
+        ),
+      })
+    } else {
+      onChange({
+        ...reward,
+        bonus_items: [...bonusItems, {
+          product_id: selectedProduct.product_id,
+          sku:        selectedProduct.sku,
+          name:       selectedProduct.name,
+          quantity:   bonusQty,
+        }],
+      })
+    }
+    setBonusSearch('')
+    setSelectedProduct(null)
+    setBonusQty(1)
+    setShowDropdown(false)
+  }
+
+  function removeBonusItem(pid: string) {
+    onChange({ ...reward, bonus_items: bonusItems.filter(b => b.product_id !== pid) })
+  }
+
+  const labelCls = "block text-xs font-medium mb-1"
+  const lStyle   = { color: 'var(--c-text)' }
+
   return (
-    <div className="grid grid-cols-2 gap-3">
+    <div className="space-y-3">
+      {/* Reward type selector */}
       <div>
-        <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Discount Type</label>
-        <select className="input" value={String(reward.discount_type || 'percentage')}
-          onChange={e => onChange({ ...reward, discount_type: e.target.value })}>
-          <option value="percentage">Percentage (%)</option>
-          <option value="flat">Flat Amount (৳)</option>
-        </select>
+        <label className={labelCls} style={lStyle}>Reward Type</label>
+        <div className="flex flex-wrap gap-2">
+          {[
+            { value: 'percentage',    label: '% Discount' },
+            { value: 'flat',          label: '৳ Flat Off' },
+            { value: 'bonus',         label: 'Free Products' },
+            ...(includeDelivery ? [{ value: 'free_delivery', label: 'Free Delivery' }] : []),
+          ].map(opt => (
+            <button key={opt.value} type="button"
+              onClick={() => onChange({ ...reward, reward_type: opt.value as Reward['reward_type'] })}
+              className="text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+              style={rtype === opt.value
+                ? { background: 'rgba(4,170,109,0.15)', color: '#04AA6D', borderColor: '#04AA6D' }
+                : { background: 'var(--c-surface)', color: 'var(--c-muted)', borderColor: 'var(--c-border)' }}>
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div>
-        <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>
-          {reward.discount_type === 'flat' ? 'Amount (৳)' : 'Discount (%)'}
-        </label>
-        <input type="number" min="0" max={reward.discount_type === 'flat' ? undefined : 90}
-          step={reward.discount_type === 'flat' ? 10 : 0.5} className="input"
-          placeholder={reward.discount_type === 'flat' ? '100' : '10'}
-          value={String(reward.discount_value || '')}
-          onChange={e => onChange({ ...reward, discount_value: parseFloat(e.target.value) || 0 })} />
-      </div>
+
+      {/* Value input */}
+      {rtype === 'percentage' && (
+        <div>
+          <label className={labelCls} style={lStyle}>Discount (%)</label>
+          <input type="number" min="0" max="90" step="0.5" className="input" placeholder="10"
+            value={String(reward.discount_value || '')}
+            onChange={e => onChange({ ...reward, discount_value: parseFloat(e.target.value) || 0 })} />
+        </div>
+      )}
+      {rtype === 'flat' && (
+        <div>
+          <label className={labelCls} style={lStyle}>Amount (৳)</label>
+          <input type="number" min="0" step="10" className="input" placeholder="50"
+            value={String(reward.discount_value || '')}
+            onChange={e => onChange({ ...reward, discount_value: parseFloat(e.target.value) || 0 })} />
+        </div>
+      )}
+      {rtype === 'free_delivery' && (
+        <p className="text-xs" style={{ color: 'var(--c-muted)' }}>ডেলিভারি চার্জ মাফ করা হবে।</p>
+      )}
+
+      {/* Bonus products builder */}
+      {rtype === 'bonus' && (
+        <div className="space-y-2">
+          <label className={labelCls} style={lStyle}>Free Products</label>
+
+          {/* Search + add */}
+          <div className="relative" ref={dropRef}>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: 'var(--c-muted)' }} />
+                <input
+                  className="input pl-7 text-xs"
+                  placeholder="SKU বা পণ্যের নাম লিখুন..."
+                  value={bonusSearch}
+                  onChange={e => { setBonusSearch(e.target.value); setShowDropdown(true); setSelectedProduct(null) }}
+                  onFocus={() => setShowDropdown(true)}
+                />
+              </div>
+              <input type="number" min="1" className="input text-xs w-16 text-center" value={bonusQty}
+                onChange={e => setBonusQty(Math.max(1, parseInt(e.target.value) || 1))} />
+              <button type="button" onClick={addBonusItem} disabled={!selectedProduct}
+                className="btn-primary text-xs py-1 px-3 gap-1 flex-shrink-0"
+                style={{ opacity: selectedProduct ? 1 : 0.4 }}>
+                <Plus size={11} /> Add
+              </button>
+            </div>
+
+            {/* Dropdown */}
+            {showDropdown && filtered.length > 0 && (
+              <div className="absolute z-50 w-full mt-1 rounded shadow-lg overflow-hidden"
+                style={{ backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                {filtered.map(p => (
+                  <button key={p.product_id} type="button"
+                    onClick={() => { setSelectedProduct(p); setBonusSearch(`${p.sku} — ${p.name}`); setShowDropdown(false) }}
+                    className="w-full text-left px-3 py-2 text-xs flex items-center gap-2"
+                    style={{ borderBottom: '1px solid var(--c-border-subtle)', color: 'var(--c-text)' }}
+                    onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--c-surface)')}
+                    onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}>
+                    <code style={{ color: 'var(--c-accent)' }}>{p.sku}</code>
+                    <span className="truncate">{p.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Added bonus items */}
+          {bonusItems.length > 0 && (
+            <div className="space-y-1">
+              {bonusItems.map(item => (
+                <div key={item.product_id}
+                  className="flex items-center justify-between px-3 py-1.5 rounded text-xs"
+                  style={{ backgroundColor: 'rgba(4,170,109,0.08)', border: '1px solid rgba(4,170,109,0.2)' }}>
+                  <div className="flex items-center gap-2">
+                    <Gift size={11} style={{ color: '#04AA6D' }} />
+                    <span style={{ color: 'var(--c-text)' }}>{item.name}</span>
+                    <code className="text-2xs" style={{ color: 'var(--c-muted)' }}>{item.sku}</code>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium" style={{ color: '#04AA6D' }}>×{item.quantity}</span>
+                    <button type="button" onClick={() => removeBonusItem(item.product_id)} style={{ color: '#EF5350' }}>
+                      <X size={11} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {bonusItems.length === 0 && (
+            <p className="text-xs" style={{ color: 'var(--c-muted)' }}>এখনো কোনো free product যোগ হয়নি।</p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -107,16 +272,17 @@ function RewardFields({ reward, onChange }: {
 function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, products, categories }: {
   type: RuleType
   conditions: Record<string, unknown>
-  reward: Record<string, unknown>
+  reward: Reward
   onCondChange: (c: Record<string, unknown>) => void
-  onRewardChange: (r: Record<string, unknown>) => void
-  products: { product_id: string; sku: string; name: string }[]
+  onRewardChange: (r: Reward) => void
+  products: Product[]
   categories: string[]
 }) {
-  const tiers = (conditions.tiers as { from_days: number; to_days: number; discount_pct: number; product_filter: string }[]) || []
+  type Tier = { from_days: number; to_days: number; discount_pct: number; reward?: Reward }
+  const tiers = (conditions.tiers as Tier[]) || []
 
   function addTier() {
-    onCondChange({ ...conditions, tiers: [...tiers, { from_days: 0, to_days: 30, discount_pct: 10, product_filter: 'all' }] })
+    onCondChange({ ...conditions, tiers: [...tiers, { from_days: 0, to_days: 30, discount_pct: 10, reward: { ...EMPTY_REWARD } }] })
   }
   function updateTier(i: number, key: string, val: unknown) {
     onCondChange({ ...conditions, tiers: tiers.map((t, idx) => idx === i ? { ...t, [key]: val } : t) })
@@ -126,27 +292,15 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
   }
 
   const selDistricts = (conditions.districts as string[]) || []
-  function toggleDistrict(d: string) {
-    onCondChange({ ...conditions, districts: selDistricts.includes(d) ? selDistricts.filter(x => x !== d) : [...selDistricts, d] })
-  }
+  const selDays      = (conditions.days_of_week as string[]) || []
+  const selSkus      = (conditions.skus as string[]) || []
+  const selCats      = (conditions.categories as string[]) || []
 
-  const selDays = (conditions.days_of_week as string[]) || []
-  function toggleDay(d: string) {
-    onCondChange({ ...conditions, days_of_week: selDays.includes(d) ? selDays.filter(x => x !== d) : [...selDays, d] })
-  }
-
-  const selSkus = (conditions.skus as string[]) || []
-  function toggleSku(sku: string) {
-    onCondChange({ ...conditions, skus: selSkus.includes(sku) ? selSkus.filter(x => x !== sku) : [...selSkus, sku] })
-  }
-
-  const selCats = (conditions.categories as string[]) || []
-  function toggleCat(cat: string) {
-    onCondChange({ ...conditions, categories: selCats.includes(cat) ? selCats.filter(x => x !== cat) : [...selCats, cat] })
-  }
+  const toggleArr = (key: string, arr: string[], val: string) =>
+    onCondChange({ ...conditions, [key]: arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val] })
 
   const labelCls = "block text-xs font-medium mb-1"
-  const lStyle = { color: 'var(--c-text)' }
+  const lStyle   = { color: 'var(--c-text)' }
 
   if (type === 'cart_value') return (
     <div className="space-y-3">
@@ -154,7 +308,13 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <input type="number" min="0" className="input" placeholder="500"
           value={String(conditions.min_amount || '')}
           onChange={e => onCondChange({ ...conditions, min_amount: parseFloat(e.target.value) || 0 })} /></div>
-      <RewardFields reward={reward} onChange={onRewardChange} />
+      <div><label className={labelCls} style={lStyle}>Apply To</label>
+        <select className="input" value={String(conditions.apply_to || 'all')}
+          onChange={e => onCondChange({ ...conditions, apply_to: e.target.value })}>
+          <option value="all">All products</option>
+          {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
+        </select></div>
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -171,25 +331,19 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
             <span className="text-xs font-semibold" style={{ color: 'var(--c-accent)' }}>Tier {i + 1}</span>
             <button type="button" onClick={() => removeTier(i)} style={{ color: '#EF5350' }}><X size={13} /></button>
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             <div><label className={labelCls} style={lStyle}>From (days)</label>
               <input type="number" min="0" className="input text-xs" value={tier.from_days}
                 onChange={e => updateTier(i, 'from_days', parseInt(e.target.value) || 0)} /></div>
             <div><label className={labelCls} style={lStyle}>To (days)</label>
               <input type="number" min="0" className="input text-xs" value={tier.to_days}
                 onChange={e => updateTier(i, 'to_days', parseInt(e.target.value) || 0)} /></div>
-            <div><label className={labelCls} style={lStyle}>Discount %</label>
-              <input type="number" min="0" max="90" className="input text-xs" value={tier.discount_pct}
-                onChange={e => updateTier(i, 'discount_pct', parseFloat(e.target.value) || 0)} /></div>
           </div>
-          <div><label className={labelCls} style={lStyle}>Apply To</label>
-            <select className="input text-xs" value={tier.product_filter}
-              onChange={e => updateTier(i, 'product_filter', e.target.value)}>
-              <option value="all">All products</option>
-              <option value="same_category">Same category as previous purchase</option>
-              {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
-              {products.slice(0, 20).map(p => <option key={p.sku} value={`sku:${p.sku}`}>{p.sku} — {p.name}</option>)}
-            </select></div>
+          <RewardSelector
+            reward={tier.reward || { reward_type: 'percentage', discount_value: tier.discount_pct || 10, bonus_items: [] }}
+            onChange={r => updateTier(i, 'reward', r)}
+            products={products}
+          />
         </div>
       ))}
     </div>
@@ -203,7 +357,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
           <option value="all">All products</option>
           {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
         </select></div>
-      <RewardFields reward={reward} onChange={onRewardChange} />
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -215,14 +369,14 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
           {products.map(p => (
             <label key={p.sku} className="flex items-center gap-2 px-3 py-2 cursor-pointer text-xs"
               style={{ borderBottom: '1px solid var(--c-border-subtle)' }}>
-              <input type="checkbox" checked={selSkus.includes(p.sku)} onChange={() => toggleSku(p.sku)} />
+              <input type="checkbox" checked={selSkus.includes(p.sku)} onChange={() => toggleArr('skus', selSkus, p.sku)} />
               <code className="font-mono" style={{ color: 'var(--c-accent)' }}>{p.sku}</code>
               <span style={{ color: 'var(--c-text)' }}>{p.name}</span>
             </label>
           ))}
         </div>
       </div>
-      <RewardFields reward={reward} onChange={onRewardChange} />
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -232,7 +386,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <label className={labelCls} style={lStyle}>Select Categories</label>
         <div className="flex flex-wrap gap-2">
           {categories.map(cat => (
-            <button key={cat} type="button" onClick={() => toggleCat(cat)}
+            <button key={cat} type="button" onClick={() => toggleArr('categories', selCats, cat)}
               className="text-xs px-2.5 py-1 rounded-full border font-medium transition-all"
               style={selCats.includes(cat)
                 ? { background: 'rgba(4,170,109,0.15)', color: '#04AA6D', borderColor: '#04AA6D' }
@@ -243,10 +397,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
           {categories.length === 0 && <p className="text-xs" style={{ color: 'var(--c-muted)' }}>কোনো category পাওয়া যায়নি</p>}
         </div>
       </div>
-      <div><label className={labelCls} style={lStyle}>Discount %</label>
-        <input type="number" min="0" max="90" className="input" placeholder="10"
-          value={String(conditions.discount_pct || '')}
-          onChange={e => onCondChange({ ...conditions, discount_pct: parseFloat(e.target.value) || 0 })} /></div>
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -257,17 +408,14 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
           <input type="number" min="2" className="input" placeholder="5"
             value={String(conditions.min_quantity || '')}
             onChange={e => onCondChange({ ...conditions, min_quantity: parseInt(e.target.value) || 2 })} /></div>
-        <div><label className={labelCls} style={lStyle}>Discount %</label>
-          <input type="number" min="0" max="90" className="input" placeholder="10"
-            value={String(conditions.discount_pct || '')}
-            onChange={e => onCondChange({ ...conditions, discount_pct: parseFloat(e.target.value) || 0 })} /></div>
+        <div><label className={labelCls} style={lStyle}>Apply To</label>
+          <select className="input" value={String(conditions.apply_to || 'all')}
+            onChange={e => onCondChange({ ...conditions, apply_to: e.target.value })}>
+            <option value="all">All products</option>
+            {products.slice(0, 30).map(p => <option key={p.sku} value={p.sku}>{p.sku} — {p.name}</option>)}
+          </select></div>
       </div>
-      <div><label className={labelCls} style={lStyle}>Apply To</label>
-        <select className="input" value={String(conditions.apply_to || 'all')}
-          onChange={e => onCondChange({ ...conditions, apply_to: e.target.value })}>
-          <option value="all">All products</option>
-          {products.slice(0, 30).map(p => <option key={p.sku} value={p.sku}>{p.sku} — {p.name}</option>)}
-        </select></div>
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -278,13 +426,13 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <div className="max-h-52 overflow-y-auto grid grid-cols-2 gap-1 p-2 rounded border" style={{ borderColor: 'var(--c-border)' }}>
           {BD_DISTRICTS.map(d => (
             <label key={d} className="flex items-center gap-1.5 text-xs cursor-pointer py-0.5">
-              <input type="checkbox" checked={selDistricts.includes(d)} onChange={() => toggleDistrict(d)} />
+              <input type="checkbox" checked={selDistricts.includes(d)} onChange={() => toggleArr('districts', selDistricts, d)} />
               <span style={{ color: 'var(--c-text)' }}>{d}</span>
             </label>
           ))}
         </div>
       </div>
-      <RewardFields reward={reward} onChange={onRewardChange} />
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} includeDelivery />
     </div>
   )
 
@@ -294,7 +442,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
         <label className={labelCls} style={lStyle}>Days of Week</label>
         <div className="flex gap-1.5 flex-wrap">
           {DAYS.map(d => (
-            <button key={d} type="button" onClick={() => toggleDay(d)}
+            <button key={d} type="button" onClick={() => toggleArr('days_of_week', selDays, d)}
               className="text-xs px-2.5 py-1 rounded border font-medium"
               style={selDays.includes(d)
                 ? { background: 'rgba(4,170,109,0.15)', color: '#04AA6D', borderColor: '#04AA6D' }
@@ -312,28 +460,7 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
           <input type="time" className="input" value={String(conditions.to_time || '18:00')}
             onChange={e => onCondChange({ ...conditions, to_time: e.target.value })} /></div>
       </div>
-      <div><label className={labelCls} style={lStyle}>Discount %</label>
-        <input type="number" min="0" max="90" className="input" placeholder="10"
-          value={String(conditions.discount_pct || '')}
-          onChange={e => onCondChange({ ...conditions, discount_pct: parseFloat(e.target.value) || 0 })} /></div>
-    </div>
-  )
-
-  if (type === 'lifetime_value') return (
-    <div className="space-y-3">
-      <div><label className={labelCls} style={lStyle}>Minimum Lifetime Value (৳)</label>
-        <input type="number" min="0" step="100" className="input" placeholder="10000"
-          value={String(conditions.min_lifetime_value || '')}
-          onChange={e => onCondChange({ ...conditions, min_lifetime_value: parseFloat(e.target.value) || 0 })} />
-        <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>গ্রাহকের মোট lifetime purchase এই পরিমাণ বা বেশি হলে discount প্রযোজ্য</p>
-      </div>
-      <div><label className={labelCls} style={lStyle}>Apply To</label>
-        <select className="input" value={String(conditions.apply_to || 'all')}
-          onChange={e => onCondChange({ ...conditions, apply_to: e.target.value })}>
-          <option value="all">All products</option>
-          {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
-        </select></div>
-      <RewardFields reward={reward} onChange={onRewardChange} />
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -347,7 +474,25 @@ function RuleForm({ type, conditions, reward, onCondChange, onRewardChange, prod
           <input type="date" className="input" value={String(conditions.end_date || '')}
             onChange={e => onCondChange({ ...conditions, end_date: e.target.value })} /></div>
       </div>
-      <RewardFields reward={reward} onChange={onRewardChange} />
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
+    </div>
+  )
+
+  if (type === 'lifetime_value') return (
+    <div className="space-y-3">
+      <div><label className={labelCls} style={lStyle}>Minimum Lifetime Value (৳)</label>
+        <input type="number" min="0" step="100" className="input" placeholder="10000"
+          value={String(conditions.min_lifetime_value || '')}
+          onChange={e => onCondChange({ ...conditions, min_lifetime_value: parseFloat(e.target.value) || 0 })} />
+        <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>মোট lifetime purchase এই পরিমাণ বা বেশি হলে প্রযোজ্য</p>
+      </div>
+      <div><label className={labelCls} style={lStyle}>Apply To</label>
+        <select className="input" value={String(conditions.apply_to || 'all')}
+          onChange={e => onCondChange({ ...conditions, apply_to: e.target.value })}>
+          <option value="all">All products</option>
+          {categories.map(c => <option key={c} value={`cat:${c}`}>{c}</option>)}
+        </select></div>
+      <RewardSelector reward={reward} onChange={onRewardChange} products={products} />
     </div>
   )
 
@@ -361,24 +506,20 @@ export default function DiscountRulesPage() {
   const [loading, setLoading]     = useState(true)
   const [activeTab, setActiveTab] = useState<'rules' | 'priority'>('rules')
   const [expandedTypes, setExpandedTypes] = useState<Set<RuleType>>(new Set())
-  const [products, setProducts]   = useState<{ product_id: string; sku: string; name: string; category?: string }[]>([])
+  const [products, setProducts]   = useState<Product[]>([])
 
-  // Rule modal
   const [showModal, setShowModal]   = useState(false)
   const [modalType, setModalType]   = useState<RuleType>('cart_value')
   const [editingId, setEditingId]   = useState<string | null>(null)
   const [ruleName, setRuleName]     = useState('')
   const [conditions, setConditions] = useState<Record<string, unknown>>({})
-  const [reward, setReward]         = useState<Record<string, unknown>>({ discount_type: 'percentage', discount_value: 10 })
+  const [reward, setReward]         = useState<Reward>(EMPTY_REWARD)
   const [saving, setSaving]         = useState(false)
 
-  // Priority settings (ai_config.discount_priority_settings JSONB)
   const [prioritySettings, setPrioritySettings] = useState<Record<string, PrioritySetting>>({})
   const [savingPriority, setSavingPriority]     = useState(false)
   const [campaignCount, setCampaignCount]       = useState(0)
-  const [comboCount, setComboCount]             = useState(0)
 
-  // Preview calculator
   const [previewCart, setPreviewCart]         = useState('')
   const [previewQty, setPreviewQty]           = useState('')
   const [previewSku, setPreviewSku]           = useState('')
@@ -391,7 +532,6 @@ export default function DiscountRulesPage() {
 
   const categories = [...new Set(products.map(p => p.category).filter(Boolean))] as string[]
 
-  // Build default priority settings
   function buildDefaults(): Record<string, PrioritySetting> {
     return Object.fromEntries(
       ALL_PRIORITY_TYPES.map(t => [t.key, { priority: t.defaultPriority, enabled: true }])
@@ -401,13 +541,12 @@ export default function DiscountRulesPage() {
   useEffect(() => {
     Promise.all([
       discountRulesAPI.list().then(setRules),
-      productsAPI.list().then((d: { product_id: string; sku: string; name: string; category?: string }[]) => setProducts(d)),
+      productsAPI.list().then(setProducts),
       configAPI.get().then((c: Record<string, unknown>) => {
         const saved = c.discount_priority_settings as Record<string, PrioritySetting> | undefined
         setPrioritySettings(saved && Object.keys(saved).length > 0 ? saved : buildDefaults())
       }),
       campaignsAPI.list().then((d: unknown[]) => setCampaignCount(d.length)).catch(() => {}),
-      combosAPI.list().then((d: unknown[]) => setComboCount(d.length)).catch(() => {}),
     ]).catch(() => setPrioritySettings(buildDefaults())).finally(() => setLoading(false))
   }, [])
 
@@ -421,13 +560,20 @@ export default function DiscountRulesPage() {
 
   function openCreate(type: RuleType) {
     setEditingId(null); setModalType(type); setRuleName('')
-    setConditions({}); setReward({ discount_type: 'percentage', discount_value: 10 })
+    setConditions({}); setReward({ ...EMPTY_REWARD })
     setShowModal(true)
   }
 
   function openEdit(rule: DiscountRule) {
     setEditingId(rule.rule_id); setModalType(rule.rule_type); setRuleName(rule.rule_name)
-    setConditions({ ...rule.conditions }); setReward({ ...rule.reward })
+    setConditions({ ...rule.conditions })
+    // Normalise legacy reward shape
+    const r = rule.reward as Record<string, unknown>
+    setReward({
+      reward_type:    (r?.reward_type || r?.discount_type || 'percentage') as Reward['reward_type'],
+      discount_value: Number(r?.discount_value || 0),
+      bonus_items:    (r?.bonus_items as BonusItem[]) || [],
+    })
     setShowModal(true)
   }
 
@@ -482,13 +628,13 @@ export default function DiscountRulesPage() {
     setPreviewing(true)
     try {
       const res = await discountRulesAPI.preview({
-        cart_amount:    parseFloat(previewCart),
-        quantity:       previewQty ? parseInt(previewQty) : undefined,
-        product_skus:   previewSku ? previewSku.split(',').map(s => s.trim()).filter(Boolean) : undefined,
-        categories:     previewCategory ? previewCategory.split(',').map(s => s.trim()).filter(Boolean) : undefined,
-        district:       previewDistrict || undefined,
+        cart_amount:     parseFloat(previewCart),
+        quantity:        previewQty ? parseInt(previewQty) : undefined,
+        product_skus:    previewSku ? previewSku.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        categories:      previewCategory ? previewCategory.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        district:        previewDistrict || undefined,
         is_new_customer: previewNewCust,
-        customer_phone: previewPhone || undefined,
+        customer_phone:  previewPhone || undefined,
       })
       setPreviewResult(res)
     } catch { toast.error('Preview করা যায়নি') }
@@ -499,11 +645,20 @@ export default function DiscountRulesPage() {
 
   const rulesByType = (type: string) => rules.filter(r => r.rule_type === type)
 
+  function rewardLabel(r: Reward) {
+    if (!r) return '—'
+    if (r.reward_type === 'percentage') return `${r.discount_value}%`
+    if (r.reward_type === 'flat') return `৳${r.discount_value}`
+    if (r.reward_type === 'bonus') return `Free: ${(r.bonus_items || []).length} item(s)`
+    if (r.reward_type === 'free_delivery') return 'Free Delivery'
+    return '—'
+  }
+
   return (
     <div className="max-w-3xl space-y-5">
       <div>
         <h1 className="page-title">Smart Discount Rules</h1>
-        <p className="page-subtitle">১০ ধরনের dynamic discount rule + priority system</p>
+        <p className="page-subtitle">১০ ধরনের dynamic discount rule — percentage, flat, বা free product reward</p>
       </div>
 
       {/* Tabs */}
@@ -526,10 +681,10 @@ export default function DiscountRulesPage() {
       {activeTab === 'rules' && (
         <div className="space-y-3">
           {(Object.keys(RULE_META) as RuleType[]).map(type => {
-            const meta = RULE_META[type]
-            const Icon = meta.icon
+            const meta      = RULE_META[type]
+            const Icon      = meta.icon
             const typeRules = rulesByType(type)
-            const expanded = expandedTypes.has(type)
+            const expanded  = expandedTypes.has(type)
 
             return (
               <div key={type} className="card overflow-hidden">
@@ -569,7 +724,7 @@ export default function DiscountRulesPage() {
                         <thead style={{ backgroundColor: 'var(--c-surface)' }}>
                           <tr>
                             <th className="th text-left" style={{ color: 'var(--c-muted)' }}>Name</th>
-                            <th className="th text-center" style={{ color: 'var(--c-muted)' }}>Priority</th>
+                            <th className="th text-center" style={{ color: 'var(--c-muted)' }}>Reward</th>
                             <th className="th text-center" style={{ color: 'var(--c-muted)' }}>Active</th>
                             <th className="th text-right" style={{ color: 'var(--c-muted)' }}>Action</th>
                           </tr>
@@ -578,7 +733,11 @@ export default function DiscountRulesPage() {
                           {typeRules.map((rule, i) => (
                             <tr key={rule.rule_id} style={{ borderTop: i > 0 ? '1px solid var(--c-border-subtle)' : 'none' }}>
                               <td className="td text-xs font-medium" style={{ color: 'var(--c-text)' }}>{rule.rule_name || meta.label}</td>
-                              <td className="td text-center text-xs" style={{ color: 'var(--c-muted)' }}>#{rule.priority}</td>
+                              <td className="td text-center">
+                                <span className="text-xs font-medium" style={{ color: '#04AA6D' }}>
+                                  {rewardLabel(rule.reward)}
+                                </span>
+                              </td>
                               <td className="td text-center">
                                 <button type="button" role="switch" aria-checked={rule.is_active}
                                   onClick={() => handleToggleActive(rule)}
@@ -646,7 +805,7 @@ export default function DiscountRulesPage() {
               <div className="flex items-center col-span-2">
                 <label className="flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--c-text)' }}>
                   <input type="checkbox" checked={previewNewCust} onChange={e => setPreviewNewCust(e.target.checked)} />
-                  New Customer (phone override করে না থাকলে)
+                  New Customer
                 </label>
               </div>
             </div>
@@ -673,7 +832,7 @@ export default function DiscountRulesPage() {
                     <p className="text-xs font-medium mb-1" style={{ color: 'var(--c-muted)' }}>Matched Rules:</p>
                     {(previewResult.matched_rules as { rule_name: string; discount_value: number; discount_type: string; reason?: string }[]).map((r, i) => (
                       <p key={i} className="text-xs" style={{ color: 'var(--c-text)' }}>
-                        • {r.rule_name} — {r.discount_value}{r.discount_type === 'percentage' ? '%' : '৳'}
+                        • {r.rule_name} — {r.discount_type === 'bonus' ? 'Free Products' : `${r.discount_value}${r.discount_type === 'percentage' ? '%' : '৳'}`}
                         {r.reason && <span style={{ color: 'var(--c-muted)' }}> ({r.reason})</span>}
                       </p>
                     ))}
@@ -692,7 +851,7 @@ export default function DiscountRulesPage() {
             <div>
               <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>Rule Priority Order</h2>
               <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>
-                Priority number সম্পাদনা করুন এবং rule type ON/OFF করুন (Conflict Resolution → AI Settings → Smart AI)
+                Priority number সম্পাদনা করুন এবং rule type ON/OFF করুন
               </p>
             </div>
             <button onClick={handleSavePriority} disabled={savingPriority} className="btn-primary text-xs py-1.5 px-3 gap-1.5">
@@ -712,36 +871,26 @@ export default function DiscountRulesPage() {
               </thead>
               <tbody>
                 {ALL_PRIORITY_TYPES.map((type, i) => {
-                  const Icon = type.icon
+                  const Icon    = type.icon
                   const setting = prioritySettings[type.key] ?? { priority: type.defaultPriority, enabled: true }
-                  const count = type.key === 'campaign' ? campaignCount
-                    : type.key === 'combo' ? comboCount
-                    : rulesByType(type.key).length
+                  const count   = type.key === 'campaign' ? campaignCount : rulesByType(type.key).length
 
                   return (
                     <tr key={type.key} style={{ borderTop: i > 0 ? '1px solid var(--c-border-subtle)' : 'none' }}>
-                      {/* Priority number input */}
                       <td className="td text-center">
-                        <input
-                          type="number" min="1" max="12"
-                          className="input text-center text-xs py-1 h-auto w-14"
+                        <input type="number" min="1" max="11" className="input text-center text-xs py-1 h-auto w-14"
                           value={setting.priority}
-                          onChange={e => setPrioritySetting(type.key, 'priority', parseInt(e.target.value) || 1)}
-                        />
+                          onChange={e => setPrioritySetting(type.key, 'priority', parseInt(e.target.value) || 1)} />
                       </td>
-                      {/* Icon + name */}
                       <td className="td">
                         <div className="flex items-center gap-2">
                           <div className="w-6 h-6 rounded flex items-center justify-center flex-shrink-0"
                             style={{ backgroundColor: `${type.color}18` }}>
                             <Icon size={13} style={{ color: type.color }} />
                           </div>
-                          <div>
-                            <span className="text-xs font-medium" style={{ color: 'var(--c-text)' }}>{type.label}</span>
-                          </div>
+                          <span className="text-xs font-medium" style={{ color: 'var(--c-text)' }}>{type.label}</span>
                         </div>
                       </td>
-                      {/* Active rules count */}
                       <td className="td text-center">
                         {count > 0 ? (
                           <span className="text-xs px-1.5 py-0.5 rounded-full font-medium"
@@ -752,7 +901,6 @@ export default function DiscountRulesPage() {
                           <span className="text-xs" style={{ color: 'var(--c-muted)' }}>0</span>
                         )}
                       </td>
-                      {/* ON/OFF toggle */}
                       <td className="td text-center">
                         <button type="button" role="switch" aria-checked={setting.enabled}
                           onClick={() => setPrioritySetting(type.key, 'enabled', !setting.enabled)}

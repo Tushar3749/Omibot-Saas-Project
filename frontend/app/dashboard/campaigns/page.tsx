@@ -1,21 +1,31 @@
 'use client'
 import { useEffect, useState, useRef } from 'react'
 import toast from 'react-hot-toast'
-import { campaignsAPI } from '@/lib/api'
+import { campaignsAPI, discountCategoriesAPI, productsAPI } from '@/lib/api'
 import {
-  Megaphone, Plus, X, Edit2, Trash2, Upload,
-  CheckCircle, Clock, AlertCircle, XCircle, Package,
+  Megaphone, Plus, X, Edit2, Trash2,
+  CheckCircle, Clock, AlertCircle, XCircle, Package, Search, Gift,
 } from 'lucide-react'
 import ProductPicker, { type SelectedProduct } from '@/components/ui/ProductPicker'
-import CsvGuide from '@/components/ui/CsvGuide'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface BonusItem { product_id: string; sku: string; name: string; quantity: number }
+
+interface Reward {
+  reward_type: 'percentage' | 'flat' | 'bonus'
+  discount_value: number
+  bonus_items: BonusItem[]
+}
+
 interface Campaign {
   campaign_id: string
   name: string
   description: string | null
-  type: 'percentage' | 'flat' | 'bonus'
-  amount: number
+  reward: Reward
+  type?: string
+  amount?: number
+  discount_category_id: string | null
   start_date: string | null
   end_date: string | null
   apply_to: 'all' | 'specific'
@@ -25,11 +35,21 @@ interface Campaign {
   created_at: string
 }
 
+interface DiscountCategory {
+  category_id: string
+  category_name: string
+  is_active: boolean
+}
+
+interface Product { product_id: string; sku: string; name: string; category?: string }
+
+const EMPTY_REWARD: Reward = { reward_type: 'percentage', discount_value: 10, bonus_items: [] }
+
 type FormData = {
   name: string
   description: string
-  type: 'percentage' | 'flat' | 'bonus'
-  amount: string
+  reward: Reward
+  discount_category_id: string
   start_date: string
   end_date: string
   apply_to: 'all' | 'specific'
@@ -37,8 +57,10 @@ type FormData = {
 }
 
 const EMPTY_FORM: FormData = {
-  name: '', description: '', type: 'percentage',
-  amount: '', start_date: '', end_date: '',
+  name: '', description: '',
+  reward: EMPTY_REWARD,
+  discount_category_id: '',
+  start_date: '', end_date: '',
   apply_to: 'all', is_active: true,
 }
 
@@ -60,34 +82,208 @@ function StatusBadge({ status }: { status: Campaign['status'] }) {
   )
 }
 
-// ─── Type label ───────────────────────────────────────────────────────────────
-function typeLabel(type: string, amount: number) {
-  if (type === 'percentage') return `${amount}% ছাড়`
-  if (type === 'flat')       return `৳${amount} ছাড়`
-  return `৳${amount} বোনাস`
+// ─── Reward label ─────────────────────────────────────────────────────────────
+function rewardLabel(c: Campaign): string {
+  const r = c.reward
+  if (r?.reward_type === 'percentage') return `${r.discount_value}% ছাড়`
+  if (r?.reward_type === 'flat')       return `৳${r.discount_value} ছাড়`
+  if (r?.reward_type === 'bonus')      return `ফ্রি পণ্য (${(r.bonus_items || []).length} টি)`
+  if (c.type === 'percentage')         return `${c.amount}% ছাড়`
+  if (c.type === 'flat')               return `৳${c.amount} ছাড়`
+  return `৳${c.amount || 0} বোনাস`
+}
+
+// ─── Reward Selector ──────────────────────────────────────────────────────────
+function RewardSelector({
+  reward, onChange, products,
+}: {
+  reward: Reward
+  onChange: (r: Reward) => void
+  products: Product[]
+}) {
+  const [bonusSearch, setBonusSearch]         = useState('')
+  const [bonusQty, setBonusQty]               = useState(1)
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
+  const [showDropdown, setShowDropdown]       = useState(false)
+  const dropRef = useRef<HTMLDivElement>(null)
+
+  const rtype      = reward.reward_type || 'percentage'
+  const bonusItems = reward.bonus_items || []
+
+  const filtered = bonusSearch.trim().length > 0
+    ? products.filter(p =>
+        p.sku.toLowerCase().includes(bonusSearch.toLowerCase()) ||
+        p.name.toLowerCase().includes(bonusSearch.toLowerCase())
+      ).slice(0, 8)
+    : []
+
+  function addBonusItem() {
+    if (!selectedProduct) return
+    const exists = bonusItems.find(b => b.product_id === selectedProduct.product_id)
+    if (exists) {
+      onChange({ ...reward, bonus_items: bonusItems.map(b =>
+        b.product_id === selectedProduct.product_id ? { ...b, quantity: b.quantity + bonusQty } : b
+      )})
+    } else {
+      onChange({ ...reward, bonus_items: [...bonusItems, {
+        product_id: selectedProduct.product_id,
+        sku: selectedProduct.sku,
+        name: selectedProduct.name,
+        quantity: bonusQty,
+      }]})
+    }
+    setBonusSearch('')
+    setSelectedProduct(null)
+    setBonusQty(1)
+    setShowDropdown(false)
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        {(['percentage', 'flat', 'bonus'] as const).map(rt => (
+          <label key={rt} className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="radio"
+              name={`reward_type_campaign_${Math.random()}`}
+              checked={rtype === rt}
+              onChange={() => onChange({ ...reward, reward_type: rt })}
+              style={{ accentColor: '#04AA6D' }}
+            />
+            <span className="text-sm" style={{ color: '#282A35' }}>
+              {rt === 'percentage' ? '% ছাড়' : rt === 'flat' ? '৳ ফ্ল্যাট ছাড়' : 'ফ্রি পণ্য'}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      {rtype === 'percentage' && (
+        <div>
+          <label className="block text-xs font-medium mb-1" style={{ color: '#616161' }}>ছাড়ের পরিমাণ (%)</label>
+          <input
+            type="number" min="0" max="100" step="0.1"
+            className="input w-40"
+            value={reward.discount_value}
+            onChange={e => onChange({ ...reward, discount_value: parseFloat(e.target.value) || 0 })}
+          />
+        </div>
+      )}
+
+      {rtype === 'flat' && (
+        <div>
+          <label className="block text-xs font-medium mb-1" style={{ color: '#616161' }}>ছাড়ের পরিমাণ (৳)</label>
+          <input
+            type="number" min="0" step="0.01"
+            className="input w-40"
+            value={reward.discount_value}
+            onChange={e => onChange({ ...reward, discount_value: parseFloat(e.target.value) || 0 })}
+          />
+        </div>
+      )}
+
+      {rtype === 'bonus' && (
+        <div className="space-y-2">
+          <label className="block text-xs font-medium mb-1" style={{ color: '#616161' }}>ফ্রি পণ্য যোগ করুন</label>
+          <div className="flex gap-2">
+            <div className="relative flex-1" ref={dropRef}>
+              <div className="relative">
+                <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: '#9E9E9E' }} />
+                <input
+                  className="input pl-8"
+                  placeholder="SKU বা নাম দিয়ে খুঁজুন..."
+                  value={bonusSearch}
+                  onChange={e => { setBonusSearch(e.target.value); setShowDropdown(true); setSelectedProduct(null) }}
+                  onFocus={() => setShowDropdown(true)}
+                />
+              </div>
+              {showDropdown && filtered.length > 0 && (
+                <div className="absolute z-20 w-full mt-1 rounded-lg shadow-lg overflow-hidden"
+                     style={{ backgroundColor: '#fff', border: '1px solid #E0E0E0' }}>
+                  {filtered.map(p => (
+                    <button
+                      key={p.product_id}
+                      type="button"
+                      className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                      onClick={() => { setSelectedProduct(p); setBonusSearch(`${p.sku} – ${p.name}`); setShowDropdown(false) }}
+                    >
+                      <span className="font-mono" style={{ color: '#9E9E9E' }}>{p.sku}</span>
+                      <span className="mx-1.5" style={{ color: '#E0E0E0' }}>·</span>
+                      <span style={{ color: '#282A35' }}>{p.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <input
+              type="number" min="1" className="input w-16 text-center"
+              value={bonusQty}
+              onChange={e => setBonusQty(Math.max(1, parseInt(e.target.value) || 1))}
+            />
+            <button
+              type="button"
+              onClick={addBonusItem}
+              disabled={!selectedProduct}
+              className="btn-primary px-3 text-xs gap-1"
+            >
+              <Gift size={12} /> যোগ
+            </button>
+          </div>
+
+          {bonusItems.length > 0 && (
+            <div className="space-y-1.5 mt-1">
+              {bonusItems.map(b => (
+                <div key={b.product_id}
+                     className="flex items-center justify-between px-3 py-1.5 rounded text-xs"
+                     style={{ backgroundColor: '#F1F8E9', border: '1px solid #C8E6C9' }}>
+                  <span>
+                    <span className="font-mono" style={{ color: '#558B2F' }}>{b.sku}</span>
+                    <span className="mx-1" style={{ color: '#A5D6A7' }}>·</span>
+                    <span style={{ color: '#282A35' }}>{b.name}</span>
+                    <span className="ml-1 font-semibold" style={{ color: '#2E7D32' }}>×{b.quantity}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onChange({ ...reward, bonus_items: bonusItems.filter(x => x.product_id !== b.product_id) })}
+                    style={{ color: '#EF5350' }}
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function CampaignsPage() {
   const [campaigns, setCampaigns]       = useState<Campaign[]>([])
+  const [categories, setCategories]     = useState<DiscountCategory[]>([])
+  const [products, setProducts]         = useState<Product[]>([])
   const [loading, setLoading]           = useState(true)
   const [showModal, setShowModal]       = useState(false)
   const [editing, setEditing]           = useState<Campaign | null>(null)
   const [form, setForm]                 = useState<FormData>(EMPTY_FORM)
   const [saving, setSaving]             = useState(false)
-  const [importing, setImporting]       = useState(false)
   const [deleting, setDeleting]         = useState<string | null>(null)
   const [showPicker, setShowPicker]     = useState(false)
   const [selectedProducts, setSelectedProducts] = useState<SelectedProduct[]>([])
-  const csvRef = useRef<HTMLInputElement>(null)
 
-  // ── Load ──────────────────────────────────────────────────────────────────
   async function load() {
     try {
-      const data = await campaignsAPI.list()
-      setCampaigns(data)
+      const [campData, catData, prodData] = await Promise.all([
+        campaignsAPI.list(),
+        discountCategoriesAPI.list().catch(() => []),
+        productsAPI.list().catch(() => []),
+      ])
+      setCampaigns(campData)
+      setCategories(catData.filter((c: DiscountCategory) => c.is_active))
+      setProducts(prodData)
     } catch {
-      toast.error('Campaigns লোড করা যায়নি')
+      toast.error('Data লোড করা যায়নি')
     } finally {
       setLoading(false)
     }
@@ -95,7 +291,6 @@ export default function CampaignsPage() {
 
   useEffect(() => { load() }, [])
 
-  // ── Open modal ────────────────────────────────────────────────────────────
   function openCreate() {
     setEditing(null)
     setForm(EMPTY_FORM)
@@ -105,17 +300,23 @@ export default function CampaignsPage() {
 
   function openEdit(c: Campaign) {
     setEditing(c)
+    const reward: Reward = c.reward?.reward_type
+      ? c.reward
+      : {
+          reward_type: (c.type === 'bonus' ? 'bonus' : c.type === 'flat' ? 'flat' : 'percentage') as Reward['reward_type'],
+          discount_value: c.amount || 0,
+          bonus_items: [],
+        }
     setForm({
-      name:        c.name,
-      description: c.description || '',
-      type:        c.type,
-      amount:      String(c.amount),
-      start_date:  c.start_date ? c.start_date.slice(0, 10) : '',
-      end_date:    c.end_date   ? c.end_date.slice(0, 10)   : '',
-      apply_to:    c.apply_to,
-      is_active:   c.is_active,
+      name:                 c.name,
+      description:          c.description || '',
+      reward,
+      discount_category_id: c.discount_category_id || '',
+      start_date:           c.start_date ? c.start_date.slice(0, 10) : '',
+      end_date:             c.end_date   ? c.end_date.slice(0, 10)   : '',
+      apply_to:             c.apply_to,
+      is_active:            c.is_active,
     })
-    // Restore selected products if editing a specific campaign
     if (c.apply_to === 'specific' && c.product_ids?.length) {
       setSelectedProducts(c.product_ids.map(id => ({
         product_id: id, sku: '', name: id, mrp: 0, quantity: 1,
@@ -126,24 +327,32 @@ export default function CampaignsPage() {
     setShowModal(true)
   }
 
-  // ── Save ──────────────────────────────────────────────────────────────────
   async function handleSave() {
-    if (!form.name.trim() || !form.amount) {
-      toast.error('নাম ও পরিমাণ আবশ্যক')
+    if (!form.name.trim()) {
+      toast.error('Campaign নাম আবশ্যক')
+      return
+    }
+    const r = form.reward
+    if (r.reward_type !== 'bonus' && (r.discount_value <= 0)) {
+      toast.error('ছাড়ের পরিমাণ দিন')
+      return
+    }
+    if (r.reward_type === 'bonus' && r.bonus_items.length === 0) {
+      toast.error('কমপক্ষে একটি ফ্রি পণ্য যোগ করুন')
       return
     }
     setSaving(true)
     try {
       const payload = {
-        name:        form.name.trim(),
-        description: form.description || null,
-        type:        form.type,
-        amount:      parseFloat(form.amount),
-        start_date:  form.start_date || null,
-        end_date:    form.end_date   || null,
-        apply_to:    form.apply_to,
-        is_active:   form.is_active,
-        product_ids: form.apply_to === 'specific' ? selectedProducts.map(p => p.product_id) : null,
+        name:                 form.name.trim(),
+        description:          form.description || null,
+        reward:               form.reward,
+        discount_category_id: form.discount_category_id || null,
+        start_date:           form.start_date || null,
+        end_date:             form.end_date   || null,
+        apply_to:             form.apply_to,
+        is_active:            form.is_active,
+        product_ids:          form.apply_to === 'specific' ? selectedProducts.map(p => p.product_id) : null,
       }
       if (editing) {
         const updated = await campaignsAPI.update(editing.campaign_id, payload)
@@ -163,7 +372,6 @@ export default function CampaignsPage() {
     }
   }
 
-  // ── Delete ────────────────────────────────────────────────────────────────
   async function handleDelete(id: string) {
     if (!confirm('এই campaign মুছে ফেলবেন?')) return
     setDeleting(id)
@@ -178,7 +386,6 @@ export default function CampaignsPage() {
     }
   }
 
-  // ── Toggle active ─────────────────────────────────────────────────────────
   async function toggleActive(c: Campaign) {
     try {
       const updated = await campaignsAPI.update(c.campaign_id, { is_active: !c.is_active })
@@ -188,25 +395,9 @@ export default function CampaignsPage() {
     }
   }
 
-  // ── CSV Import ────────────────────────────────────────────────────────────
-  async function handleCSVImport(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setImporting(true)
-    try {
-      const result = await campaignsAPI.importCSV(file)
-      toast.success(`${result.imported} টি campaign import হয়েছে`)
-      await load()
-    } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      toast.error(msg || 'Import ব্যর্থ হয়েছে')
-    } finally {
-      setImporting(false)
-      if (csvRef.current) csvRef.current.value = ''
-    }
-  }
+  const catMap: Record<string, string> = {}
+  categories.forEach(c => { catMap[c.category_id] = c.category_name })
 
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-5">
 
@@ -219,31 +410,10 @@ export default function CampaignsPage() {
           </h1>
           <p className="page-subtitle">অফার, ছাড় ও বোনাস campaign পরিচালনা করুন</p>
         </div>
-        <div className="flex gap-2">
-          <input
-            ref={csvRef}
-            type="file"
-            accept=".csv"
-            className="hidden"
-            onChange={handleCSVImport}
-          />
-          <button
-            onClick={() => csvRef.current?.click()}
-            disabled={importing}
-            className="btn-secondary gap-2"
-          >
-            {importing
-              ? <><span className="spinner h-4 w-4" /> Import হচ্ছে...</>
-              : <><Upload size={14} /> CSV Import</>}
-          </button>
-          <button onClick={openCreate} className="btn-primary gap-2">
-            <Plus size={15} /> নতুন Campaign
-          </button>
-        </div>
+        <button onClick={openCreate} className="btn-primary gap-2">
+          <Plus size={15} /> নতুন Campaign
+        </button>
       </div>
-
-      {/* CSV Guide */}
-      <CsvGuide type="campaign" />
 
       {/* List */}
       {loading ? (
@@ -263,7 +433,7 @@ export default function CampaignsPage() {
             <thead style={{ backgroundColor: '#F9F9F9', borderBottom: '1px solid #E0E0E0' }}>
               <tr>
                 <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#757575' }}>Campaign নাম</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#757575' }}>ছাড়/বোনাস</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#757575' }}>পুরস্কার</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#757575' }}>তারিখ</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#757575' }}>Status</th>
                 <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#757575' }}>Action</th>
@@ -280,25 +450,30 @@ export default function CampaignsPage() {
                         {c.description}
                       </p>
                     )}
-                    <p className="text-xs mt-0.5" style={{ color: '#9E9E9E' }}>
-                      {c.apply_to === 'all' ? 'সব পণ্যে প্রযোজ্য' : `${c.product_ids?.length || 0} পণ্যে`}
-                    </p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-xs" style={{ color: '#9E9E9E' }}>
+                        {c.apply_to === 'all' ? 'সব পণ্যে প্রযোজ্য' : `${c.product_ids?.length || 0} পণ্যে`}
+                      </p>
+                      {c.discount_category_id && catMap[c.discount_category_id] && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full"
+                              style={{ backgroundColor: '#EDE7F6', color: '#4527A0' }}>
+                          {catMap[c.discount_category_id]}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <span className="font-semibold" style={{ color: '#04AA6D' }}>
-                      {typeLabel(c.type, c.amount)}
+                      {rewardLabel(c)}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs" style={{ color: '#616161' }}>
                     {c.start_date ? <p>শুরু: {c.start_date.slice(0, 10)}</p> : <p style={{ color: '#BDBDBD' }}>—</p>}
                     {c.end_date   ? <p>শেষ: {c.end_date.slice(0, 10)}</p>   : null}
                   </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={c.status} />
-                  </td>
+                  <td className="px-4 py-3"><StatusBadge status={c.status} /></td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1.5">
-                      {/* Toggle active */}
                       <button
                         onClick={() => toggleActive(c)}
                         className="text-xs px-2 py-1 rounded border transition-colors"
@@ -346,9 +521,10 @@ export default function CampaignsPage() {
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-black/40" onClick={() => setShowModal(false)} />
-          <div className="relative w-full max-w-lg bg-white rounded-xl shadow-2xl overflow-hidden">
+          <div className="relative w-full max-w-lg bg-white rounded-xl shadow-2xl overflow-hidden flex flex-col"
+               style={{ maxHeight: '85vh' }}>
 
-            <div className="flex items-center justify-between px-5 py-4"
+            <div className="flex items-center justify-between px-5 py-4 flex-shrink-0"
                  style={{ backgroundColor: '#282A35' }}>
               <h2 className="font-semibold text-white text-sm">
                 {editing ? 'Campaign সম্পাদনা' : 'নতুন Campaign'}
@@ -358,7 +534,7 @@ export default function CampaignsPage() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+            <div className="p-5 space-y-4 overflow-y-auto flex-1">
 
               {/* Name */}
               <div>
@@ -384,43 +560,43 @@ export default function CampaignsPage() {
                 />
               </div>
 
-              {/* Type + Amount */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>ধরন *</label>
-                  <select
-                    className="input"
-                    value={form.type}
-                    onChange={e => setForm(f => ({ ...f, type: e.target.value as FormData['type'] }))}
-                  >
-                    <option value="percentage">শতকরা ছাড় (%)</option>
-                    <option value="flat">নির্দিষ্ট ছাড় (৳)</option>
-                    <option value="bonus">বোনাস (৳)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>
-                    পরিমাণ * {form.type === 'percentage' ? '(%)' : '(৳)'}
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    className="input"
-                    placeholder="0"
-                    value={form.amount}
-                    onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+              {/* Reward Selector */}
+              <div>
+                <label className="block text-sm font-medium mb-2" style={{ color: '#282A35' }}>পুরস্কার *</label>
+                <div className="p-3 rounded-lg" style={{ backgroundColor: '#F9F9F9', border: '1px solid #E0E0E0' }}>
+                  <RewardSelector
+                    reward={form.reward}
+                    onChange={r => setForm(f => ({ ...f, reward: r }))}
+                    products={products}
                   />
                 </div>
               </div>
+
+              {/* Discount Category */}
+              {categories.length > 0 && (
+                <div>
+                  <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>
+                    Discount Category (ঐচ্ছিক)
+                  </label>
+                  <select
+                    className="input"
+                    value={form.discount_category_id}
+                    onChange={e => setForm(f => ({ ...f, discount_category_id: e.target.value }))}
+                  >
+                    <option value="">— কোনো category নেই —</option>
+                    {categories.map(c => (
+                      <option key={c.category_id} value={c.category_id}>{c.category_name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Dates */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>শুরুর তারিখ</label>
                   <input
-                    type="date"
-                    className="input"
+                    type="date" className="input"
                     value={form.start_date}
                     onChange={e => setForm(f => ({ ...f, start_date: e.target.value }))}
                   />
@@ -428,8 +604,7 @@ export default function CampaignsPage() {
                 <div>
                   <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>শেষ তারিখ</label>
                   <input
-                    type="date"
-                    className="input"
+                    type="date" className="input"
                     value={form.end_date}
                     onChange={e => setForm(f => ({ ...f, end_date: e.target.value }))}
                   />
@@ -443,9 +618,7 @@ export default function CampaignsPage() {
                   {(['all', 'specific'] as const).map(v => (
                     <label key={v} className="flex items-center gap-2 cursor-pointer">
                       <input
-                        type="radio"
-                        name="apply_to"
-                        value={v}
+                        type="radio" name="apply_to" value={v}
                         checked={form.apply_to === v}
                         onChange={() => setForm(f => ({ ...f, apply_to: v }))}
                         style={{ accentColor: '#04AA6D' }}
@@ -493,9 +666,7 @@ export default function CampaignsPage() {
                    style={{ backgroundColor: '#F9F9F9', border: '1px solid #E0E0E0' }}>
                 <span className="text-sm font-medium" style={{ color: '#282A35' }}>Campaign সক্রিয়</span>
                 <button
-                  type="button"
-                  role="switch"
-                  aria-checked={form.is_active}
+                  type="button" role="switch" aria-checked={form.is_active}
                   onClick={() => setForm(f => ({ ...f, is_active: !f.is_active }))}
                   className={`toggle-track ${form.is_active ? 'toggle-track-on' : ''}`}
                 >
@@ -504,7 +675,7 @@ export default function CampaignsPage() {
               </div>
             </div>
 
-            <div className="px-5 py-4 flex justify-end gap-3"
+            <div className="px-5 py-4 flex justify-end gap-3 flex-shrink-0"
                  style={{ borderTop: '1px solid #E0E0E0' }}>
               <button onClick={() => setShowModal(false)} className="btn-secondary">বাতিল</button>
               <button onClick={handleSave} disabled={saving} className="btn-primary gap-2">
