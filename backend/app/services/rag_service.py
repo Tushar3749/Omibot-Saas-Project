@@ -129,14 +129,7 @@ class RAGService:
 
         count = 0
         for p in products:
-            # Build price info using new schema (mrp + optional discount_price)
             price_info = f"MRP: ৳{p['mrp']}"
-            if p.get("discount_price"):
-                price_info += f" | ছাড়ের মূল্য: ৳{p['discount_price']}"
-            if p.get("discount_category"):
-                price_info += f" ({p['discount_category']})"
-
-            # Fallback: read description from extra_fields if migrated there
             description = p.get("description") or (p.get("extra_fields") or {}).get("description", "")
 
             doc_text = f"পণ্যের নাম: {p['name']}\nSKU: {p.get('sku', '')}\n{price_info}\n"
@@ -144,10 +137,7 @@ class RAGService:
                 doc_text += f"বিবরণ: {description}\n"
             if p.get("category"):
                 doc_text += f"ক্যাটাগরি: {p['category']}\n"
-            if p.get("stock") is not None:
-                doc_text += f"স্টক: {p['stock']} টি\n"
 
-            # Include any custom extra_fields in the RAG context
             extra = p.get("extra_fields") or {}
             for key, val in extra.items():
                 if key != "description" and val:
@@ -158,11 +148,10 @@ class RAGService:
                 content=doc_text,
                 content_type="product",
                 metadata={
-                    "product_id":     p["product_id"],
-                    "name":           p["name"],
-                    "sku":            p.get("sku", ""),
-                    "mrp":            p["mrp"],
-                    "discount_price": p.get("discount_price"),
+                    "product_id": p["product_id"],
+                    "name":       p["name"],
+                    "sku":        p.get("sku", ""),
+                    "mrp":        p["mrp"],
                 },
                 source_id=p["product_id"],
             )

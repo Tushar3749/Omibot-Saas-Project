@@ -12,7 +12,7 @@ type ColumnGuide = {
   example: string
 }
 
-export type CsvGuideType = 'products' | 'stock' | 'campaign' | 'combo'
+export type CsvGuideType = 'products' | 'stock' | 'combo'
 
 // ─── Guide definitions ────────────────────────────────────────────────────────
 
@@ -21,14 +21,12 @@ const GUIDES: Record<CsvGuideType, { title: string; note?: string; columns: Colu
     title: 'পণ্য আমদানি — Products Import',
     note: 'বিদ্যমান SKU → আপডেট হবে। নতুন SKU → নতুন পণ্য তৈরি হবে।',
     columns: [
-      { name_en: 'sku',               name_bn: 'SKU',             required: true,  description: 'পণ্যের অনন্য পরিচয় কোড। একবার সেট করলে পরিবর্তন করবেন না।',  example: 'SHIRT-001' },
-      { name_en: 'name',              name_bn: 'পণ্যের নাম',      required: true,  description: 'পণ্যের সম্পূর্ণ নাম',                                            example: 'কটন শার্ট সাদা' },
-      { name_en: 'mrp',               name_bn: 'সর্বোচ্চ মূল্য',  required: true,  description: 'সর্বোচ্চ খুচরা মূল্য — টাকায় সংখ্যা',                          example: '500' },
-      { name_en: 'discount_price',    name_bn: 'ছাড়ের মূল্য',    required: false, description: 'বিক্রয় মূল্য। MRP-এর কম হতে হবে।',                              example: '450' },
-      { name_en: 'discount_category', name_bn: 'ক্যাম্পেইন ট্যাগ', required: false, description: 'কোন অফারের আওতায় এই ছাড় (যেমন ঈদ সেল)',                       example: 'ঈদ সেল' },
-      { name_en: 'stock',             name_bn: 'স্টক পরিমাণ',     required: false, description: 'বর্তমান মজুদ সংখ্যা — পূর্ণ সংখ্যা হতে হবে',                   example: '100' },
-      { name_en: 'category',          name_bn: 'ক্যাটাগরি',       required: false, description: 'পণ্যের শ্রেণী বা গ্রুপ',                                         example: 'পোশাক' },
-      { name_en: 'image_url',         name_bn: 'ছবির লিংক',       required: false, description: 'পণ্যের ছবির সম্পূর্ণ URL (https://...)',                          example: 'https://example.com/img.jpg' },
+      { name_en: 'sku',       name_bn: 'SKU',             required: true,  description: 'পণ্যের অনন্য পরিচয় কোড। একবার সেট করলে পরিবর্তন করবেন না।', example: 'SHIRT-001' },
+      { name_en: 'name',      name_bn: 'পণ্যের নাম',      required: true,  description: 'পণ্যের সম্পূর্ণ নাম',                                           example: 'কটন শার্ট সাদা' },
+      { name_en: 'mrp',       name_bn: 'সর্বোচ্চ মূল্য',  required: true,  description: 'সর্বোচ্চ খুচরা মূল্য — টাকায় সংখ্যা',                         example: '500' },
+      { name_en: 'stock',     name_bn: 'প্রারম্ভিক স্টক', required: false, description: 'প্রারম্ভিক মজুদ সংখ্যা (stock table-এ সংরক্ষিত)',               example: '100' },
+      { name_en: 'category',  name_bn: 'ক্যাটাগরি',       required: false, description: 'পণ্যের শ্রেণী বা গ্রুপ',                                        example: 'পোশাক' },
+      { name_en: 'image_url', name_bn: 'ছবির লিংক',       required: false, description: 'পণ্যের ছবির সম্পূর্ণ URL (https://...)',                         example: 'https://example.com/img.jpg' },
     ],
   },
   stock: {
@@ -37,19 +35,6 @@ const GUIDES: Record<CsvGuideType, { title: string; note?: string; columns: Colu
     columns: [
       { name_en: 'sku',   name_bn: 'SKU',          required: true, description: 'পণ্যের অনন্য কোড — সিস্টেমে আগে থেকে থাকতে হবে', example: 'SHIRT-001' },
       { name_en: 'stock', name_bn: 'নতুন স্টক',    required: true, description: 'নতুন মজুদ সংখ্যা। পুরনো মানটি সম্পূর্ণ replace হবে।',   example: '75' },
-    ],
-  },
-  campaign: {
-    title: 'ক্যাম্পেইন আমদানি — Campaign Import',
-    note: 'প্রতিটি সারি একটি নতুন ক্যাম্পেইন তৈরি করে।',
-    columns: [
-      { name_en: 'name',        name_bn: 'ক্যাম্পেইন নাম', required: true,  description: 'অফারের শিরোনাম',                             example: 'ঈদ অফার ২০২৫' },
-      { name_en: 'type',        name_bn: 'ছাড়ের ধরন',      required: true,  description: 'ঠিক এই তিনটির একটি: percentage / flat / bonus', example: 'percentage' },
-      { name_en: 'amount',      name_bn: 'পরিমাণ',          required: true,  description: 'percentage হলে % সংখ্যা, flat/bonus হলে টাকা',  example: '20' },
-      { name_en: 'description', name_bn: 'বিবরণ',           required: false, description: 'অফারের বিস্তারিত বিবরণ',                       example: 'সকল পণ্যে ২০% ছাড়' },
-      { name_en: 'start_date',  name_bn: 'শুরুর তারিখ',     required: false, description: 'ফরম্যাট: YYYY-MM-DD',                          example: '2025-06-01' },
-      { name_en: 'end_date',    name_bn: 'শেষের তারিখ',     required: false, description: 'ফরম্যাট: YYYY-MM-DD',                          example: '2025-06-30' },
-      { name_en: 'is_active',   name_bn: 'সক্রিয় অবস্থা',  required: false, description: 'true বা false — উল্লেখ না করলে true ধরা হবে', example: 'true' },
     ],
   },
   combo: {

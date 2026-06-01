@@ -99,7 +99,6 @@ class AIService:
         bot_name    = ai_config.get("bot_name", "Assistant")
         language    = ai_config.get("language", "bangla")
         base_prompt = ai_config.get("system_prompt", "")
-        allow_neg   = ai_config.get("allow_negotiation", False)
         forbidden   = ai_config.get("forbidden_topics", [])
 
         lang_map = {
@@ -108,12 +107,6 @@ class AIService:
             "banglish": "তুমি বাংলা এবং English মিশিয়ে কথা বলতে পারবে।",
         }
         lang_instr = lang_map.get(language, lang_map["bangla"])
-
-        neg_instr = (
-            "\nদামাদামি নীতি:\n"
-            "- Customer দাম কমাতে চাইলে সর্বোচ্চ ১০–১৫% ছাড় দিতে পারো।\n"
-            "- সর্বনিম্ন মূল্যের নিচে যাবে না।\n"
-        ) if allow_neg else ""
 
         forbidden_instr = (
             f"\nএই বিষয়গুলো নিয়ে কখনো কথা বলবে না: {', '.join(forbidden)}\n"
@@ -157,7 +150,7 @@ class AIService:
             f"তোমার নাম: {bot_name}\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
-            f"{neg_instr}{forbidden_instr}{state_instr}{discount_block}"
+            f"{forbidden_instr}{state_instr}{discount_block}"
             f"{rag_block}\n\n"
             "গুরুত্বপূর্ণ নিয়ম:\n"
             "- সবসময় বিনয়ী ও helpful থাকো।\n"

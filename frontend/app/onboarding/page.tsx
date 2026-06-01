@@ -25,7 +25,6 @@ export default function OnboardingPage() {
     bot_name: 'Riya',
     language: 'bangla',
     system_prompt: `আমি ${tenant?.business_name || 'আপনার ব্যবসা'}-এর AI assistant। আমি customer-দের সাথে সুন্দরভাবে কথা বলি।`,
-    allow_negotiation: false,
   })
 
   const [product, setProduct] = useState({ sku: '', name: '', mrp: '', description: '' })

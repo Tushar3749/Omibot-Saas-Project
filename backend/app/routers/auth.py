@@ -80,7 +80,6 @@ async def register(body: RegisterRequest):
         "tenant_id":              tenant_id,
         "bot_name":               "Assistant",
         "language":               "bangla",
-        "allow_negotiation":      False,
         "prompt_injection_guard": True,
         "system_prompt":          f"তুমি {body.business_name}-এর AI assistant। "
                                   "Customer-দের সাথে বিনয়ের সাথে কথা বলো।",

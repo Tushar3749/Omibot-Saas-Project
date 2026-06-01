@@ -38,13 +38,9 @@ class AIConfigUpdate(BaseModel):
     bot_name: Optional[str] = None
     system_prompt: Optional[str] = None
     language: Optional[str] = None
-    allow_negotiation: Optional[bool] = None
     escalation_keywords: Optional[list[str]] = None
     forbidden_topics: Optional[list[str]] = None
     prompt_injection_guard: Optional[bool] = True
-    max_discount_pct: Optional[float] = None
-    negotiation_style: Optional[str] = None
-    negotiation_phrases: Optional[list[str]] = None
 
     # Order management
     min_order_amount: Optional[float] = None
@@ -145,26 +141,17 @@ class ProductCreate(BaseModel):
     sku: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=500)
     mrp: float = Field(gt=0)
-    discount_price: Optional[float] = None
-    discount_category: Optional[str] = None
-    stock: Optional[int] = None
+    initial_stock: Optional[int] = 0
     category: Optional[str] = None
     image_url: Optional[str] = None
-    min_price: Optional[float] = None
-    negotiation_style: Optional[str] = None
     extra_fields: Optional[dict] = None
 
 class ProductUpdate(BaseModel):
     sku: Optional[str] = None
     name: Optional[str] = None
     mrp: Optional[float] = None
-    discount_price: Optional[float] = None
-    discount_category: Optional[str] = None
-    stock: Optional[int] = None
     category: Optional[str] = None
     image_url: Optional[str] = None
-    min_price: Optional[float] = None
-    negotiation_style: Optional[str] = None
     extra_fields: Optional[dict] = None
     is_active: Optional[bool] = None
 

@@ -4,12 +4,12 @@ Full CRUD + CSV import/export + custom column management.
 Every write triggers a RAG re-sync so the knowledge base stays fresh.
 
 Endpoints (static routes FIRST, parameterized routes LAST):
-  GET    /                         list products
-  POST   /                         create product
+  GET    /                         list products (with current_stock from stock table)
+  POST   /                         create product + auto-create stock row
   GET    /custom-columns           list tenant's custom column definitions
   POST   /custom-columns           add a custom column definition
   DELETE /custom-columns/{name}    remove a custom column definition
-  GET    /templates/{type}         download CSV template (products|stock|campaign)
+  GET    /templates/{type}         download CSV template (products|stock)
   POST   /import/csv               bulk import via CSV upload
   GET    /import/history           last 10 import logs
   GET    /{product_id}             get single product
@@ -43,51 +43,71 @@ rag    = RAGService()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Columns that must NEVER be imported from CSV (PK / FK / system fields)
 _SKIP_COLS: set[str] = {
     "product_id", "tenant_id", "is_active",
     "created_at", "updated_at",
 }
 
-# Named columns that map directly to DB table columns
 _KNOWN_COLS: set[str] = {
-    "sku", "name", "mrp",
-    "discount_price", "discount_category",
-    "stock", "category", "image_url",
+    "sku", "name", "mrp", "stock", "category", "image_url",
 }
 
-# Required columns per import type
 _REQUIRED_COLS: dict[str, list[str]] = {
     "products": ["sku", "name", "mrp"],
     "stock":    ["sku"],
-    "campaign": ["sku"],
 }
 
-# Which DB columns each import type may touch
 _ALLOWED_COLS: dict[str, set[str]] = {
     "products": _KNOWN_COLS,
     "stock":    {"sku", "stock"},
-    "campaign": {"sku", "discount_price", "discount_category"},
 }
 
 
+def _upsert_stock(tenant_id: str, product_id: str, current_stock: int) -> None:
+    """Insert or update the stock row for a product."""
+    supabase.table("stock").upsert(
+        {
+            "tenant_id":     tenant_id,
+            "product_id":    product_id,
+            "current_stock": current_stock,
+        },
+        on_conflict="tenant_id,product_id",
+    ).execute()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  List all products
+#  List all products  (joins stock for current_stock)
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/")
 async def list_products(tenant: dict = Depends(get_current_tenant)):
+    tid = tenant["tenant_id"]
     result = (
         supabase.table("products")
         .select("*")
-        .eq("tenant_id", tenant["tenant_id"])
+        .eq("tenant_id", tid)
         .order("created_at", desc=True)
         .execute()
     )
-    return result.data or []
+    products = result.data or []
+
+    if products:
+        pids = [p["product_id"] for p in products]
+        stock_res = (
+            supabase.table("stock")
+            .select("product_id, current_stock")
+            .eq("tenant_id", tid)
+            .in_("product_id", pids)
+            .execute()
+        )
+        stock_map = {s["product_id"]: s["current_stock"] for s in (stock_res.data or [])}
+        for p in products:
+            p["current_stock"] = stock_map.get(p["product_id"], 0)
+
+    return products
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Create a single product
+#  Create a single product  (auto-creates stock row)
 # ─────────────────────────────────────────────────────────────────────────────
 @router.post("/", status_code=201)
 async def create_product(
@@ -97,7 +117,6 @@ async def create_product(
 ):
     tid = tenant["tenant_id"]
 
-    # Plan limit check
     if tenant["plan"] == "starter":
         count_res = (
             supabase.table("products")
@@ -109,7 +128,6 @@ async def create_product(
         if (count_res.count or 0) >= 500:
             raise HTTPException(status_code=402, detail="Starter plan limit: 500 products")
 
-    # Check SKU uniqueness
     existing = (
         supabase.table("products")
         .select("product_id")
@@ -121,24 +139,24 @@ async def create_product(
     if existing and existing.data:
         raise HTTPException(status_code=409, detail=f"SKU '{body.sku}' already exists")
 
+    product_id = str(uuid.uuid4())
     row = {
-        "product_id":        str(uuid.uuid4()),
-        "tenant_id":         tid,
-        "sku":               body.sku,
-        "name":              body.name,
-        "mrp":               body.mrp,
-        "discount_price":    body.discount_price,
-        "discount_category": body.discount_category,
-        "stock":             body.stock,
-        "category":          body.category,
-        "image_url":         body.image_url,
-        "min_price":         body.min_price,
-        "negotiation_style": body.negotiation_style,
-        "extra_fields":      body.extra_fields or {},
-        "is_active":         True,
+        "product_id":   product_id,
+        "tenant_id":    tid,
+        "sku":          body.sku,
+        "name":         body.name,
+        "mrp":          body.mrp,
+        "category":     body.category,
+        "image_url":    body.image_url,
+        "extra_fields": body.extra_fields or {},
+        "is_active":    True,
     }
     result = supabase.table("products").insert(row).execute()
     product = result.data[0]
+
+    # Auto-create stock row
+    _upsert_stock(tid, product_id, body.initial_stock or 0)
+    product["current_stock"] = body.initial_stock or 0
 
     background_tasks.add_task(rag.sync_products_to_rag, tid)
     return product
@@ -166,14 +184,12 @@ async def create_custom_column(
 ):
     tid = tenant["tenant_id"]
 
-    # Prevent overriding built-in column names
     if body.column_name in _KNOWN_COLS | _SKIP_COLS:
         raise HTTPException(
             status_code=400,
             detail=f"'{body.column_name}' is a reserved column name"
         )
 
-    # Limit custom columns per tenant
     count_res = (
         supabase.table("product_custom_columns")
         .select("id", count="exact")
@@ -218,23 +234,16 @@ async def download_template(
     template_type: str,
     tenant: dict = Depends(get_current_tenant),
 ):
-    """
-    Returns a downloadable CSV template with correct headers for the given type.
-    product  → all standard + custom columns  (sku required)
-    stock    → sku + stock
-    campaign → sku + discount_price + discount_category
-    """
-    if template_type not in ("products", "stock", "campaign", "combo"):
-        raise HTTPException(status_code=400, detail="template_type must be: products | stock | campaign | combo")
+    if template_type not in ("products", "stock", "combo"):
+        raise HTTPException(status_code=400, detail="template_type must be: products | stock | combo")
 
-    # Combo template — handled directly
     if template_type == "combo":
         output = io.StringIO()
         writer = csv.writer(output)
         for line in [
             "# COMBO STOCK UPDATE TEMPLATE",
-            "# combo_sku: Combo-এর SKU (required) | The SKU of the combo (required)",
-            "# stock: নতুন stock পরিমাণ (required) | New stock quantity (required)",
+            "# combo_sku: Combo-এর SKU (required)",
+            "# stock: নতুন stock পরিমাণ (required)",
             "#",
         ]:
             writer.writerow([line])
@@ -247,8 +256,6 @@ async def download_template(
         )
 
     tid = tenant["tenant_id"]
-
-    # Fetch tenant's custom column definitions
     custom_cols_res = (
         supabase.table("product_custom_columns")
         .select("column_name, display_name")
@@ -258,13 +265,10 @@ async def download_template(
     )
     custom_cols = custom_cols_res.data or []
 
-    # Build header row
     if template_type == "products":
-        headers = ["sku", "name", "mrp", "discount_price", "discount_category",
-                   "stock", "category", "image_url"]
+        headers = ["sku", "name", "mrp", "stock", "category", "image_url"]
         headers += [c["column_name"] for c in custom_cols]
-        example  = ["SKU001", "Sample Product", "500", "450", "Summer Sale",
-                    "10", "Electronics", "https://example.com/image.jpg"]
+        example  = ["SKU001", "Sample Product", "500", "10", "Electronics", "https://example.com/image.jpg"]
         example += ["" for _ in custom_cols]
         instructions = [
             "# PRODUCT IMPORT TEMPLATE | পণ্য আমদানি টেমপ্লেট",
@@ -272,35 +276,22 @@ async def download_template(
             "# sku: পণ্যের অনন্য কোড | Unique product code",
             "# name: পণ্যের নাম | Product name",
             "# mrp: সর্বোচ্চ খুচরা মূল্য | Maximum retail price (must be > 0)",
-            "# discount_price: ছাড়ের মূল্য (ঐচ্ছিক) | Discounted price (optional)",
-            "# discount_category: ছাড়ের বিভাগ (ঐচ্ছিক) | Discount category label (optional)",
-            "# stock: মজুদ পরিমাণ (ঐচ্ছিক) | Stock quantity (optional)",
+            "# stock: প্রারম্ভিক মজুদ (ঐচ্ছিক) | Initial stock quantity (optional)",
             "# category: পণ্য বিভাগ (ঐচ্ছিক) | Product category (optional)",
             "# image_url: পণ্যের ছবির লিঙ্ক (ঐচ্ছিক) | Product image URL (optional)",
-            "# Rows with missing sku / name / mrp will be skipped | sku/name/mrp না থাকলে সারি বাদ যাবে",
             "# If SKU already exists, the row will UPDATE that product | SKU থাকলে পণ্য আপডেট হবে",
             "#",
         ]
-    elif template_type == "stock":
+    else:  # stock
         headers = ["sku", "stock"]
         example  = ["SKU001", "25"]
         instructions = [
             "# STOCK UPDATE TEMPLATE",
             "# Required: sku",
-            "# Updates only the stock quantity for matching SKUs",
-            "#",
-        ]
-    else:  # campaign
-        headers = ["sku", "discount_price", "discount_category"]
-        example  = ["SKU001", "450", "Eid Sale 2026"]
-        instructions = [
-            "# CAMPAIGN / DISCOUNT TEMPLATE",
-            "# Required: sku",
-            "# Updates discount_price and discount_category for matching SKUs",
+            "# Updates current_stock in the stock table for matching SKUs",
             "#",
         ]
 
-    # Write to in-memory CSV
     output = io.StringIO()
     writer = csv.writer(output)
     for line in instructions:
@@ -328,23 +319,15 @@ async def import_csv(
     import_type: str = Form(default="products"),
 ):
     """
-    Bulk import products via CSV upload.
+    Bulk import via CSV upload.
 
-    import_type = products  → upsert full product rows (sku, name, mrp required)
-    import_type = stock     → update stock quantity for existing SKUs
-    import_type = campaign  → update discount_price / discount_category for existing SKUs
-
-    Rules:
-    - Required columns must be present; rows missing them are SKIPPED (warning shown).
-    - PK / FK / system columns (product_id, tenant_id, …) are silently ignored.
-    - Unknown columns → saved into extra_fields JSONB automatically.
-    - For 'products': if SKU already exists → UPDATE; else → INSERT (upsert).
-    - For 'stock' / 'campaign': SKU must already exist; unknown SKUs are SKIPPED.
+    import_type = products  → upsert products; stock column writes to stock table
+    import_type = stock     → update current_stock in stock table for existing SKUs
     """
-    if import_type not in ("products", "stock", "campaign"):
+    if import_type not in ("products", "stock"):
         raise HTTPException(
             status_code=400,
-            detail="import_type must be: products | stock | campaign"
+            detail="import_type must be: products | stock"
         )
 
     if not file.filename or not file.filename.lower().endswith(".csv"):
@@ -352,13 +335,11 @@ async def import_csv(
 
     tid = tenant["tenant_id"]
 
-    # ── Read & decode file ────────────────────────────────────────────────────
     raw = await file.read()
-    if len(raw) > 5 * 1024 * 1024:   # 5 MB hard cap
+    if len(raw) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="CSV file must be under 5 MB")
 
     try:
-        # utf-8-sig handles Excel-generated BOM automatically
         content = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         try:
@@ -366,8 +347,6 @@ async def import_csv(
         except Exception:
             raise HTTPException(status_code=400, detail="Could not decode CSV (use UTF-8 encoding)")
 
-    # ── Parse CSV ─────────────────────────────────────────────────────────────
-    # Strip comment/instruction lines that start with '#'
     clean_lines = [
         line for line in content.splitlines()
         if line.strip() and not line.strip().startswith("#")
@@ -377,11 +356,8 @@ async def import_csv(
 
     reader = csv.DictReader(io.StringIO("\n".join(clean_lines)))
     headers: list[str] = [h.strip().lower() for h in (reader.fieldnames or [])]
-
     if not headers:
         raise HTTPException(status_code=400, detail="CSV has no headers")
-
-    # Normalise header names in the reader
     reader.fieldnames = headers
 
     required = _REQUIRED_COLS[import_type]
@@ -392,7 +368,7 @@ async def import_csv(
             detail=f"CSV is missing required columns: {', '.join(missing_required)}"
         )
 
-    # ── Pre-fetch existing SKU → product_id map for this tenant ──────────────
+    # Pre-fetch existing SKU → product_id map
     existing_res = (
         supabase.table("products")
         .select("product_id, sku")
@@ -404,26 +380,18 @@ async def import_csv(
         for row in (existing_res.data or [])
     }
 
-    # ── Process rows ──────────────────────────────────────────────────────────
     imported = 0
     skipped  = 0
     errors   = 0
     warnings: list[dict] = []
 
-    rows = list(reader)
-
-    for row_num, raw_row in enumerate(rows, start=2):
-        # Normalise: strip whitespace, lower-case keys
+    for row_num, raw_row in enumerate(list(reader), start=2):
         row = {k.strip().lower(): (v.strip() if v else "") for k, v in raw_row.items() if k}
 
-        # ── Check required fields ─────────────────────────────────────────
         missing = [col for col in required if not row.get(col)]
         if missing:
             skipped += 1
-            warnings.append({
-                "row": row_num,
-                "message": f"Skipped — missing required field(s): {', '.join(missing)}"
-            })
+            warnings.append({"row": row_num, "message": f"Skipped — missing: {', '.join(missing)}"})
             continue
 
         sku = row["sku"]
@@ -434,92 +402,34 @@ async def import_csv(
             if import_type == "stock":
                 if not exists_id:
                     skipped += 1
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Skipped — SKU '{sku}' not found in catalog"
-                    })
+                    warnings.append({"row": row_num, "message": f"Skipped — SKU '{sku}' not found"})
                     continue
 
                 stock_val = row.get("stock", "")
                 if not stock_val:
                     skipped += 1
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Skipped — 'stock' value is missing for SKU '{sku}'"
-                    })
+                    warnings.append({"row": row_num, "message": f"Skipped — missing stock for SKU '{sku}'"})
                     continue
 
                 try:
                     stock_int = int(float(stock_val))
                 except ValueError:
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Skipped — 'stock' value '{stock_val}' is not a number"
-                    })
                     skipped += 1
+                    warnings.append({"row": row_num, "message": f"Skipped — invalid stock '{stock_val}'"})
                     continue
 
-                supabase.table("products") \
-                    .update({"stock": stock_int}) \
-                    .eq("tenant_id", tid) \
-                    .eq("product_id", exists_id) \
-                    .execute()
-                imported += 1
-                continue
-
-            # ── CAMPAIGN update mode ──────────────────────────────────────
-            if import_type == "campaign":
-                if not exists_id:
-                    skipped += 1
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Skipped — SKU '{sku}' not found in catalog"
-                    })
-                    continue
-
-                update_data: dict = {}
-                if row.get("discount_price"):
-                    try:
-                        dp = float(row["discount_price"])
-                        if dp > 0:
-                            update_data["discount_price"] = dp
-                    except ValueError:
-                        warnings.append({
-                            "row": row_num,
-                            "message": f"Invalid discount_price '{row['discount_price']}' for SKU '{sku}' — skipping that field"
-                        })
-
-                if row.get("discount_category"):
-                    update_data["discount_category"] = row["discount_category"]
-
-                if not update_data:
-                    skipped += 1
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Skipped — no valid discount data for SKU '{sku}'"
-                    })
-                    continue
-
-                supabase.table("products") \
-                    .update(update_data) \
-                    .eq("tenant_id", tid) \
-                    .eq("product_id", exists_id) \
-                    .execute()
+                _upsert_stock(tid, exists_id, stock_int)
                 imported += 1
                 continue
 
             # ── PRODUCTS upsert mode ──────────────────────────────────────
-            # Validate MRP
             try:
                 mrp_val = float(row["mrp"])
                 if mrp_val <= 0:
-                    raise ValueError("MRP must be greater than 0")
+                    raise ValueError("MRP must be > 0")
             except ValueError as e:
                 skipped += 1
-                warnings.append({
-                    "row": row_num,
-                    "message": f"Skipped — invalid mrp '{row.get('mrp')}': {e}"
-                })
+                warnings.append({"row": row_num, "message": f"Skipped — invalid mrp: {e}"})
                 continue
 
             product_data: dict = {
@@ -528,37 +438,12 @@ async def import_csv(
                 "mrp":  mrp_val,
             }
 
-            # Optional known columns (skip if empty or not present in CSV)
-            if "discount_price" in headers and row.get("discount_price"):
-                try:
-                    dp = float(row["discount_price"])
-                    if dp > 0:
-                        product_data["discount_price"] = dp
-                except ValueError:
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Invalid discount_price '{row['discount_price']}' — skipping that field"
-                    })
-
-            if "discount_category" in headers and row.get("discount_category"):
-                product_data["discount_category"] = row["discount_category"]
-
-            if "stock" in headers and row.get("stock"):
-                try:
-                    product_data["stock"] = int(float(row["stock"]))
-                except ValueError:
-                    warnings.append({
-                        "row": row_num,
-                        "message": f"Invalid stock '{row['stock']}' — skipping that field"
-                    })
-
             if "category" in headers and row.get("category"):
                 product_data["category"] = row["category"]
-
             if "image_url" in headers and row.get("image_url"):
                 product_data["image_url"] = row["image_url"]
 
-            # Extra / custom columns → extra_fields JSONB
+            # Custom columns → extra_fields JSONB
             extra_fields: dict = {}
             for col in headers:
                 if col in _SKIP_COLS or col in _KNOWN_COLS:
@@ -568,35 +453,39 @@ async def import_csv(
             if extra_fields:
                 product_data["extra_fields"] = extra_fields
 
-            # Upsert by SKU
+            # Parse stock value for the stock table
+            stock_for_row: Optional[int] = None
+            if "stock" in headers and row.get("stock"):
+                try:
+                    stock_for_row = int(float(row["stock"]))
+                except ValueError:
+                    warnings.append({"row": row_num, "message": f"Invalid stock '{row['stock']}' — skipping stock"})
+
             if exists_id:
-                # UPDATE existing product
                 update_payload = {k: v for k, v in product_data.items() if k != "sku"}
-                supabase.table("products") \
-                    .update(update_payload) \
-                    .eq("tenant_id", tid) \
-                    .eq("product_id", exists_id) \
-                    .execute()
+                supabase.table("products").update(update_payload) \
+                    .eq("tenant_id", tid).eq("product_id", exists_id).execute()
+                pid = exists_id
             else:
-                # INSERT new product
-                product_data["product_id"] = str(uuid.uuid4())
+                pid = str(uuid.uuid4())
+                product_data["product_id"] = pid
                 product_data["tenant_id"]  = tid
                 supabase.table("products").insert(product_data).execute()
-                existing_map[sku] = product_data["product_id"]   # prevent duplicate on repeat SKU in CSV
+                existing_map[sku] = pid
+
+            # Upsert stock row if stock value provided
+            if stock_for_row is not None:
+                _upsert_stock(tid, pid, stock_for_row)
 
             imported += 1
 
         except Exception as exc:
             errors += 1
             logger.warning(f"CSV import row {row_num} error: {exc}")
-            warnings.append({
-                "row": row_num,
-                "message": f"Error — {str(exc)}"
-            })
+            warnings.append({"row": row_num, "message": f"Error — {str(exc)}"})
 
     total_rows = imported + skipped + errors
 
-    # ── Save import log ───────────────────────────────────────────────────────
     log_res = supabase.table("csv_import_logs").insert({
         "tenant_id":    tid,
         "import_type":  import_type,
@@ -609,7 +498,6 @@ async def import_csv(
     }).execute()
     log_id = log_res.data[0]["id"] if log_res.data else ""
 
-    # ── Re-sync RAG in background ─────────────────────────────────────────────
     if imported > 0:
         background_tasks.add_task(rag.sync_products_to_rag, tid)
 
@@ -648,17 +536,9 @@ async def upload_image(
     file:       UploadFile = File(...),
     product_id: str  = Form(default=""),
 ):
-    """
-    Upload a product image to Cloudinary.
-    If product_id is provided, also patches that product's image_url in the DB.
-    Returns { image_url: str }.
-    """
     allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     if file.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail="Only JPEG, PNG, WebP, or GIF images are accepted"
-        )
+        raise HTTPException(status_code=400, detail="Only JPEG, PNG, WebP, or GIF images are accepted")
 
     raw = await file.read()
     if len(raw) > 5 * 1024 * 1024:
@@ -670,7 +550,6 @@ async def upload_image(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Optionally update the product row immediately
     if product_id:
         supabase.table("products") \
             .update({"image_url": image_url}) \
@@ -686,17 +565,28 @@ async def upload_image(
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/{product_id}")
 async def get_product(product_id: str, tenant: dict = Depends(get_current_tenant)):
+    tid = tenant["tenant_id"]
     result = (
         supabase.table("products")
         .select("*")
-        .eq("tenant_id", tenant["tenant_id"])
+        .eq("tenant_id", tid)
         .eq("product_id", product_id)
         .maybe_single()
         .execute()
     )
     if result is None or result.data is None:
         raise HTTPException(status_code=404, detail="Product not found")
-    return result.data
+    product = result.data
+    stock_res = (
+        supabase.table("stock")
+        .select("current_stock")
+        .eq("tenant_id", tid)
+        .eq("product_id", product_id)
+        .maybe_single()
+        .execute()
+    )
+    product["current_stock"] = (stock_res.data or {}).get("current_stock", 0) if stock_res else 0
+    return product
 
 
 @router.patch("/{product_id}")
@@ -712,7 +602,6 @@ async def update_product(
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # If SKU is changing, check it won't conflict
     if "sku" in update_data:
         conflict = (
             supabase.table("products")

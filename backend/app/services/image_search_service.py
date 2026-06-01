@@ -145,7 +145,7 @@ def _enrich_with_product(tenant_id: str, matches: list[dict]) -> list[dict]:
         # Fetch product row
         prod_res = (
             supabase.table("products")
-            .select("product_id, name, mrp, discount_price, stock, sku")
+            .select("product_id, name, mrp, sku")
             .eq("product_id", pid)
             .eq("tenant_id", tenant_id)
             .eq("is_active", True)
@@ -272,17 +272,9 @@ def format_product_reply(products: list[dict]) -> str:
 
     lines = ["🔍 মিলে যাওয়া পণ্য:\n"]
     for i, p in enumerate(products, 1):
-        price = p.get("discount_price") or p.get("mrp", 0)
-        mrp   = p.get("mrp", 0)
-        stock = p.get("stock")
-
+        mrp = p.get("mrp", 0)
         lines.append(f"{i}. *{p['name']}*")
-        if mrp and p.get("discount_price") and p["discount_price"] < mrp:
-            lines.append(f"   ~~৳{mrp:,.0f}~~ → ৳{price:,.0f}")
-        else:
-            lines.append(f"   💰 ৳{price:,.0f}")
-        if stock is not None:
-            lines.append(f"   📦 {'Available' if stock > 0 else 'Stock নেই'}")
+        lines.append(f"   💰 ৳{mrp:,.0f}")
         lines.append("")
 
     lines.append("অর্ডার করতে বা বিস্তারিত জানতে বলুন।")

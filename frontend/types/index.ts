@@ -15,13 +15,9 @@ export interface AIConfig {
   bot_name: string
   system_prompt: string | null
   language: 'bangla' | 'english' | 'banglish'
-  allow_negotiation: boolean
   escalation_keywords: string[]
   forbidden_topics: string[]
   prompt_injection_guard: boolean
-  max_discount_pct: number | null
-  negotiation_style: 'aggressive' | 'moderate' | 'soft' | null
-  negotiation_phrases: string[]
   // Order management
   min_order_amount: number
   max_order_qty_per_customer: number
@@ -85,13 +81,9 @@ export interface Product {
   sku: string
   name: string
   mrp: number
-  discount_price: number | null
-  discount_category: string | null
-  stock: number | null
+  current_stock: number
   category: string | null
   image_url: string | null
-  min_price: number | null
-  negotiation_style: 'aggressive' | 'moderate' | 'soft' | null
   extra_fields: Record<string, unknown>
   is_active: boolean
   created_at: string
@@ -109,7 +101,7 @@ export interface ProductCustomColumn {
   created_at: string
 }
 
-export type CSVImportType = 'products' | 'stock' | 'campaign'
+export type CSVImportType = 'products' | 'stock'
 
 export interface CSVImportWarning {
   row: number

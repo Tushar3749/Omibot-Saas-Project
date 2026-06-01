@@ -32,13 +32,9 @@ _client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 def _build_system_prompt(ai_cfg: dict, products: list[dict]) -> str:
     """Build a rich system prompt from the tenant's AI config + top products."""
-    bot_name  = ai_cfg.get("bot_name") or "OmniBot"
-    language  = ai_cfg.get("language") or "bangla"
+    bot_name   = ai_cfg.get("bot_name") or "OmniBot"
+    language   = ai_cfg.get("language") or "bangla"
     sys_prompt = ai_cfg.get("system_prompt") or ""
-    allow_neg  = ai_cfg.get("allow_negotiation", False)
-    max_disc   = ai_cfg.get("max_discount_pct") or 10
-    neg_style  = ai_cfg.get("negotiation_style") or "moderate"
-    neg_phrases= ai_cfg.get("negotiation_phrases") or []
     esc_kws    = ai_cfg.get("escalation_keywords") or []
     forbidden  = ai_cfg.get("forbidden_topics") or []
 
@@ -62,22 +58,7 @@ def _build_system_prompt(ai_cfg: dict, products: list[dict]) -> str:
     if products:
         lines.append("\n## পণ্য তালিকা (প্রথম ২০টি):")
         for p in products[:20]:
-            price = f"৳{p['mrp']}"
-            if p.get("discount_price"):
-                price += f" (ছাড়: ৳{p['discount_price']})"
-            stock_txt = f", স্টক: {p['stock']}" if p.get("stock") is not None else ""
-            lines.append(f"- {p['name']} (SKU: {p.get('sku','')}) — {price}{stock_txt}")
-
-    # Negotiation
-    if allow_neg:
-        lines.append(
-            f"\n## দাম দর-কষাকষি:\n"
-            f"সর্বোচ্চ {max_disc}% পর্যন্ত ছাড় দিতে পারবে ({neg_style} স্টাইলে)।"
-        )
-        if neg_phrases:
-            lines.append("ব্যবহার করতে পারো: " + " | ".join(neg_phrases[:5]))
-    else:
-        lines.append("\nদাম নিয়ে দর-কষাকষি করো না।")
+            lines.append(f"- {p['name']} (SKU: {p.get('sku','')}) — ৳{p['mrp']}")
 
     if esc_kws:
         lines.append(f"\nযদি কেউ এই কথা বলে: {', '.join(esc_kws[:10])} — মানব সহায়তায় রেফার করো।")
@@ -116,7 +97,7 @@ async def test_bot_chat(
     # ── Load products (names, prices, stock) ──────────────────────────────────
     prod_res = (
         supabase.table("products")
-        .select("name, sku, mrp, discount_price, stock, category")
+        .select("name, sku, mrp, category")
         .eq("tenant_id", tid)
         .eq("is_active", True)
         .limit(20)

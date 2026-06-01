@@ -12,6 +12,49 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _adjust_stock(tenant_id: str, product_id: str, quantity: int, change_type: str, order_id: str):
+    """Deduct (negative quantity) or restore (positive quantity) stock from the stock table."""
+    stock_row = (
+        supabase.table("stock")
+        .select("current_stock, product_id")
+        .eq("tenant_id", tenant_id)
+        .eq("product_id", product_id)
+        .maybe_single()
+        .execute().data
+    )
+    if not stock_row:
+        return
+
+    # Get sku for history log
+    prod = (
+        supabase.table("products")
+        .select("sku")
+        .eq("product_id", product_id)
+        .maybe_single()
+        .execute().data
+    )
+    sku = (prod or {}).get("sku", "")
+
+    before = stock_row.get("current_stock", 0)
+    after  = max(0, before + quantity)
+
+    supabase.table("stock").update({"current_stock": after}) \
+        .eq("tenant_id", tenant_id) \
+        .eq("product_id", product_id) \
+        .execute()
+
+    supabase.table("stock_history").insert({
+        "tenant_id":       tenant_id,
+        "product_id":      product_id,
+        "sku":             sku,
+        "change_type":     change_type,
+        "quantity_change": quantity,
+        "quantity_before": before,
+        "quantity_after":  after,
+        "reference_id":    order_id,
+    }).execute()
+
+
 @router.get("/")
 async def list_orders(
     status: str = None,
@@ -25,7 +68,6 @@ async def list_orders(
     )
     if status:
         query = query.eq("status", status)
-
     result = query.execute()
     return result.data or []
 
@@ -66,48 +108,13 @@ async def update_order_status(
     if not result.data:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # After updating status, adjust stock
-    order = result.data[0]
+    order      = result.data[0]
     product_id = order.get("product_id")
-    quantity = order.get("quantity", 1)
+    quantity   = order.get("quantity", 1)
+    tid        = tenant["tenant_id"]
 
-    if product_id and body.status == "delivered":
-        # Decrease stock on delivery
-        prod = (
-            supabase.table("products")
-            .select("stock,sku")
-            .eq("product_id", product_id)
-            .maybe_single()
-            .execute().data
-        )
-        if prod:
-            before = prod.get("stock") or 0
-            after = max(0, before - quantity)
-            supabase.table("products").update({"stock": after}).eq("product_id", product_id).execute()
-            supabase.table("stock_history").insert({
-                "tenant_id": tenant["tenant_id"], "product_id": product_id, "sku": prod["sku"],
-                "change_type": "order_placed", "quantity_change": -quantity,
-                "quantity_before": before, "quantity_after": after,
-                "reference_id": order_id,
-            }).execute()
-    elif product_id and body.status == "cancelled":
-        # Restore stock on cancellation
-        prod = (
-            supabase.table("products")
-            .select("stock,sku")
-            .eq("product_id", product_id)
-            .maybe_single()
-            .execute().data
-        )
-        if prod:
-            before = prod.get("stock") or 0
-            after = before + quantity
-            supabase.table("products").update({"stock": after}).eq("product_id", product_id).execute()
-            supabase.table("stock_history").insert({
-                "tenant_id": tenant["tenant_id"], "product_id": product_id, "sku": prod["sku"],
-                "change_type": "order_cancelled", "quantity_change": quantity,
-                "quantity_before": before, "quantity_after": after,
-                "reference_id": order_id,
-            }).execute()
+    if product_id and body.status == "cancelled":
+        # Restore stock when order is cancelled
+        _adjust_stock(tid, product_id, +quantity, "order_cancelled", order_id)
 
     return order

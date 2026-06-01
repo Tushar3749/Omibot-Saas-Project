@@ -159,9 +159,8 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('identity')
 
   // Tag input states
-  const [newKW, setNewKW]         = useState('')
-  const [newFT, setNewFT]         = useState('')
-  const [newPhrase, setNewPhrase] = useState('')
+  const [newKW, setNewKW] = useState('')
+  const [newFT, setNewFT] = useState('')
 
   // Negotiation rules
   const [rules, setRules]               = useState<NegotiationRule[]>([])
@@ -267,14 +266,6 @@ export default function SettingsPage() {
     setNewFT('')
   }
   function removeForbidden(ft: string) { setConfig(c => ({ ...c, forbidden_topics: (c.forbidden_topics as string[] || []).filter(f => f !== ft) })) }
-
-  function addPhrase() {
-    const ph = newPhrase.trim(); if (!ph) return
-    const arr = (config.negotiation_phrases as string[] || [])
-    if (!arr.includes(ph)) setConfig(c => ({ ...c, negotiation_phrases: [...arr, ph] }))
-    setNewPhrase('')
-  }
-  function removePhrase(ph: string) { setConfig(c => ({ ...c, negotiation_phrases: (config.negotiation_phrases as string[] || []).filter(p => p !== ph) })) }
 
   // ── Negotiation rule modal ────────────────────────────────────────────────
   function openCreateRule() { setEditingRule(null); setRuleForm(EMPTY_RULE_FORM); setProductSearch(''); setShowDropdown(false); setShowRuleModal(true) }
@@ -723,26 +714,6 @@ export default function SettingsPage() {
       {/* ══ TAB: Negotiation Rules ══════════════════════════════════════════ */}
       {activeTab === 'negotiation' && (
         <div className="space-y-4">
-          <SectionCard icon={TrendingDown} title="Global Negotiation Settings" subtitle="সব পণ্যের জন্য ডিফল্ট দামাদামির নিয়ম">
-            <Toggle checked={Boolean(config.allow_negotiation)} onChange={v => setConfig(c => ({ ...c, allow_negotiation: v }))} label="দামাদামি Allow" sub="AI সর্বোচ্চ নির্ধারিত % পর্যন্ত ছাড় দিতে পারবে" />
-            <div className="grid grid-cols-2 gap-4">
-              <NumField label="সর্বোচ্চ ছাড় (%)" value={String(config.max_discount_pct ?? '')} onChange={v => setConfig(c => ({ ...c, max_discount_pct: parseFloat(v) || 0 }))} min={0} step={0.5} suffix="%" />
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Negotiation Style</label>
-                <select className="input" value={String(config.negotiation_style || 'moderate')} onChange={e => setConfig(c => ({ ...c, negotiation_style: e.target.value }))}>
-                  <option value="aggressive">Aggressive — কম ছাড়</option>
-                  <option value="moderate">Moderate — ভারসাম্য</option>
-                  <option value="soft">Soft — বেশি নমনীয়</option>
-                </select>
-              </div>
-            </div>
-            <div>
-              <p className="text-sm font-medium mb-0.5" style={{ color: 'var(--c-text)' }}>কাস্টম দামাদামি বাক্য</p>
-              <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>AI এই বাক্যগুলো ব্যবহার করে দামাদামি করবে।</p>
-              <TagList tags={config.negotiation_phrases as string[] || []} onRemove={removePhrase} inputValue={newPhrase} onInputChange={setNewPhrase} onAdd={addPhrase} placeholder="যেমন: ভাই, এইটুকু ছাড় দিতে পারলে নিয়ে নেন..." tagStyle={{ backgroundColor: '#E8F5E9', color: '#2E7D32', borderColor: '#A5D6A7' }} />
-            </div>
-          </SectionCard>
-
           <div className="card p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">

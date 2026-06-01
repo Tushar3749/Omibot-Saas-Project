@@ -193,6 +193,38 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         "status":               "pending",
     }).execute()
 
+    # Deduct stock immediately when order is placed
+    product_id = order_data.get("product_id")
+    quantity   = order_data.get("quantity", 1)
+    if product_id and quantity:
+        try:
+            stock_row = (
+                supabase.table("stock")
+                .select("current_stock")
+                .eq("tenant_id", tenant_id)
+                .eq("product_id", product_id)
+                .maybe_single()
+                .execute().data
+            )
+            if stock_row is not None:
+                before = stock_row.get("current_stock", 0)
+                after  = max(0, before - quantity)
+                supabase.table("stock").update({"current_stock": after}) \
+                    .eq("tenant_id", tenant_id).eq("product_id", product_id).execute()
+                prod = supabase.table("products").select("sku").eq("product_id", product_id) \
+                    .maybe_single().execute().data
+                supabase.table("stock_history").insert({
+                    "tenant_id":       tenant_id,
+                    "product_id":      product_id,
+                    "sku":             (prod or {}).get("sku", ""),
+                    "change_type":     "order_placed",
+                    "quantity_change": -quantity,
+                    "quantity_before": before,
+                    "quantity_after":  after,
+                }).execute()
+        except Exception as _se:
+            logger.warning(f"Stock deduction failed for product {product_id}: {_se}")
+
 
 def _set_conv_state(conversation_id: str, state: dict) -> None:
     supabase.table("conversations").update({
