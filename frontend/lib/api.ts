@@ -223,6 +223,13 @@ export const ordersAPI = {
     api.patch(`/api/courier/orders/${id}/tracking`, { tracking_number, courier_name }).then(r => r.data),
 }
 
+// ── Discounts ─────────────────────────────────────────────────────────────────
+export const discountsAPI = {
+  list:       (limit = 50) => api.get('/api/discounts/', { params: { limit } }).then(r => r.data),
+  getByCode:  (code: string) => api.get(`/api/discounts/${encodeURIComponent(code)}`).then(r => r.data),
+  getByOrder: (orderId: string) => api.get(`/api/discounts/order/${orderId}`).then(r => r.data),
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────────
 export const analyticsAPI = {
   overview: () => api.get('/api/analytics/overview').then(r => r.data),

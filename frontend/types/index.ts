@@ -167,6 +167,9 @@ export interface Order {
   product_id: string | null
   quantity: number
   agreed_price: number | null
+  original_amount: number | null
+  net_amount: number | null
+  discount_code: string | null
   customer_phone: string | null
   customer_name: string | null
   delivery_address: string | null
@@ -178,6 +181,36 @@ export interface Order {
   advance_paid: number | null
   payment_deadline_at: string | null
   created_at: string
+}
+
+export interface DiscountRow {
+  discount_id: string
+  tenant_id: string
+  discount_code: string
+  discount_rule_type: string
+  discount_rule_id: string | null
+  discount_rule_name: string
+  discount_category_id: string | null
+  discount_category_name: string | null
+  product_id: string | null
+  sku: string | null
+  product_name: string | null
+  reward_type: 'percentage' | 'flat' | 'bonus' | 'free_delivery'
+  discount_pct: number
+  discount_flat: number
+  bonus_items: Array<{ product_id: string; sku: string; name: string; quantity: number }>
+  original_price: number | null
+  discount_amount: number
+  final_price: number | null
+  created_at: string
+}
+
+export interface DiscountBreakdown {
+  discount_code: string | null
+  rows: DiscountRow[]
+  total_discount: number
+  original_amount: number | null
+  net_amount: number | null
 }
 
 export interface ConnectedPage {

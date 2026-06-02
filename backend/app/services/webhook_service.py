@@ -565,24 +565,143 @@ def get_ai_config(tenant_id: str) -> dict:
     return result.data if result is not None else {}
 
 
-def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data: dict) -> None:
+def _generate_discount_code() -> str:
+    import random
+    import string
+    today = datetime.now().strftime("%Y%m%d")
+    chars = string.ascii_uppercase + string.digits
+    rand_part = "".join(random.choices(chars, k=4))
+    return f"DISC-{today}-{rand_part}"
+
+
+def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data: dict) -> Optional[str]:
+    """Insert order + discount rows. Returns a discount summary string if a discount was applied."""
+    order_id     = str(uuid.uuid4())
+    product_id   = order_data.get("product_id")
+    quantity     = int(order_data.get("quantity") or 1)
+    agreed_price = float(order_data.get("agreed_price") or 0) or None
+
+    # ── Look up product SKU + category for discount engine ─────────────────────
+    sku, category = None, None
+    if product_id:
+        try:
+            p = (supabase.table("products")
+                 .select("sku, category")
+                 .eq("product_id", product_id)
+                 .maybe_single()
+                 .execute().data)
+            if p:
+                sku      = p.get("sku")
+                category = p.get("category")
+        except Exception:
+            pass
+
+    # ── Run discount engine with cart context ──────────────────────────────────
+    discount_ctx    = {}
+    discount_code   = None
+    discount_amount = 0.0
+    net_amount      = agreed_price
+    discount_summary: Optional[str] = None
+
+    try:
+        discount_ctx = get_discount_ctx(
+            tenant_id=tenant_id,
+            customer_platform_id=sender_id,
+            customer_phone=order_data.get("customer_phone"),
+            cart_context={
+                "cart_amount":   agreed_price or 0,
+                "product_skus":  [sku] if sku else [],
+                "categories":    [category] if category else [],
+                "quantity":      quantity,
+            },
+        )
+        discount_amount = float(discount_ctx.get("discount_amount") or 0)
+        has_bonus       = bool(discount_ctx.get("bonus_items"))
+
+        if (discount_amount > 0 or has_bonus) and agreed_price:
+            discount_code = _generate_discount_code()
+            net_amount    = round(max(0.0, agreed_price - discount_amount), 2)
+            # Build summary appended to bot reply
+            if discount_amount > 0:
+                discount_summary = (
+                    f"\n\n💰 মূল মূল্য: ৳{agreed_price:.0f} | "
+                    f"ছাড়: ৳{discount_amount:.2f} | "
+                    f"নেট মূল্য: ৳{net_amount:.2f} "
+                    f"[{discount_code}]"
+                )
+            elif has_bonus:
+                items_str = ", ".join(
+                    f"{b.get('name','')} ×{b.get('quantity',1)}"
+                    for b in discount_ctx["bonus_items"][:3]
+                )
+                discount_summary = f"\n\n🎁 ফ্রি পাচ্ছেন: {items_str}"
+    except Exception as _de:
+        logger.warning(f"Discount engine error in save_order: {_de}")
+
+    # ── Insert order ───────────────────────────────────────────────────────────
     supabase.table("orders").insert({
-        "order_id":             str(uuid.uuid4()),
+        "order_id":             order_id,
         "tenant_id":            tenant_id,
         "conversation_id":      conversation_id,
         "customer_platform_id": sender_id,
         "product_name":         order_data.get("product_name"),
-        "product_id":           order_data.get("product_id"),
-        "quantity":             order_data.get("quantity", 1),
-        "agreed_price":         order_data.get("agreed_price"),
+        "product_id":           product_id,
+        "quantity":             quantity,
+        "agreed_price":         agreed_price,
         "customer_phone":       order_data.get("customer_phone"),
         "delivery_address":     order_data.get("delivery_address"),
         "notes":                order_data.get("notes"),
         "status":               "pending",
+        "discount_code":        discount_code,
+        "original_amount":      agreed_price,
+        "net_amount":           net_amount,
     }).execute()
 
-    # Deduct stock immediately when order is placed
-    product_id = order_data.get("product_id")
+    # ── Insert discount row ────────────────────────────────────────────────────
+    if discount_code and discount_ctx:
+        applied  = discount_ctx.get("applied_rules") or []
+        primary  = applied[0] if applied else {}
+        rtype    = primary.get("discount_type") or "percentage"
+        # Ensure reward_type passes DB CHECK constraint
+        if rtype not in ("percentage", "flat", "bonus", "free_delivery"):
+            rtype = "percentage"
+
+        # Resolve discount_category_id if rule is a campaign
+        disc_cat_id = None
+        if primary.get("rule_type") == "campaign" and primary.get("rule_id"):
+            try:
+                cam = (supabase.table("campaigns")
+                       .select("discount_category_id")
+                       .eq("campaign_id", primary["rule_id"])
+                       .maybe_single()
+                       .execute().data)
+                disc_cat_id = (cam or {}).get("discount_category_id")
+            except Exception:
+                pass
+
+        try:
+            supabase.table("discounts").insert({
+                "tenant_id":             tenant_id,
+                "discount_code":         discount_code,
+                "discount_rule_type":    primary.get("rule_type") or "campaign",
+                "discount_rule_id":      primary.get("rule_id"),
+                "discount_rule_name":    primary.get("rule_name") or "",
+                "discount_category_id":  disc_cat_id,
+                "product_id":            product_id,
+                "sku":                   sku,
+                "product_name":          order_data.get("product_name"),
+                "reward_type":           rtype,
+                "discount_pct":          discount_ctx.get("final_discount_pct") or 0,
+                "discount_flat":         discount_ctx.get("final_discount_flat") or 0,
+                "bonus_items":           discount_ctx.get("bonus_items") or [],
+                "original_price":        agreed_price,
+                "discount_amount":       discount_amount,
+                "final_price":           net_amount,
+            }).execute()
+        except Exception as _die:
+            logger.warning(f"Discount insert failed: {_die}")
+
+    # ── Deduct stock immediately when order is placed ──────────────────────────
     quantity   = order_data.get("quantity", 1)
     if product_id and quantity:
         try:
@@ -894,7 +1013,9 @@ async def process_message(
     state_update = result.get("state_update")
 
     if order_data:
-        save_order(tenant_id, conversation_id, sender_id, order_data)
+        discount_summary = save_order(tenant_id, conversation_id, sender_id, order_data)
+        if discount_summary:
+            reply_text = reply_text + discount_summary
         # Auto-send product image if enabled and product has an image
         if ai_config.get("product_image_auto_send") and order_data.get("product_id"):
             img_url = img_svc.get_primary_image(tenant_id, order_data["product_id"])
