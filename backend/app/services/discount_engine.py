@@ -1,16 +1,10 @@
 """
-OmniBot SaaS — Discount Engine v2
+OmniBot SaaS — Discount Engine v3
 Pipeline:
-  1. get_customer_metrics   — query orders table for lifetime stats
-  2. match_rules            — check all active discount rules (reward JSONB: reward_type/discount_value/bonus_items)
-  3. _match_campaigns       — check active campaigns (reward JSONB)
-  4. apply_conflict_resolution — best_deal / priority_wins / stack_all / stack_with_cap
-  5. get_discount_context   — full pipeline, returns dict ready for Gemini injection
-
-reward JSONB shape (all rule types):
-  {"reward_type": "percentage|flat|bonus|free_delivery", "discount_value": N, "bonus_items": [...]}
-
-Combos are NOT part of the discount engine — they are separate product bundles.
+  1. Fetch all active discounts (is_active=true, within effective window)
+  2. For each discount, check its rule_ids against customer + cart
+  3. Apply conflict resolution → pick winning discount
+  4. Return context dict for webhook_service to persist
 """
 import logging
 from datetime import date, datetime, timezone
@@ -21,7 +15,7 @@ from app.database import supabase
 logger = logging.getLogger(__name__)
 
 
-# ── Customer Metrics ──────────────────────────────────────────────────────────
+# ── Customer Metrics ──────────────────────────────────────────
 
 def get_customer_metrics(
     tenant_id: str,
@@ -30,27 +24,26 @@ def get_customer_metrics(
 ) -> dict:
     if not customer_platform_id and not customer_phone:
         return _empty_metrics()
-
     try:
         q = (supabase.table("orders")
-             .select("agreed_price, product_id, product_name, created_at, status")
+             .select("agreed_price, product_id, created_at, status")
              .eq("tenant_id", tenant_id))
         if customer_platform_id:
             q = q.eq("customer_platform_id", customer_platform_id)
         else:
             q = q.eq("customer_phone", customer_phone)
-        orders = (q.order("created_at", desc=False).execute()).data or []
+        orders = q.order("created_at", desc=False).execute().data or []
     except Exception as e:
-        logger.warning(f"Discount engine metrics query error: {e}")
+        logger.warning(f"[DiscountEngine] metrics error: {e}")
         return _empty_metrics()
 
     if not orders:
         return _empty_metrics()
 
+    prices     = [float(o.get("agreed_price") or 0) for o in orders]
+    total_ltv  = sum(prices)
     total_orders = len(orders)
-    prices       = [float(o.get("agreed_price") or 0) for o in orders]
-    total_ltv    = sum(prices)
-    avg_basket   = total_ltv / total_orders if total_orders else 0.0
+    avg_basket = total_ltv / total_orders if total_orders else 0.0
 
     last_order_days_ago, last_order_date = None, None
     try:
@@ -68,7 +61,7 @@ def get_customer_metrics(
     if product_ids:
         try:
             pr = (supabase.table("products")
-                  .select("product_id, category")
+                  .select("category")
                   .in_("product_id", product_ids)
                   .execute())
             previous_categories = list({p["category"] for p in (pr.data or []) if p.get("category")})
@@ -76,9 +69,9 @@ def get_customer_metrics(
             pass
 
     today = date.today()
-    current_month_prefix = f"{today.year}-{today.month:02d}"
+    month_prefix = f"{today.year}-{today.month:02d}"
     current_month_orders = sum(
-        1 for o in orders if (o.get("created_at") or "").startswith(current_month_prefix)
+        1 for o in orders if (o.get("created_at") or "").startswith(month_prefix)
     )
 
     return {
@@ -87,7 +80,6 @@ def get_customer_metrics(
         "avg_basket_value":     round(avg_basket, 2),
         "last_order_days_ago":  last_order_days_ago,
         "last_order_date":      last_order_date,
-        "previous_product_ids": product_ids,
         "previous_categories":  previous_categories,
         "current_month_orders": current_month_orders,
         "is_new_customer":      False,
@@ -101,295 +93,197 @@ def _empty_metrics() -> dict:
         "avg_basket_value":     0.0,
         "last_order_days_ago":  None,
         "last_order_date":      None,
-        "previous_product_ids": [],
         "previous_categories":  [],
         "current_month_orders": 0,
         "is_new_customer":      True,
     }
 
 
-# ── Reward Extraction ─────────────────────────────────────────────────────────
+# ── Single Rule Checker ───────────────────────────────────────
 
-def _extract_reward(reward_dict: dict) -> tuple[str, float, list]:
-    """Return (reward_type, discount_value, bonus_items) from a reward JSONB dict."""
-    # New format: reward_type; old format fallback: discount_type
-    rtype = reward_dict.get("reward_type") or reward_dict.get("discount_type", "percentage")
-    val   = float(reward_dict.get("discount_value", 0))
-    items = reward_dict.get("bonus_items") or []
-    return rtype, val, items
+def _check_single_rule(rule: dict, metrics: dict, ctx: dict) -> tuple[bool, str, dict]:
+    """Returns (hit, reason, reward_dict) for one rule."""
+    rtype  = rule["rule_type"]
+    conds  = rule.get("conditions") or {}
+    reward = dict(rule.get("reward") or {})
 
-
-# ── Campaign Matching ─────────────────────────────────────────────────────────
-
-def _match_campaigns(tenant_id: str, type_priority: int) -> list[dict]:
-    today = date.today()
-    matched = []
-    try:
-        campaigns = (
-            supabase.table("campaigns")
-            .select("campaign_id, name, reward, type, amount, start_date, end_date")
-            .eq("tenant_id", tenant_id)
-            .eq("is_active", True)
-            .execute()
-        ).data or []
-    except Exception as e:
-        logger.warning(f"Campaign fetch error: {e}")
-        return []
-
-    logger.info(f"  Campaigns: {len(campaigns)} active found")
-
-    for c in campaigns:
-        start = c.get("start_date")
-        end   = c.get("end_date")
-        try:
-            if start and today < date.fromisoformat(str(start)[:10]):
-                continue
-            if end and today > date.fromisoformat(str(end)[:10]):
-                continue
-        except ValueError:
-            pass
-
-        # Read from reward JSONB (new), fall back to type/amount (legacy)
-        reward_dict = c.get("reward") or {}
-        if reward_dict:
-            rtype, val, bonus_items = _extract_reward(reward_dict)
-        else:
-            rtype = c.get("type", "percentage")
-            val   = float(c.get("amount") or 0)
-            bonus_items = []
-
-        if rtype != "bonus" and val <= 0:
-            continue
-
-        matched.append({
-            "rule_id":        c["campaign_id"],
-            "rule_name":      c["name"],
-            "rule_type":      "campaign",
-            "priority":       type_priority,
-            "discount_type":  rtype,
-            "discount_value": val,
-            "bonus_items":    bonus_items,
-            "reason":         f"Campaign: {c['name']}",
-        })
-        logger.info(f"  ✓ Campaign matched: '{c['name']}' → {rtype} {val}")
-
-    return matched
-
-
-# ── Rule Matching ─────────────────────────────────────────────────────────────
-
-def match_rules(
-    tenant_id: str,
-    metrics: dict,
-    cart_context: Optional[dict] = None,
-    enabled_type_keys: Optional[set] = None,
-) -> list[dict]:
-    try:
-        rules = (supabase.table("discount_rules")
-                 .select("*")
-                 .eq("tenant_id", tenant_id)
-                 .eq("is_active", True)
-                 .order("priority")
-                 .execute()).data or []
-    except Exception as e:
-        logger.warning(f"Discount engine rule fetch error: {e}")
-        return []
-
-    logger.info(f"  Discount rules: {len(rules)} active fetched")
-
-    ctx          = cart_context or {}
     cart_amount  = float(ctx.get("cart_amount", 0))
     product_skus = list(ctx.get("product_skus") or [])
     categories   = list(ctx.get("categories") or [])
     district     = ctx.get("district")
     quantity     = int(ctx.get("quantity") or 1)
+    today        = date.today()
+    now_dt       = datetime.now()
 
-    today  = date.today()
-    now_dt = datetime.now()
+    if rtype == "cart_value":
+        min_a = float(conds.get("min_amount", 0))
+        if cart_amount >= min_a:
+            return True, f"Cart ৳{cart_amount:.0f} ≥ ৳{min_a:.0f}", reward
 
-    matched = []
+    elif rtype == "repeated_customer":
+        loda = metrics.get("last_order_days_ago")
+        if loda is not None:
+            for tier in conds.get("tiers", []):
+                fd = int(tier.get("from_days", 0))
+                td = int(tier.get("to_days", 9999))
+                if fd <= loda <= td:
+                    tr = tier.get("reward") or (
+                        {"reward_type": "percentage",
+                         "discount_value": float(tier.get("discount_pct", 0)),
+                         "bonus_items": []}
+                        if tier.get("discount_pct") else reward
+                    )
+                    return True, f"Last order {loda} days ago", tr
 
-    for rule in rules:
-        rtype = rule["rule_type"]
+    elif rtype == "new_customer":
+        if metrics.get("is_new_customer", True):
+            return True, "First-time customer", reward
 
-        if enabled_type_keys is not None and rtype not in enabled_type_keys:
-            continue
+    elif rtype == "specific_product":
+        rule_skus = conds.get("skus", [])
+        hits = [s for s in product_skus if s in rule_skus]
+        if hits:
+            return True, f"SKU match: {hits[:2]}", reward
 
-        conds       = rule.get("conditions") or {}
-        reward_dict = dict(rule.get("reward") or {})
-        hit         = False
-        reason      = ""
-        # Default reward (may be overridden per-tier for repeated_customer)
-        curr_reward = reward_dict
+    elif rtype == "specific_category":
+        rule_cats = conds.get("categories", [])
+        hits = [c for c in categories if c in rule_cats]
+        if hits:
+            return True, f"Category match: {hits[:2]}", reward
 
-        # ── 1. Cart Value ──────────────────────────────────────────────────────
-        if rtype == "cart_value":
-            min_a = float(conds.get("min_amount", 0))
-            if cart_amount >= min_a:
-                hit    = True
-                reason = f"Cart ৳{cart_amount:.0f} ≥ min ৳{min_a:.0f}"
+    elif rtype == "bulk_quantity":
+        min_q = int(conds.get("min_quantity", 1))
+        if quantity >= min_q:
+            r = reward.copy()
+            if not r.get("reward_type") and conds.get("discount_pct"):
+                r = {"reward_type": "percentage",
+                     "discount_value": float(conds["discount_pct"]),
+                     "bonus_items": []}
+            return True, f"Qty {quantity} ≥ min {min_q}", r
 
-        # ── 2. Repeated Customer ───────────────────────────────────────────────
-        elif rtype == "repeated_customer":
-            loda = metrics.get("last_order_days_ago")
-            if loda is not None:
-                for tier in conds.get("tiers", []):
-                    fd = int(tier.get("from_days", 0))
-                    td = int(tier.get("to_days", 9999))
-                    if fd <= loda <= td:
-                        hit    = True
-                        reason = f"Last order {loda} days ago (tier {fd}–{td}d)"
-                        # Per-tier reward: prefer tier.reward, fall back to tier.discount_pct
-                        if tier.get("reward"):
-                            curr_reward = tier["reward"]
-                        elif tier.get("discount_pct"):
-                            curr_reward = {"reward_type": "percentage", "discount_value": float(tier["discount_pct"]), "bonus_items": []}
-                        break
+    elif rtype == "district":
+        if district and district in conds.get("districts", []):
+            return True, f"District: {district}", reward
 
-        # ── 3. New Customer ────────────────────────────────────────────────────
-        elif rtype == "new_customer":
-            if metrics.get("is_new_customer", True):
-                hit    = True
-                reason = "First-time customer"
+    elif rtype == "time_based":
+        active_days = [d.lower()[:3] for d in conds.get("days_of_week", [])]
+        dow = now_dt.strftime("%a").lower()
+        if dow in active_days:
+            from_t = conds.get("from_time", "00:00")
+            to_t   = conds.get("to_time",   "23:59")
+            cur    = now_dt.strftime("%H:%M")
+            if from_t <= cur <= to_t:
+                r = reward.copy()
+                if not r.get("reward_type") and conds.get("discount_pct"):
+                    r = {"reward_type": "percentage",
+                         "discount_value": float(conds["discount_pct"]),
+                         "bonus_items": []}
+                return True, f"Time: {dow} {cur}", r
 
-        # ── 4. Specific Product ────────────────────────────────────────────────
-        elif rtype == "specific_product":
-            rule_skus = conds.get("skus", [])
-            hits = [s for s in product_skus if s in rule_skus]
-            if hits:
-                hit    = True
-                reason = f"SKU match: {hits[:3]}"
+    elif rtype == "seasonal":
+        start = conds.get("start_date")
+        end   = conds.get("end_date")
+        if start and end:
+            try:
+                if date.fromisoformat(start) <= today <= date.fromisoformat(end):
+                    return True, f"Seasonal: {rule.get('rule_name', '')}", reward
+            except ValueError:
+                pass
 
-        # ── 5. Specific Category ───────────────────────────────────────────────
-        elif rtype == "specific_category":
-            rule_cats = conds.get("categories", [])
-            hits = [c for c in categories if c in rule_cats]
-            if hits:
-                hit    = True
-                reason = f"Category match: {hits[:3]}"
+    elif rtype == "lifetime_value":
+        min_ltv    = float(conds.get("min_lifetime_value", 0))
+        actual_ltv = float(metrics.get("total_lifetime_value", 0))
+        if actual_ltv >= min_ltv:
+            return True, f"LTV ৳{actual_ltv:.0f} ≥ ৳{min_ltv:.0f}", reward
 
-        # ── 6. Bulk Quantity ───────────────────────────────────────────────────
-        elif rtype == "bulk_quantity":
-            min_q = int(conds.get("min_quantity", 1))
-            if quantity >= min_q:
-                hit    = True
-                reason = f"Qty {quantity} ≥ min {min_q}"
-                # Fall back to conditions.discount_pct if reward is empty (legacy)
-                if not curr_reward.get("reward_type") and conds.get("discount_pct"):
-                    curr_reward = {"reward_type": "percentage", "discount_value": float(conds["discount_pct"]), "bonus_items": []}
-
-        # ── 7. District ────────────────────────────────────────────────────────
-        elif rtype == "district":
-            if district and district in conds.get("districts", []):
-                hit    = True
-                reason = f"District: {district}"
-
-        # ── 8. Time-Based ──────────────────────────────────────────────────────
-        elif rtype == "time_based":
-            active_days = [d.lower()[:3] for d in conds.get("days_of_week", [])]
-            dow = now_dt.strftime("%a").lower()
-            if dow in active_days:
-                from_t = conds.get("from_time", "00:00")
-                to_t   = conds.get("to_time",   "23:59")
-                cur    = now_dt.strftime("%H:%M")
-                if from_t <= cur <= to_t:
-                    hit    = True
-                    reason = f"Time rule: {dow} {cur}"
-                    if not curr_reward.get("reward_type") and conds.get("discount_pct"):
-                        curr_reward = {"reward_type": "percentage", "discount_value": float(conds["discount_pct"]), "bonus_items": []}
-
-        # ── 9. Seasonal ────────────────────────────────────────────────────────
-        elif rtype == "seasonal":
-            start = conds.get("start_date")
-            end   = conds.get("end_date")
-            if start and end:
-                try:
-                    if date.fromisoformat(start) <= today <= date.fromisoformat(end):
-                        hit    = True
-                        reason = f"Seasonal: {rule.get('rule_name', 'Sale')}"
-                except ValueError:
-                    pass
-
-        # ── 10. Lifetime Value ─────────────────────────────────────────────────
-        elif rtype == "lifetime_value":
-            min_ltv    = float(conds.get("min_lifetime_value", 0))
-            actual_ltv = float(metrics.get("total_lifetime_value", 0))
-            if actual_ltv >= min_ltv:
-                hit    = True
-                reason = f"LTV ৳{actual_ltv:.0f} ≥ ৳{min_ltv:.0f}"
-
-        if hit:
-            rwd_type, disc_val, bonus_items = _extract_reward(curr_reward)
-            matched.append({
-                "rule_id":        rule["rule_id"],
-                "rule_name":      rule["rule_name"] or rtype,
-                "rule_type":      rtype,
-                "priority":       rule["priority"],
-                "discount_type":  rwd_type,
-                "discount_value": disc_val,
-                "bonus_items":    bonus_items,
-                "reason":         reason,
-            })
-            logger.info(
-                f"  ✓ Rule matched: '{rule['rule_name'] or rtype}' "
-                f"({rtype}) p={rule['priority']} → {rwd_type} {disc_val} | {reason}"
-            )
-
-    return matched
+    return False, "", {}
 
 
-# ── Conflict Resolution ───────────────────────────────────────────────────────
+# ── Reward Helpers ────────────────────────────────────────────
 
-def apply_conflict_resolution(
-    matched: list[dict],
-    resolution: str,
-    stack_cap: float,
-    cart_amount: float,
-) -> tuple[float, float, list[dict]]:
-    """
-    Returns (final_discount_pct, final_discount_flat, applied_rules).
-    Bonus and free_delivery rules are always included in applied_rules
-    but are excluded from pct/flat computation.
-    """
+def _extract_reward(r: dict) -> tuple[str, float, list]:
+    rtype = r.get("reward_type", "percentage")
+    val   = float(r.get("discount_value", 0))
+    items = r.get("bonus_items") or []
+    return rtype, val, items
+
+
+def _compute_amount(reward: dict, cart_amount: float) -> float:
+    rtype, val, _ = _extract_reward(reward)
+    if rtype == "percentage":
+        return round(cart_amount * val / 100, 2)
+    if rtype == "flat":
+        return round(val, 2)
+    return 0.0
+
+
+def _build_message(reward: dict, discount_amount: float) -> str:
+    rtype, val, bonus_items = _extract_reward(reward)
+    if rtype == "bonus" and bonus_items:
+        s = ", ".join(f"{b.get('name','')} ×{b.get('quantity',1)}" for b in bonus_items[:3])
+        return f"ফ্রি পাচ্ছেন: {s}"
+    if rtype == "percentage" and val > 0:
+        return f"আপনি {val:.0f}% ছাড় পাচ্ছেন!"
+    if rtype == "flat" and val > 0:
+        return f"আপনি ৳{val:.0f} ছাড় পাচ্ছেন!"
+    if rtype == "free_delivery":
+        return "ফ্রি ডেলিভারি পাচ্ছেন!"
+    return ""
+
+
+def _get_cfg(tenant_id: str) -> dict:
+    try:
+        res = (supabase.table("ai_config")
+               .select("conflict_resolution, discount_stack_cap")
+               .eq("tenant_id", tenant_id)
+               .maybe_single()
+               .execute())
+        return res.data or {}
+    except Exception:
+        return {}
+
+
+# ── Conflict Resolution ───────────────────────────────────────
+
+def _resolve(matched: list, resolution: str, stack_cap: float, cart_amount: float) -> dict:
     if not matched:
-        return 0.0, 0.0, []
-
-    bonus_rules    = [r for r in matched if r.get("discount_type") in ("bonus", "free_delivery")]
-    monetary_rules = [r for r in matched if r.get("discount_type") not in ("bonus", "free_delivery")]
-
+        return {}
     if resolution == "priority_wins":
-        if monetary_rules:
-            top = monetary_rules[0]
-            logger.info(f"  conflict=priority_wins → applying: '{top['rule_name']}'")
-            if top["discount_type"] == "percentage":
-                return float(top["discount_value"]), 0.0, [top] + bonus_rules
-            return 0.0, float(top["discount_value"]), [top] + bonus_rules
-        return 0.0, 0.0, bonus_rules
-
+        return matched[0]
     if resolution == "best_deal":
-        if monetary_rules:
-            best = max(monetary_rules, key=lambda r: (
-                r["discount_value"] * cart_amount / 100
-                if r["discount_type"] == "percentage"
-                else r["discount_value"]
-            ))
-            logger.info(f"  conflict=best_deal → applying: '{best['rule_name']}'")
-            if best["discount_type"] == "percentage":
-                return float(best["discount_value"]), 0.0, [best] + bonus_rules
-            return 0.0, float(best["discount_value"]), [best] + bonus_rules
-        return 0.0, 0.0, bonus_rules
-
-    # stack_all or stack_with_cap
-    total_pct  = sum(r["discount_value"] for r in monetary_rules if r["discount_type"] == "percentage")
-    total_flat = sum(r["discount_value"] for r in monetary_rules if r["discount_type"] == "flat")
-
-    if resolution == "stack_with_cap":
-        total_pct = min(total_pct, stack_cap)
-
-    return total_pct, total_flat, monetary_rules + bonus_rules
+        return max(
+            matched,
+            key=lambda m: _compute_amount(m.get("reward", {}), cart_amount)
+        )
+    return matched[0]
 
 
-# ── Main Entry Point ──────────────────────────────────────────────────────────
+# ── Empty Context ─────────────────────────────────────────────
+
+def _empty_ctx(metrics: dict) -> dict:
+    return {
+        "customer_metrics":    metrics,
+        "matched_discounts":   [],
+        "applied_discount":    None,
+        "discount_code":       None,
+        "discount_id":         None,
+        "discount_name":       None,
+        "rule_id":             None,
+        "rule_name":           None,
+        "rule_type":           None,
+        "reward":              {},
+        "reward_type":         "percentage",
+        "discount_amount":     0.0,
+        "final_price":         0.0,
+        "bonus_items":         [],
+        "discount_message":    "",
+        "resolution":          "best_deal",
+        "final_discount_pct":  0.0,
+        "final_discount_flat": 0.0,
+    }
+
+
+# ── Main Entry Point ──────────────────────────────────────────
 
 def get_discount_context(
     tenant_id: str,
@@ -397,98 +291,134 @@ def get_discount_context(
     customer_phone: Optional[str] = None,
     cart_context: Optional[dict] = None,
 ) -> dict:
-    logger.info(
-        f"[DiscountEngine] START tenant={tenant_id} "
-        f"psid={'***' if customer_platform_id else '-'} "
-        f"phone={'***' if customer_phone else '-'} "
-        f"cart={cart_context}"
-    )
+    logger.info(f"[DiscountEngine v3] START tenant={tenant_id} cart={cart_context}")
 
-    metrics = get_customer_metrics(tenant_id, customer_platform_id, customer_phone)
-    logger.info(
-        f"[DiscountEngine] Metrics: new={metrics['is_new_customer']} "
-        f"orders={metrics['total_orders']} ltv=৳{metrics['total_lifetime_value']}"
-    )
+    metrics     = get_customer_metrics(tenant_id, customer_platform_id, customer_phone)
+    now_utc     = datetime.now(timezone.utc)
+    ctx         = cart_context or {}
+    cart_amount = float(ctx.get("cart_amount", 0))
 
-    resolution        = "best_deal"
-    stack_cap         = 30.0
-    priority_settings: dict = {}
+    # 1. Fetch active discounts within effective window
     try:
-        cfg = (supabase.table("ai_config")
-               .select("conflict_resolution, discount_stack_cap, discount_priority_settings")
-               .eq("tenant_id", tenant_id)
-               .maybe_single()
-               .execute())
-        if cfg and cfg.data:
-            resolution        = cfg.data.get("conflict_resolution") or "best_deal"
-            stack_cap         = float(cfg.data.get("discount_stack_cap") or 30)
-            priority_settings = cfg.data.get("discount_priority_settings") or {}
-    except Exception as e:
-        logger.warning(f"[DiscountEngine] Config fetch error: {e}")
-
-    enabled_type_keys: Optional[set] = None
-    campaign_priority = 1
-
-    if priority_settings:
-        enabled_type_keys = {
-            key for key, val in priority_settings.items()
-            if isinstance(val, dict) and val.get("enabled", True)
-        }
-        cp = priority_settings.get("campaign", {})
-        if isinstance(cp, dict):
-            campaign_priority = int(cp.get("priority", 1))
-
-    matched = match_rules(tenant_id, metrics, cart_context, enabled_type_keys)
-
-    campaign_on = enabled_type_keys is None or "campaign" in enabled_type_keys
-    if campaign_on:
-        cam = _match_campaigns(tenant_id, campaign_priority)
-        matched.extend(cam)
-
-    matched.sort(key=lambda r: r["priority"])
-    logger.info(f"[DiscountEngine] Total matched: {len(matched)}")
-
-    cart_amount = float((cart_context or {}).get("cart_amount", 0))
-    final_pct, final_flat, applied = apply_conflict_resolution(
-        matched, resolution, stack_cap, cart_amount
-    )
-
-    # Collect all bonus items from applied rules
-    all_bonus_items: list = []
-    for r in applied:
-        if r.get("discount_type") in ("bonus", "free_delivery"):
-            all_bonus_items.extend(r.get("bonus_items") or [])
-
-    discount_message = ""
-    if all_bonus_items:
-        items_str = ", ".join(
-            f"{item.get('name', '')} ×{item.get('quantity', 1)}"
-            for item in all_bonus_items[:3]
+        raw = (
+            supabase.table("discounts")
+            .select("*")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .lte("effective_from", now_utc.isoformat())
+            .execute().data or []
         )
-        discount_message = f"ফ্রি পাচ্ছেন: {items_str}"
-    elif final_pct > 0:
-        reasons = "; ".join(r["reason"] for r in applied[:2] if r.get("reason"))
-        discount_message = f"আপনি {final_pct:.0f}% ছাড় পাচ্ছেন! ({reasons})"
-    elif final_flat > 0:
-        discount_message = f"আপনি ৳{final_flat:.0f} ছাড় পাচ্ছেন!"
+    except Exception as e:
+        logger.warning(f"[DiscountEngine] discounts fetch: {e}")
+        return _empty_ctx(metrics)
 
-    discount_amount = (cart_amount * final_pct / 100) + final_flat if cart_amount > 0 else 0.0
+    active = []
+    for d in raw:
+        eff_to = d.get("effective_to")
+        if not eff_to:
+            active.append(d)
+        else:
+            try:
+                eto = datetime.fromisoformat(eff_to.replace("Z", "+00:00")).astimezone(timezone.utc)
+                if eto >= now_utc:
+                    active.append(d)
+            except Exception:
+                active.append(d)
+
+    if not active:
+        logger.info("[DiscountEngine] No active discounts")
+        return _empty_ctx(metrics)
+
+    # 2. Fetch all rule_ids referenced by active discounts
+    all_rule_ids = list({str(rid) for d in active for rid in (d.get("rule_ids") or [])})
+    if not all_rule_ids:
+        return _empty_ctx(metrics)
+
+    try:
+        rules_data = (
+            supabase.table("discount_rules")
+            .select("*")
+            .eq("tenant_id", tenant_id)
+            .in_("rule_id", all_rule_ids)
+            .execute().data or []
+        )
+    except Exception as e:
+        logger.warning(f"[DiscountEngine] rules fetch: {e}")
+        return _empty_ctx(metrics)
+
+    rules_map = {str(r["rule_id"]): r for r in rules_data}
+
+    # 3. Check each discount — first matching rule wins
+    matched = []
+    for discount in active:
+        rule_ids = [str(r) for r in (discount.get("rule_ids") or [])]
+        for rid in rule_ids:
+            rule = rules_map.get(rid)
+            if not rule:
+                continue
+            hit, reason, reward = _check_single_rule(rule, metrics, ctx)
+            if hit:
+                rtype, val, bonus_items = _extract_reward(reward)
+                disc_amount = _compute_amount(reward, cart_amount)
+                matched.append({
+                    "discount_id":      discount["discount_id"],
+                    "discount_code":    discount["discount_code"],
+                    "discount_name":    discount.get("discount_name", ""),
+                    "rule_id":          rid,
+                    "rule_name":        rule.get("rule_name", ""),
+                    "rule_type":        rule["rule_type"],
+                    "reward":           reward,
+                    "reward_type":      rtype,
+                    "discount_value":   val,
+                    "bonus_items":      bonus_items,
+                    "discount_amount":  disc_amount,
+                    "reason":           reason,
+                })
+                logger.info(
+                    f"[DiscountEngine] Matched '{discount.get('discount_name')}' "
+                    f"via rule '{rule.get('rule_name')}' | {reason}"
+                )
+                break
+
+    if not matched:
+        logger.info("[DiscountEngine] No rules matched")
+        return _empty_ctx(metrics)
+
+    # 4. Conflict resolution
+    cfg        = _get_cfg(tenant_id)
+    resolution = cfg.get("conflict_resolution", "best_deal")
+    stack_cap  = float(cfg.get("discount_stack_cap", 30))
+
+    applied         = _resolve(matched, resolution, stack_cap, cart_amount)
+    discount_amount = applied.get("discount_amount", 0.0)
     final_price     = max(0.0, cart_amount - discount_amount) if cart_amount > 0 else 0.0
+    reward          = applied.get("reward", {})
+    rtype           = applied.get("reward_type", "percentage")
 
     logger.info(
-        f"[DiscountEngine] RESULT: {discount_message or 'no discount'} | "
-        f"discount_amount=৳{discount_amount:.2f} final_price=৳{final_price:.2f}"
+        f"[DiscountEngine] Applied: '{applied.get('discount_name')}' "
+        f"code={applied.get('discount_code')} ৳{discount_amount:.2f}"
     )
 
     return {
         "customer_metrics":    metrics,
-        "matched_rules":       matched,
-        "applied_rules":       applied,
-        "final_discount_pct":  round(final_pct, 2),
-        "final_discount_flat": round(final_flat, 2),
+        "matched_discounts":   matched,
+        "applied_discount":    applied,
+        "discount_code":       applied.get("discount_code"),
+        "discount_id":         applied.get("discount_id"),
+        "discount_name":       applied.get("discount_name"),
+        "rule_id":             applied.get("rule_id"),
+        "rule_name":           applied.get("rule_name"),
+        "rule_type":           applied.get("rule_type"),
+        "reward":              reward,
+        "reward_type":         rtype,
         "discount_amount":     round(discount_amount, 2),
         "final_price":         round(final_price, 2),
-        "bonus_items":         all_bonus_items,
-        "discount_message":    discount_message,
+        "bonus_items":         applied.get("bonus_items") or [],
+        "discount_message":    _build_message(reward, discount_amount),
         "resolution":          resolution,
+        # Backward-compat fields used by webhook_service
+        "final_discount_pct":  applied.get("discount_value", 0) if rtype == "percentage" else 0,
+        "final_discount_flat": applied.get("discount_value", 0) if rtype == "flat" else 0,
+        "applied_rules":       [applied],
     }

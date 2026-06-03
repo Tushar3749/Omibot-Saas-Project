@@ -183,32 +183,70 @@ export interface Order {
   created_at: string
 }
 
-export interface DiscountRow {
+// ─── Discount Rules ───────────────────────────────────────────────────────────
+
+export interface DiscountRule {
+  rule_id: string
+  tenant_id: string
+  rule_name: string
+  rule_type: string
+  conditions: Record<string, unknown>
+  reward: {
+    reward_type: 'percentage' | 'flat' | 'bonus' | 'free_delivery'
+    discount_value: number
+    bonus_items: Array<{ product_id: string; sku: string; name: string; quantity: number }>
+  }
+  created_at: string
+}
+
+// ─── Discounts (named offers) ─────────────────────────────────────────────────
+
+export interface Discount {
   discount_id: string
   tenant_id: string
+  discount_name: string
   discount_code: string
-  discount_rule_type: string
-  discount_rule_id: string | null
-  discount_rule_name: string
-  discount_category_id: string | null
-  discount_category_name: string | null
+  rule_ids: string[]
+  effective_from: string
+  effective_to: string | null
+  is_lifetime: boolean
+  is_active: boolean
+  created_at: string
+  // enriched by API
+  rules?: DiscountRule[]
+  orders_count?: number
+  total_discount_amount?: number
+  order_discounts?: OrderDiscount[]
+}
+
+// ─── Order Discounts (applied log) ───────────────────────────────────────────
+
+export interface OrderDiscount {
+  id: string
+  tenant_id: string
+  order_id: string
+  discount_id: string
+  discount_code: string
+  discount_name: string
+  rule_id: string
+  rule_name: string
+  rule_type: string
   product_id: string | null
   sku: string | null
   product_name: string | null
-  reward_type: 'percentage' | 'flat' | 'bonus' | 'free_delivery'
+  reward_type: string
   discount_pct: number
   discount_flat: number
   bonus_items: Array<{ product_id: string; sku: string; name: string; quantity: number }>
   original_price: number | null
   discount_amount: number
   final_price: number | null
-  effective_from: string | null
-  effective_to: string | null
-  is_active: boolean
   created_at: string
 }
 
-export interface DiscountReportRow extends DiscountRow {
+export interface DiscountReportRow {
+  discount_code: string
+  discount_name: string
   orders_count: number
   total_discount_amount: number
 }

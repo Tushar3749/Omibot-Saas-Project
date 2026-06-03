@@ -225,13 +225,13 @@ export const ordersAPI = {
 
 // ── Discounts ─────────────────────────────────────────────────────────────────
 export const discountsAPI = {
-  list:       (limit = 50) => api.get('/api/discounts/', { params: { limit } }).then(r => r.data),
-  getByCode:  (code: string) => api.get(`/api/discounts/${encodeURIComponent(code)}`).then(r => r.data),
+  list:       () => api.get('/api/discounts/').then(r => r.data),
+  get:        (id: string) => api.get(`/api/discounts/${id}`).then(r => r.data),
+  create:     (data: Record<string, unknown>) => api.post('/api/discounts/', data).then(r => r.data),
+  update:     (id: string, data: Record<string, unknown>) => api.patch(`/api/discounts/${id}`, data).then(r => r.data),
+  delete:     (id: string) => api.delete(`/api/discounts/${id}`).then(r => r.data),
   getByOrder: (orderId: string) => api.get(`/api/discounts/order/${orderId}`).then(r => r.data),
-  report:     (filters: Record<string, string | undefined>) =>
-    api.get('/api/discounts/report', { params: filters }).then(r => r.data),
-  toggle:     (discountCode: string, isActive: boolean) =>
-    api.patch(`/api/discounts/toggle/${encodeURIComponent(discountCode)}`, { is_active: isActive }).then(r => r.data),
+  report:     (params?: Record<string, unknown>) => api.get('/api/discounts/report', { params }).then(r => r.data),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
@@ -402,31 +402,17 @@ export const otpAPI = {
     api.post('/api/otp/test-send', { phone }).then(r => r.data),
 }
 
-// ── Smart Discount Rules ──────────────────────────────────────────────────────
+// ── Discount Rules ────────────────────────────────────────────────────────────
 export const discountRulesAPI = {
-  list: () => api.get('/api/discount-rules/').then(r => r.data),
+  list:   () => api.get('/api/discount-rules/').then(r => r.data),
   create: (data: Record<string, unknown>) =>
     api.post('/api/discount-rules/', data).then(r => r.data),
   update: (id: string, data: Record<string, unknown>) =>
-    api.put(`/api/discount-rules/${id}`, data).then(r => r.data),
+    api.patch(`/api/discount-rules/${id}`, data).then(r => r.data),
   delete: (id: string) =>
     api.delete(`/api/discount-rules/${id}`).then(r => r.data),
-  updatePriority: (rules: { id: string; priority: number }[]) =>
-    api.put('/api/discount-rules/priority/batch', { rules }).then(r => r.data),
-  preview: (data: Record<string, unknown>) =>
-    api.post('/api/discount-rules/preview', data).then(r => r.data),
 }
 
-// ── Discount Categories ───────────────────────────────────────────────────────
-export const discountCategoriesAPI = {
-  list:   () => api.get('/api/discount-categories/').then(r => r.data),
-  create: (data: Record<string, unknown>) =>
-    api.post('/api/discount-categories/', data).then(r => r.data),
-  update: (id: string, data: Record<string, unknown>) =>
-    api.patch(`/api/discount-categories/${id}`, data).then(r => r.data),
-  delete: (id: string) =>
-    api.delete(`/api/discount-categories/${id}`).then(r => r.data),
-}
 
 // ── Negotiation Rules ─────────────────────────────────────────────────────────
 export const negotiationAPI = {

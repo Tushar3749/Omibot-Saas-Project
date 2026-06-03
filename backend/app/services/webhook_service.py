@@ -617,11 +617,11 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         )
         discount_amount = float(discount_ctx.get("discount_amount") or 0)
         has_bonus       = bool(discount_ctx.get("bonus_items"))
+        # discount_code comes from the matched active Discount offer
+        discount_code   = discount_ctx.get("discount_code")
 
-        if (discount_amount > 0 or has_bonus) and agreed_price:
-            discount_code = _generate_discount_code()
-            net_amount    = round(max(0.0, agreed_price - discount_amount), 2)
-            # Build summary appended to bot reply
+        if discount_code and (discount_amount > 0 or has_bonus) and agreed_price:
+            net_amount = round(max(0.0, agreed_price - discount_amount), 2)
             if discount_amount > 0:
                 discount_summary = (
                     f"\n\n💰 মূল মূল্য: ৳{agreed_price:.0f} | "
@@ -657,49 +657,34 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         "net_amount":           net_amount,
     }).execute()
 
-    # ── Insert discount row ────────────────────────────────────────────────────
-    if discount_code and discount_ctx:
-        applied  = discount_ctx.get("applied_rules") or []
-        primary  = applied[0] if applied else {}
-        rtype    = primary.get("discount_type") or "percentage"
-        # Ensure reward_type passes DB CHECK constraint
+    # ── Insert order_discounts row ────────────────────────────────────────────
+    if discount_code and discount_ctx.get("discount_id"):
+        rtype = discount_ctx.get("reward_type") or "percentage"
         if rtype not in ("percentage", "flat", "bonus", "free_delivery"):
             rtype = "percentage"
-
-        # Resolve discount_category_id if rule is a campaign
-        disc_cat_id = None
-        if primary.get("rule_type") == "campaign" and primary.get("rule_id"):
-            try:
-                cam = (supabase.table("campaigns")
-                       .select("discount_category_id")
-                       .eq("campaign_id", primary["rule_id"])
-                       .maybe_single()
-                       .execute().data)
-                disc_cat_id = (cam or {}).get("discount_category_id")
-            except Exception:
-                pass
-
         try:
-            supabase.table("discounts").insert({
-                "tenant_id":             tenant_id,
-                "discount_code":         discount_code,
-                "discount_rule_type":    primary.get("rule_type") or "campaign",
-                "discount_rule_id":      primary.get("rule_id"),
-                "discount_rule_name":    primary.get("rule_name") or "",
-                "discount_category_id":  disc_cat_id,
-                "product_id":            product_id,
-                "sku":                   sku,
-                "product_name":          order_data.get("product_name"),
-                "reward_type":           rtype,
-                "discount_pct":          discount_ctx.get("final_discount_pct") or 0,
-                "discount_flat":         discount_ctx.get("final_discount_flat") or 0,
-                "bonus_items":           discount_ctx.get("bonus_items") or [],
-                "original_price":        agreed_price,
-                "discount_amount":       discount_amount,
-                "final_price":           net_amount,
+            supabase.table("order_discounts").insert({
+                "tenant_id":      tenant_id,
+                "order_id":       order_id,
+                "discount_id":    discount_ctx.get("discount_id"),
+                "discount_code":  discount_code,
+                "discount_name":  discount_ctx.get("discount_name") or "",
+                "rule_id":        discount_ctx.get("rule_id"),
+                "rule_name":      discount_ctx.get("rule_name") or "",
+                "rule_type":      discount_ctx.get("rule_type") or "",
+                "product_id":     product_id,
+                "sku":            sku,
+                "product_name":   order_data.get("product_name"),
+                "reward_type":    rtype,
+                "discount_pct":   discount_ctx.get("final_discount_pct") or 0,
+                "discount_flat":  discount_ctx.get("final_discount_flat") or 0,
+                "bonus_items":    discount_ctx.get("bonus_items") or [],
+                "original_price": agreed_price,
+                "discount_amount": discount_amount,
+                "final_price":    net_amount,
             }).execute()
         except Exception as _die:
-            logger.warning(f"Discount insert failed: {_die}")
+            logger.warning(f"order_discounts insert failed: {_die}")
 
     # ── Deduct stock immediately when order is placed ──────────────────────────
     quantity   = order_data.get("quantity", 1)
