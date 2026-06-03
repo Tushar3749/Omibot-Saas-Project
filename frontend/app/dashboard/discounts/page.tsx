@@ -1035,7 +1035,7 @@ function ReportTab({ crMode }: { crMode: string }) {
   if (loading) return <div className="flex justify-center py-16"><div className="spinner h-6 w-6" /></div>
 
   const cr = CR_META[crMode] || CR_META['best_deal']
-  const hasAnyData = months.some(m => m.orders_count > 0)
+  const hasAnyData = months.length > 0
 
   return (
     <div className="space-y-4">
@@ -1093,13 +1093,13 @@ function ReportTab({ crMode }: { crMode: string }) {
       {!hasAnyData && (
         <div className="text-center py-10" style={{ color: 'var(--c-muted)' }}>
           <TrendingDown size={32} className="mx-auto mb-3 opacity-25" />
-          <p className="text-sm font-medium">No discount activity yet</p>
-          <p className="text-xs mt-1 opacity-70">Discount usage will appear here by month</p>
+          <p className="text-sm font-medium">No discounts created yet</p>
+          <p className="text-xs mt-1 opacity-70">Create a discount to see monthly activity</p>
         </div>
       )}
 
-      {/* Month accordion */}
-      {months.filter(m => m.orders_count > 0 || expanded.has(`${m.year}-${String(m.month).padStart(2,'0')}`)).map(m => {
+      {/* Month accordion — backend already filters to months with active discounts */}
+      {months.map(m => {
         const key       = `${m.year}-${String(m.month).padStart(2,'0')}`
         const isOpen    = expanded.has(key)
         const isLoading = detailLoad.has(key)

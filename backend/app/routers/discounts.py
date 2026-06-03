@@ -12,10 +12,11 @@ Route order (must declare literals BEFORE /{discount_id}):
   PATCH/{discount_id}
   DELETE /{discount_id}
 """
+import calendar
 import logging
 import random
 import string
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -146,14 +147,39 @@ def _next_month(y: int, m: int) -> tuple[int, int]:
     return (y, m + 1) if m < 12 else (y + 1, 1)
 
 
+def _discount_active_in_month(disc: dict, month_start: date, month_end: date) -> bool:
+    """Return True if a discount's effective window overlaps the given month."""
+    eff_from_str = disc.get("effective_from") or ""
+    eff_to_str   = disc.get("effective_to")
+    is_lifetime  = disc.get("is_lifetime", False)
+    try:
+        eff_from = datetime.fromisoformat(eff_from_str.replace("Z", "+00:00")).date()
+    except Exception:
+        return False
+    if eff_from > month_end:
+        return False
+    if not is_lifetime and eff_to_str:
+        try:
+            eff_to = datetime.fromisoformat(eff_to_str.replace("Z", "+00:00")).date()
+            if eff_to < month_start:
+                return False
+        except Exception:
+            pass
+    return True
+
+
 def _report_month_detail(tid: str, year: int, month: int) -> dict:
-    """Discount breakdown for a single month."""
-    from collections import defaultdict
-    ny, nm = _next_month(year, month)
+    """Discount breakdown for a single month — includes all active discounts, 0 orders if unused."""
+    last_day    = calendar.monthrange(year, month)[1]
+    month_start = date(year, month, 1)
+    month_end   = date(year, month, last_day)
+    ny, nm      = _next_month(year, month)
+
+    # Order data for this month
     try:
         od_rows = (
             supabase.table("order_discounts")
-            .select("discount_id, discount_code, discount_name, discount_amount, order_id")
+            .select("discount_id, discount_amount, order_id")
             .eq("tenant_id", tid)
             .gte("created_at", f"{year}-{month:02d}-01")
             .lt ("created_at", f"{ny}-{nm:02d}-01")
@@ -162,46 +188,47 @@ def _report_month_detail(tid: str, year: int, month: int) -> dict:
     except Exception:
         od_rows = []
 
-    groups: dict = defaultdict(lambda: {"orders": set(), "total": 0.0, "name": "", "did": ""})
+    # Group order totals by discount_id
+    order_by_did: dict = {}
     for row in od_rows:
-        code = row.get("discount_code", "")
-        groups[code]["name"] = row.get("discount_name", "")
-        groups[code]["did"]  = row.get("discount_id", "")
-        groups[code]["orders"].add(row.get("order_id", ""))
-        groups[code]["total"] += float(row.get("discount_amount") or 0)
+        did = row.get("discount_id", "")
+        if did not in order_by_did:
+            order_by_did[did] = {"orders": set(), "total": 0.0}
+        order_by_did[did]["orders"].add(row.get("order_id", ""))
+        order_by_did[did]["total"] += float(row.get("discount_amount") or 0)
 
-    # Enrich with discount details (priority, is_active, rule_ids)
-    dids = [g["did"] for g in groups.values() if g["did"]]
-    disc_map: dict = {}
-    if dids:
-        try:
-            rows = (
-                supabase.table("discounts")
-                .select("discount_id, is_active, priority, rule_ids")
-                .eq("tenant_id", tid)
-                .in_("discount_id", dids)
-                .execute().data or []
-            )
-            disc_map = {r["discount_id"]: r for r in rows}
-        except Exception:
-            pass
+    # All discounts for this tenant
+    try:
+        all_discs = (
+            supabase.table("discounts")
+            .select("*")
+            .eq("tenant_id", tid)
+            .execute().data or []
+        )
+    except Exception:
+        all_discs = []
 
     result_rows = []
-    for code, data in sorted(groups.items(), key=lambda x: x[1]["total"], reverse=True):
-        det = disc_map.get(data["did"], {})
+    for disc in all_discs:
+        if not _discount_active_in_month(disc, month_start, month_end):
+            continue
+        did   = disc["discount_id"]
+        odata = order_by_did.get(did, {})
         result_rows.append({
-            "discount_id":           data["did"],
-            "discount_code":         code,
-            "discount_name":         data["name"],
-            "rules_count":           len(det.get("rule_ids") or []),
-            "orders_count":          len(data["orders"]),
-            "total_discount_amount": round(data["total"], 2),
-            "is_active":             det.get("is_active", True),
-            "priority":              det.get("priority", 99),
+            "discount_id":           did,
+            "discount_code":         disc.get("discount_code", ""),
+            "discount_name":         disc.get("discount_name", ""),
+            "rules_count":           len(disc.get("rule_ids") or []),
+            "orders_count":          len(odata.get("orders", set())),
+            "total_discount_amount": round(odata.get("total", 0.0), 2),
+            "is_active":             disc.get("is_active", True),
+            "priority":              int(disc.get("priority") or 99),
         })
 
+    result_rows.sort(key=lambda r: (r["priority"], -r["total_discount_amount"]))
     total_disc   = sum(r["total_discount_amount"] for r in result_rows)
-    total_orders = len({r.get("order_id") for r in od_rows})
+    total_orders = len({row.get("order_id") for row in od_rows if row.get("order_id")})
+
     return {
         "year":                  year,
         "month":                 month,
@@ -276,10 +303,12 @@ async def discounts_report(
 
 @router.get("/report/monthly")
 async def discounts_report_monthly(tenant=Depends(get_current_tenant)):
-    """12-month summary — alias for /report with no params."""
+    """12-month summary. Shows months where discounts were active, even with 0 orders."""
     tid = tenant["tenant_id"]
     now = datetime.now(timezone.utc)
-    months_seq = []
+
+    # Build last 12 months (newest first)
+    months_seq: list[tuple[int, int]] = []
     y, m = now.year, now.month
     for _ in range(12):
         months_seq.append((y, m))
@@ -288,6 +317,19 @@ async def discounts_report_monthly(tenant=Depends(get_current_tenant)):
             m, y = 12, y - 1
 
     oldest_y, oldest_m = months_seq[-1]
+
+    # All discounts for this tenant
+    try:
+        all_discs = (
+            supabase.table("discounts")
+            .select("discount_id, effective_from, effective_to, is_lifetime")
+            .eq("tenant_id", tid)
+            .execute().data or []
+        )
+    except Exception:
+        all_discs = []
+
+    # Order data for the window
     try:
         od_all = (
             supabase.table("order_discounts")
@@ -299,27 +341,37 @@ async def discounts_report_monthly(tenant=Depends(get_current_tenant)):
     except Exception:
         od_all = []
 
-    month_buckets: dict = {}
+    # Bucket order data by YYYY-MM
+    order_buckets: dict = {}
     for row in od_all:
         key = (row.get("created_at") or "")[:7]
-        if key not in month_buckets:
-            month_buckets[key] = {"orders": set(), "total": 0.0, "dids": set()}
-        month_buckets[key]["orders"].add(row.get("order_id", ""))
-        month_buckets[key]["total"] += float(row.get("discount_amount") or 0)
-        if row.get("discount_id"):
-            month_buckets[key]["dids"].add(row["discount_id"])
+        if key not in order_buckets:
+            order_buckets[key] = {"orders": set(), "total": 0.0}
+        order_buckets[key]["orders"].add(row.get("order_id", ""))
+        order_buckets[key]["total"] += float(row.get("discount_amount") or 0)
 
     result = []
     for my, mm in months_seq:
-        key  = f"{my}-{mm:02d}"
-        data = month_buckets.get(key, {})
+        last_day    = calendar.monthrange(my, mm)[1]
+        month_start = date(my, mm, 1)
+        month_end   = date(my, mm, last_day)
+
+        active_count = sum(
+            1 for d in all_discs
+            if _discount_active_in_month(d, month_start, month_end)
+        )
+        if active_count == 0:
+            continue  # skip months with no active discounts at all
+
+        key   = f"{my}-{mm:02d}"
+        odata = order_buckets.get(key, {})
         result.append({
             "year":                   my,
             "month":                  mm,
             "label":                  f"{_MONTH_NAMES[mm]} {my}",
-            "orders_count":           len(data.get("orders", set())),
-            "total_discount_amount":  round(data.get("total", 0.0), 2),
-            "active_discounts_count": len(data.get("dids", set())),
+            "orders_count":           len(odata.get("orders", set())),
+            "total_discount_amount":  round(odata.get("total", 0.0), 2),
+            "active_discounts_count": active_count,
         })
 
     return {"months": result}
