@@ -58,6 +58,10 @@ class DiscountUpdate(BaseModel):
     priority:       Optional[int]        = None
 
 
+class PriorityUpdate(BaseModel):
+    priority: int
+
+
 # ── Helpers ───────────────────────────────────────────────────
 
 def _enrich(discounts: list, tenant_id: str) -> list:
@@ -262,6 +266,65 @@ async def discounts_report(
     return {"months": result}
 
 
+@router.get("/report/monthly")
+async def discounts_report_monthly(tenant=Depends(get_current_tenant)):
+    """12-month summary — alias for /report with no params."""
+    tid = tenant["tenant_id"]
+    now = datetime.now(timezone.utc)
+    months_seq = []
+    y, m = now.year, now.month
+    for _ in range(12):
+        months_seq.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+
+    oldest_y, oldest_m = months_seq[-1]
+    try:
+        od_all = (
+            supabase.table("order_discounts")
+            .select("discount_id, discount_amount, order_id, created_at")
+            .eq("tenant_id", tid)
+            .gte("created_at", f"{oldest_y}-{oldest_m:02d}-01")
+            .execute().data or []
+        )
+    except Exception:
+        od_all = []
+
+    month_buckets: dict = {}
+    for row in od_all:
+        key = (row.get("created_at") or "")[:7]
+        if key not in month_buckets:
+            month_buckets[key] = {"orders": set(), "total": 0.0, "dids": set()}
+        month_buckets[key]["orders"].add(row.get("order_id", ""))
+        month_buckets[key]["total"] += float(row.get("discount_amount") or 0)
+        if row.get("discount_id"):
+            month_buckets[key]["dids"].add(row["discount_id"])
+
+    result = []
+    for my, mm in months_seq:
+        key  = f"{my}-{mm:02d}"
+        data = month_buckets.get(key, {})
+        result.append({
+            "year":                   my,
+            "month":                  mm,
+            "label":                  f"{_MONTH_NAMES[mm]} {my}",
+            "orders_count":           len(data.get("orders", set())),
+            "total_discount_amount":  round(data.get("total", 0.0), 2),
+            "active_discounts_count": len(data.get("dids", set())),
+        })
+
+    return {"months": result}
+
+
+@router.get("/report/monthly/{year}/{month}")
+async def discounts_report_monthly_detail(
+    year: int, month: int, tenant=Depends(get_current_tenant),
+):
+    """Single month discount breakdown."""
+    return _report_month_detail(tenant["tenant_id"], year, month)
+
+
 @router.get("/")
 async def list_discounts(tenant=Depends(get_current_tenant)):
     tid  = tenant["tenant_id"]
@@ -332,6 +395,27 @@ async def get_discount(discount_id: str, tenant=Depends(get_current_tenant)):
     except Exception:
         od_rows = []
 
+    # Enrich order_discounts with customer_phone from orders table
+    order_ids = list({r["order_id"] for r in od_rows if r.get("order_id")})
+    phone_map: dict = {}
+    if order_ids:
+        try:
+            o_rows = (
+                supabase.table("orders")
+                .select("order_id, customer_phone, customer_name")
+                .eq("tenant_id", tid)
+                .in_("order_id", order_ids)
+                .execute().data or []
+            )
+            phone_map = {r["order_id"]: r for r in o_rows}
+        except Exception:
+            pass
+
+    for od in od_rows:
+        oinfo = phone_map.get(od.get("order_id", ""), {})
+        od["customer_phone"] = oinfo.get("customer_phone")
+        od["customer_name"]  = oinfo.get("customer_name")
+
     enriched["order_discounts"] = od_rows
     return enriched
 
@@ -348,6 +432,23 @@ async def update_discount(discount_id: str, body: DiscountUpdate, tenant=Depends
     res = (
         supabase.table("discounts")
         .update(updates)
+        .eq("tenant_id", tid)
+        .eq("discount_id", discount_id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(404, "Discount not found")
+    return _enrich(res.data, tid)[0]
+
+
+@router.put("/{discount_id}/priority")
+async def update_discount_priority(
+    discount_id: str, body: PriorityUpdate, tenant=Depends(get_current_tenant),
+):
+    tid = tenant["tenant_id"]
+    res = (
+        supabase.table("discounts")
+        .update({"priority": body.priority})
         .eq("tenant_id", tid)
         .eq("discount_id", discount_id)
         .execute()

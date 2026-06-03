@@ -225,13 +225,16 @@ export const ordersAPI = {
 
 // ── Discounts ─────────────────────────────────────────────────────────────────
 export const discountsAPI = {
-  list:       () => api.get('/api/discounts/').then(r => r.data),
-  get:        (id: string) => api.get(`/api/discounts/${id}`).then(r => r.data),
-  create:     (data: Record<string, unknown>) => api.post('/api/discounts/', data).then(r => r.data),
-  update:     (id: string, data: Record<string, unknown>) => api.patch(`/api/discounts/${id}`, data).then(r => r.data),
-  delete:     (id: string) => api.delete(`/api/discounts/${id}`).then(r => r.data),
-  getByOrder: (orderId: string) => api.get(`/api/discounts/order/${orderId}`).then(r => r.data),
-  report:     (params?: Record<string, unknown>) => api.get('/api/discounts/report', { params }).then(r => r.data),
+  list:               () => api.get('/api/discounts/').then(r => r.data),
+  get:                (id: string) => api.get(`/api/discounts/${id}`).then(r => r.data),
+  create:             (data: Record<string, unknown>) => api.post('/api/discounts/', data).then(r => r.data),
+  update:             (id: string, data: Record<string, unknown>) => api.patch(`/api/discounts/${id}`, data).then(r => r.data),
+  delete:             (id: string) => api.delete(`/api/discounts/${id}`).then(r => r.data),
+  getByOrder:         (orderId: string) => api.get(`/api/discounts/order/${orderId}`).then(r => r.data),
+  report:             (params?: Record<string, unknown>) => api.get('/api/discounts/report', { params }).then(r => r.data),
+  reportMonthly:      () => api.get('/api/discounts/report/monthly').then(r => r.data),
+  reportMonthlyDetail:(year: number, month: number) => api.get(`/api/discounts/report/monthly/${year}/${month}`).then(r => r.data),
+  updatePriority:     (id: string, priority: number) => api.put(`/api/discounts/${id}/priority`, { priority }).then(r => r.data),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

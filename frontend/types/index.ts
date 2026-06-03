@@ -15,6 +15,7 @@ export interface AIConfig {
   bot_name: string
   system_prompt: string | null
   language: 'bangla' | 'english' | 'banglish'
+  conflict_resolution?: 'priority_wins' | 'best_deal' | 'stack_all' | 'stack_with_cap'
   escalation_keywords: string[]
   forbidden_topics: string[]
   prompt_injection_guard: boolean
@@ -243,6 +244,9 @@ export interface OrderDiscount {
   discount_amount: number
   final_price: number | null
   created_at: string
+  // enriched by GET /{discount_id}
+  customer_phone?: string | null
+  customer_name?: string | null
 }
 
 export interface DiscountReportRow {
