@@ -621,17 +621,23 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         # discount_code comes from the matched active Discount offer
         discount_code   = discount_ctx.get("discount_code")
 
+        applied_discounts = discount_ctx.get("applied_discounts") or []
+
         if discount_code and (discount_amount > 0 or has_bonus) and agreed_price:
             net_amount = round(max(0.0, agreed_price - discount_amount), 2)
+            n_applied  = len(applied_discounts)
             if discount_amount > 0:
-                pct_val  = float(discount_ctx.get("final_discount_pct") or 0)
-                flat_val = float(discount_ctx.get("final_discount_flat") or 0)
-                if pct_val > 0:
-                    disc_label = f"{pct_val:.0f}% ছাড়"
-                elif flat_val > 0:
-                    disc_label = f"৳{flat_val:.0f} ছাড়"
+                if n_applied > 1:
+                    disc_label = f"৳{discount_amount:.0f} ছাড় ({n_applied}টি অফার)"
                 else:
-                    disc_label = f"৳{discount_amount:.0f} ছাড়"
+                    pct_val  = float(discount_ctx.get("final_discount_pct") or 0)
+                    flat_val = float(discount_ctx.get("final_discount_flat") or 0)
+                    if pct_val > 0:
+                        disc_label = f"{pct_val:.0f}% ছাড়"
+                    elif flat_val > 0:
+                        disc_label = f"৳{flat_val:.0f} ছাড়"
+                    else:
+                        disc_label = f"৳{discount_amount:.0f} ছাড়"
                 discount_summary = (
                     f"\n\n✅ আপনার অর্ডারে {disc_label} প্রযোজ্য হয়েছে।\n"
                     f"মূল মূল্য: ৳{agreed_price:.0f}, নেট মূল্য: ৳{net_amount:.0f}"
@@ -664,34 +670,37 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         "net_amount":           net_amount,
     }).execute()
 
-    # ── Insert order_discounts row ────────────────────────────────────────────
-    if discount_code and discount_ctx.get("discount_id"):
-        rtype = discount_ctx.get("reward_type") or "percentage"
-        if rtype not in ("percentage", "flat", "bonus", "free_delivery"):
-            rtype = "percentage"
-        try:
-            supabase.table("order_discounts").insert({
-                "tenant_id":      tenant_id,
-                "order_id":       order_id,
-                "discount_id":    discount_ctx.get("discount_id"),
-                "discount_code":  discount_code,
-                "discount_name":  discount_ctx.get("discount_name") or "",
-                "rule_id":        discount_ctx.get("rule_id"),
-                "rule_name":      discount_ctx.get("rule_name") or "",
-                "rule_type":      discount_ctx.get("rule_type") or "",
-                "product_id":     product_id,
-                "sku":            sku,
-                "product_name":   order_data.get("product_name"),
-                "reward_type":    rtype,
-                "discount_pct":   discount_ctx.get("final_discount_pct") or 0,
-                "discount_flat":  discount_ctx.get("final_discount_flat") or 0,
-                "bonus_items":    discount_ctx.get("bonus_items") or [],
-                "original_price": agreed_price,
-                "discount_amount": discount_amount,
-                "final_price":    net_amount,
-            }).execute()
-        except Exception as _die:
-            logger.warning(f"order_discounts insert failed: {_die}")
+    # ── Insert order_discounts rows (one per applied discount) ───────────────
+    if discount_code and applied_discounts:
+        for ad in applied_discounts:
+            if not ad or not ad.get("discount_id"):
+                continue
+            rtype_d = ad.get("reward_type") or "percentage"
+            if rtype_d not in ("percentage", "flat", "bonus", "free_delivery"):
+                rtype_d = "percentage"
+            try:
+                supabase.table("order_discounts").insert({
+                    "tenant_id":       tenant_id,
+                    "order_id":        order_id,
+                    "discount_id":     ad.get("discount_id"),
+                    "discount_code":   ad.get("discount_code") or discount_code,
+                    "discount_name":   ad.get("discount_name") or "",
+                    "rule_id":         ad.get("rule_id"),
+                    "rule_name":       ad.get("rule_name") or "",
+                    "rule_type":       ad.get("rule_type") or "",
+                    "product_id":      product_id,
+                    "sku":             sku,
+                    "product_name":    order_data.get("product_name"),
+                    "reward_type":     rtype_d,
+                    "discount_pct":    ad.get("discount_value", 0) if rtype_d == "percentage" else 0,
+                    "discount_flat":   ad.get("discount_value", 0) if rtype_d == "flat" else 0,
+                    "bonus_items":     ad.get("bonus_items") or [],
+                    "original_price":  agreed_price,
+                    "discount_amount": float(ad.get("discount_amount") or 0),
+                    "final_price":     net_amount,
+                }).execute()
+            except Exception as _die:
+                logger.warning(f"order_discounts insert failed: {_die}")
 
     # ── Deduct stock immediately when order is placed ──────────────────────────
     quantity   = order_data.get("quantity", 1)

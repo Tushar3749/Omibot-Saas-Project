@@ -249,17 +249,44 @@ def _get_cfg(tenant_id: str) -> dict:
 
 # ── Conflict Resolution ───────────────────────────────────────
 
-def _resolve(matched: list, resolution: str, stack_cap: float, cart_amount: float) -> dict:
+def _resolve(matched: list, resolution: str, stack_cap: float, cart_amount: float) -> tuple[list, float]:
+    """Returns (applied_list, total_discount_amount). applied_list has ≥1 items."""
     if not matched:
-        return {}
+        return [], 0.0
+
+    # Always sort by priority first (lower = higher priority), then by discount amount desc
+    by_priority = sorted(matched, key=lambda m: (m.get("priority", 99), -m.get("discount_amount", 0.0)))
+
     if resolution == "priority_wins":
-        return matched[0]
+        w = by_priority[0]
+        return [w], round(w.get("discount_amount", 0.0), 2)
+
     if resolution == "best_deal":
-        return max(
-            matched,
-            key=lambda m: _compute_amount(m.get("reward", {}), cart_amount)
-        )
-    return matched[0]
+        w = max(by_priority, key=lambda m: m.get("discount_amount", 0.0))
+        return [w], round(w.get("discount_amount", 0.0), 2)
+
+    if resolution == "stack_all":
+        total = round(sum(m.get("discount_amount", 0.0) for m in by_priority), 2)
+        return by_priority, total
+
+    if resolution == "stack_with_cap":
+        cap_amount = cart_amount * stack_cap / 100
+        applied: list = []
+        total = 0.0
+        for m in by_priority:
+            if total >= cap_amount:
+                break
+            disc = min(m.get("discount_amount", 0.0), cap_amount - total)
+            if disc > 0:
+                mc = dict(m)
+                mc["discount_amount"] = round(disc, 2)
+                applied.append(mc)
+                total += disc
+        return applied, round(total, 2)
+
+    # default: priority_wins
+    w = by_priority[0]
+    return [w], round(w.get("discount_amount", 0.0), 2)
 
 
 # ── Empty Context ─────────────────────────────────────────────
@@ -269,6 +296,7 @@ def _empty_ctx(metrics: dict) -> dict:
         "customer_metrics":    metrics,
         "matched_discounts":   [],
         "applied_discount":    None,
+        "applied_discounts":   [],
         "discount_code":       None,
         "discount_id":         None,
         "discount_name":       None,
@@ -284,6 +312,7 @@ def _empty_ctx(metrics: dict) -> dict:
         "resolution":          "best_deal",
         "final_discount_pct":  0.0,
         "final_discount_flat": 0.0,
+        "applied_rules":       [],
     }
 
 
@@ -368,6 +397,7 @@ def get_discount_context(
                     "discount_id":      discount["discount_id"],
                     "discount_code":    discount["discount_code"],
                     "discount_name":    discount.get("discount_name", ""),
+                    "priority":         int(discount.get("priority") or 99),
                     "rule_id":          rid,
                     "rule_name":        rule.get("rule_name", ""),
                     "rule_type":        rule["rule_type"],
@@ -393,21 +423,37 @@ def get_discount_context(
     resolution = cfg.get("conflict_resolution", "best_deal")
     stack_cap  = float(cfg.get("discount_stack_cap", 30))
 
-    applied         = _resolve(matched, resolution, stack_cap, cart_amount)
-    discount_amount = applied.get("discount_amount", 0.0)
+    applied_list, total_discount = _resolve(matched, resolution, stack_cap, cart_amount)
+    if not applied_list:
+        logger.info("[DiscountEngine] Resolve produced no applied discounts")
+        return _empty_ctx(metrics)
+
+    applied         = applied_list[0]
+    discount_amount = total_discount
     final_price     = max(0.0, cart_amount - discount_amount) if cart_amount > 0 else 0.0
     reward          = applied.get("reward", {})
     rtype           = applied.get("reward_type", "percentage")
 
+    # Build discount message
+    if len(applied_list) > 1:
+        disc_msg = (
+            f"আপনার অর্ডারে {len(applied_list)}টি ছাড় একসাথে প্রযোজ্য! "
+            f"মোট ছাড়: ৳{discount_amount:.0f}"
+        )
+    else:
+        disc_msg = _build_message(reward, discount_amount)
+
     logger.info(
-        f"[DiscountEngine] Applied: '{applied.get('discount_name')}' "
-        f"code={applied.get('discount_code')} ৳{discount_amount:.2f}"
+        f"[DiscountEngine] Applied {len(applied_list)} discount(s): "
+        f"primary='{applied.get('discount_name')}' code={applied.get('discount_code')} "
+        f"total=৳{discount_amount:.2f} resolution={resolution}"
     )
 
     return {
         "customer_metrics":    metrics,
         "matched_discounts":   matched,
         "applied_discount":    applied,
+        "applied_discounts":   applied_list,
         "discount_code":       applied.get("discount_code"),
         "discount_id":         applied.get("discount_id"),
         "discount_name":       applied.get("discount_name"),
@@ -419,10 +465,10 @@ def get_discount_context(
         "discount_amount":     round(discount_amount, 2),
         "final_price":         round(final_price, 2),
         "bonus_items":         applied.get("bonus_items") or [],
-        "discount_message":    _build_message(reward, discount_amount),
+        "discount_message":    disc_msg,
         "resolution":          resolution,
-        # Backward-compat fields used by webhook_service
+        # Backward-compat fields
         "final_discount_pct":  applied.get("discount_value", 0) if rtype == "percentage" else 0,
         "final_discount_flat": applied.get("discount_value", 0) if rtype == "flat" else 0,
-        "applied_rules":       [applied],
+        "applied_rules":       applied_list,
     }

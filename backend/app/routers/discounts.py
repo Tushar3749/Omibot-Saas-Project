@@ -45,6 +45,7 @@ class DiscountCreate(BaseModel):
     effective_to:   Optional[str]  = None
     is_lifetime:    bool           = False
     is_active:      bool           = True
+    priority:       int            = 99
 
 
 class DiscountUpdate(BaseModel):
@@ -54,6 +55,7 @@ class DiscountUpdate(BaseModel):
     effective_to:   Optional[str]        = None
     is_lifetime:    Optional[bool]       = None
     is_active:      Optional[bool]       = None
+    priority:       Optional[int]        = None
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -124,53 +126,140 @@ async def get_order_discounts(order_id: str, tenant=Depends(get_current_tenant))
     return {"order_id": order_id, "rows": rows, "total_discount": round(total, 2)}
 
 
+_MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _next_month(y: int, m: int) -> tuple[int, int]:
+    return (y, m + 1) if m < 12 else (y + 1, 1)
+
+
+def _report_month_detail(tid: str, year: int, month: int) -> dict:
+    """Discount breakdown for a single month."""
+    from collections import defaultdict
+    ny, nm = _next_month(year, month)
+    try:
+        od_rows = (
+            supabase.table("order_discounts")
+            .select("discount_id, discount_code, discount_name, discount_amount, order_id")
+            .eq("tenant_id", tid)
+            .gte("created_at", f"{year}-{month:02d}-01")
+            .lt ("created_at", f"{ny}-{nm:02d}-01")
+            .execute().data or []
+        )
+    except Exception:
+        od_rows = []
+
+    groups: dict = defaultdict(lambda: {"orders": set(), "total": 0.0, "name": "", "did": ""})
+    for row in od_rows:
+        code = row.get("discount_code", "")
+        groups[code]["name"] = row.get("discount_name", "")
+        groups[code]["did"]  = row.get("discount_id", "")
+        groups[code]["orders"].add(row.get("order_id", ""))
+        groups[code]["total"] += float(row.get("discount_amount") or 0)
+
+    # Enrich with discount details (priority, is_active, rule_ids)
+    dids = [g["did"] for g in groups.values() if g["did"]]
+    disc_map: dict = {}
+    if dids:
+        try:
+            rows = (
+                supabase.table("discounts")
+                .select("discount_id, is_active, priority, rule_ids")
+                .eq("tenant_id", tid)
+                .in_("discount_id", dids)
+                .execute().data or []
+            )
+            disc_map = {r["discount_id"]: r for r in rows}
+        except Exception:
+            pass
+
+    result_rows = []
+    for code, data in sorted(groups.items(), key=lambda x: x[1]["total"], reverse=True):
+        det = disc_map.get(data["did"], {})
+        result_rows.append({
+            "discount_id":           data["did"],
+            "discount_code":         code,
+            "discount_name":         data["name"],
+            "rules_count":           len(det.get("rule_ids") or []),
+            "orders_count":          len(data["orders"]),
+            "total_discount_amount": round(data["total"], 2),
+            "is_active":             det.get("is_active", True),
+            "priority":              det.get("priority", 99),
+        })
+
+    total_disc   = sum(r["total_discount_amount"] for r in result_rows)
+    total_orders = len({r.get("order_id") for r in od_rows})
+    return {
+        "year":                  year,
+        "month":                 month,
+        "label":                 f"{_MONTH_NAMES[month]} {year}",
+        "total_discount_amount": round(total_disc, 2),
+        "total_orders":          total_orders,
+        "active_discounts":      len(result_rows),
+        "rows":                  result_rows,
+    }
+
+
 @router.get("/report")
 async def discounts_report(
     year:  Optional[int] = None,
     month: Optional[int] = None,
     tenant=Depends(get_current_tenant),
 ):
-    """Usage stats for the specified month (defaults to current month)."""
     tid = tenant["tenant_id"]
     now = datetime.now(timezone.utc)
-    y   = year  or now.year
-    m   = month or now.month
 
-    month_prefix = f"{y}-{m:02d}"
+    # Single month detail
+    if year and month:
+        return _report_month_detail(tid, year, month)
+
+    # No params → last 12 months summary
+    months_seq = []
+    y, m = now.year, now.month
+    for _ in range(12):
+        months_seq.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+
+    oldest_y, oldest_m = months_seq[-1]
     try:
-        od_rows = (
+        od_all = (
             supabase.table("order_discounts")
-            .select("discount_code, discount_name, discount_amount, created_at")
+            .select("discount_id, discount_amount, order_id, created_at")
             .eq("tenant_id", tid)
-            .gte("created_at", f"{month_prefix}-01")
-            .lt ("created_at", f"{y}-{m+1:02d}-01" if m < 12 else f"{y+1}-01-01")
+            .gte("created_at", f"{oldest_y}-{oldest_m:02d}-01")
             .execute().data or []
         )
     except Exception:
-        od_rows = []
+        od_all = []
 
-    from collections import defaultdict
-    groups: dict = defaultdict(lambda: {"orders_count": 0, "total_discount_amount": 0.0, "discount_name": ""})
-    for row in od_rows:
-        code = row["discount_code"]
-        groups[code]["discount_name"]        = row.get("discount_name", "")
-        groups[code]["discount_code"]        = code
-        groups[code]["orders_count"]        += 1
-        groups[code]["total_discount_amount"] += float(row.get("discount_amount") or 0)
+    # Bucket by YYYY-MM
+    month_buckets: dict = {}
+    for row in od_all:
+        key = (row.get("created_at") or "")[:7]
+        if key not in month_buckets:
+            month_buckets[key] = {"orders": set(), "total": 0.0, "dids": set()}
+        month_buckets[key]["orders"].add(row.get("order_id", ""))
+        month_buckets[key]["total"] += float(row.get("discount_amount") or 0)
+        if row.get("discount_id"):
+            month_buckets[key]["dids"].add(row["discount_id"])
 
-    rows = sorted(groups.values(), key=lambda x: x["total_discount_amount"], reverse=True)
-    total_discount = sum(r["total_discount_amount"] for r in rows)
+    result = []
+    for my, mm in months_seq:
+        key  = f"{my}-{mm:02d}"
+        data = month_buckets.get(key, {})
+        result.append({
+            "year":                  my,
+            "month":                 mm,
+            "label":                 f"{_MONTH_NAMES[mm]} {my}",
+            "orders_count":          len(data.get("orders", set())),
+            "total_discount_amount": round(data.get("total", 0.0), 2),
+            "active_discounts_count": len(data.get("dids", set())),
+        })
 
-    return {
-        "month":          f"{y}-{m:02d}",
-        "active_discounts": len(rows),
-        "total_discount_amount": round(total_discount, 2),
-        "rows": [{"discount_code": r["discount_code"],
-                  "discount_name": r["discount_name"],
-                  "orders_count":  r["orders_count"],
-                  "total_discount_amount": round(r["total_discount_amount"], 2)}
-                 for r in rows],
-    }
+    return {"months": result}
 
 
 @router.get("/")
@@ -196,14 +285,15 @@ async def create_discount(body: DiscountCreate, tenant=Depends(get_current_tenan
     res = (
         supabase.table("discounts")
         .insert({
-            "tenant_id":     tid,
-            "discount_name": body.discount_name,
-            "discount_code": code,
-            "rule_ids":      body.rule_ids,
+            "tenant_id":      tid,
+            "discount_name":  body.discount_name,
+            "discount_code":  code,
+            "rule_ids":       body.rule_ids,
             "effective_from": eff_from,
-            "effective_to":  eff_to,
-            "is_lifetime":   body.is_lifetime,
-            "is_active":     body.is_active,
+            "effective_to":   eff_to,
+            "is_lifetime":    body.is_lifetime,
+            "is_active":      body.is_active,
+            "priority":       body.priority,
         })
         .execute()
     )

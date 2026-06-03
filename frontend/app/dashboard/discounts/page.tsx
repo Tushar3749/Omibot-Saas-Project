@@ -1,7 +1,10 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { discountsAPI, discountRulesAPI } from '@/lib/api'
-import type { Discount, DiscountRule, OrderDiscount, DiscountReportRow } from '@/types'
+import type {
+  Discount, DiscountRule, OrderDiscount,
+  DiscountMonthSummary, DiscountMonthDetail, DiscountReportRow,
+} from '@/types'
 import {
   Plus, Trash2, Edit2, X, Receipt, CheckCircle, XCircle,
   ToggleLeft, ToggleRight, Search, Eye, TrendingDown,
@@ -54,6 +57,7 @@ interface FormState {
   is_lifetime: boolean
   is_active: boolean
   rule_ids: string[]
+  priority: number
 }
 
 function DiscountModal({
@@ -76,6 +80,7 @@ function DiscountModal({
     is_lifetime:    discount?.is_lifetime    ?? false,
     is_active:      discount?.is_active      ?? true,
     rule_ids:       discount?.rule_ids       || [],
+    priority:       discount?.priority       ?? 99,
   })
   const [ruleSearch, setRuleSearch] = useState('')
   const [saving,     setSaving]     = useState(false)
@@ -110,7 +115,6 @@ function DiscountModal({
     r.rule_name.toLowerCase().includes(ruleSearch.toLowerCase()) ||
     r.rule_type.toLowerCase().includes(ruleSearch.toLowerCase())
   )
-
   const selectedRules = allRules.filter(r => form.rule_ids.includes(r.rule_id))
 
   return (
@@ -149,6 +153,30 @@ function DiscountModal({
               style={{ ...inpStyle, color: '#04AA6D', opacity: 0.9 }} />
           </div>
 
+          {/* Priority + Active row */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs mb-1 block font-semibold" style={{ color: 'var(--c-muted)' }}>
+                Priority <span style={{ color: 'var(--c-muted)', fontWeight: 400 }}>(1 = highest)</span>
+              </label>
+              <input type="number" min={1} max={999} value={form.priority}
+                onChange={e => set('priority', Math.max(1, parseInt(e.target.value) || 99))}
+                className="w-full rounded px-3 py-2 text-sm"
+                style={inpStyle} />
+            </div>
+            <div className="flex flex-col justify-end pb-1">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <button type="button" onClick={() => set('is_active', !form.is_active)}>
+                  {form.is_active
+                    ? <ToggleRight size={22} style={{ color: '#4CAF50' }} />
+                    : <ToggleLeft  size={22} style={{ color: '#607D8B' }} />
+                  }
+                </button>
+                <span className="text-sm" style={{ color: 'var(--c-text)' }}>Active</span>
+              </label>
+            </div>
+          </div>
+
           {/* Dates */}
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -167,24 +195,12 @@ function DiscountModal({
             </div>
           </div>
 
-          {/* Lifetime + Active row */}
-          <div className="flex items-center gap-6">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={form.is_lifetime}
-                onChange={e => set('is_lifetime', e.target.checked)}
-                className="rounded" />
-              <span className="text-sm" style={{ color: 'var(--c-text)' }}>No end date (Lifetime)</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <button type="button" onClick={() => set('is_active', !form.is_active)}>
-                {form.is_active
-                  ? <ToggleRight size={22} style={{ color: '#4CAF50' }} />
-                  : <ToggleLeft  size={22} style={{ color: '#607D8B' }} />
-                }
-              </button>
-              <span className="text-sm" style={{ color: 'var(--c-text)' }}>Active</span>
-            </label>
-          </div>
+          {/* Lifetime */}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={form.is_lifetime}
+              onChange={e => set('is_lifetime', e.target.checked)} className="rounded" />
+            <span className="text-sm" style={{ color: 'var(--c-text)' }}>No end date (Lifetime)</span>
+          </label>
 
           {/* Rules selector */}
           <div>
@@ -192,7 +208,6 @@ function DiscountModal({
               Attach Rules ({form.rule_ids.length} selected)
             </label>
 
-            {/* Selected rules chips */}
             {selectedRules.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {selectedRules.map(r => (
@@ -204,15 +219,12 @@ function DiscountModal({
                       border:     `1px solid ${RULE_TYPE_COLORS[r.rule_type] || '#607D8B'}40`,
                     }}>
                     {r.rule_name}
-                    <button type="button" onClick={() => toggleRule(r.rule_id)}>
-                      <X size={10} />
-                    </button>
+                    <button type="button" onClick={() => toggleRule(r.rule_id)}><X size={10} /></button>
                   </span>
                 ))}
               </div>
             )}
 
-            {/* Search */}
             <div className="relative mb-1">
               <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: 'var(--c-muted)' }} />
               <input value={ruleSearch} onChange={e => setRuleSearch(e.target.value)}
@@ -221,7 +233,6 @@ function DiscountModal({
                 style={inpStyle} />
             </div>
 
-            {/* Rule list */}
             <div className="rounded border overflow-y-auto" style={{ border: '1px solid var(--c-border)', maxHeight: 180 }}>
               {filteredRules.length === 0 ? (
                 <p className="text-xs text-center py-4" style={{ color: 'var(--c-muted)' }}>
@@ -302,10 +313,16 @@ function DetailModal({ discount, onClose, onEdit }: {
              style={{ borderBottom: '1px solid var(--c-border)' }}>
           <div>
             <h2 className="font-bold text-base" style={{ color: 'var(--c-text)' }}>{discount.discount_name}</h2>
-            <span className="font-mono text-xs px-2 py-0.5 rounded mt-1 inline-block"
-                  style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
-              {discount.discount_code}
-            </span>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="font-mono text-xs px-2 py-0.5 rounded"
+                    style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
+                {discount.discount_code}
+              </span>
+              <span className="text-xs px-1.5 py-0.5 rounded"
+                    style={{ background: 'rgba(255,193,7,0.15)', color: '#FFC107' }}>
+                P{discount.priority ?? 99}
+              </span>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onEdit}
@@ -321,10 +338,9 @@ function DetailModal({ discount, onClose, onEdit }: {
           <div className="flex justify-center py-12"><div className="spinner h-5 w-5" /></div>
         ) : (
           <div className="p-5 space-y-5">
-            {/* Stats */}
             <div className="grid grid-cols-3 gap-3">
               {[
-                { label: 'Orders Used',      value: od.length,               color: '#2196F3', icon: ShoppingBag },
+                { label: 'Orders Used',      value: od.length,                  color: '#2196F3', icon: ShoppingBag },
                 { label: 'Total Discounted', value: `৳${totalDisc.toFixed(2)}`, color: '#4CAF50', icon: TrendingDown },
                 { label: 'Status',           value: discount.is_active ? 'Active' : 'Inactive',
                   color: discount.is_active ? '#4CAF50' : '#EF9A9A', icon: discount.is_active ? CheckCircle : XCircle },
@@ -338,12 +354,10 @@ function DetailModal({ discount, onClose, onEdit }: {
               ))}
             </div>
 
-            {/* Effective window */}
             <div className="text-xs" style={{ color: 'var(--c-muted)' }}>
               Active: {fmtDate(discount.effective_from)} → {discount.is_lifetime ? 'No end date' : fmtDate(discount.effective_to)}
             </div>
 
-            {/* Attached rules */}
             <div>
               <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--c-text)' }}>
                 Attached Rules ({(data?.rules || []).length})
@@ -363,7 +377,6 @@ function DetailModal({ discount, onClose, onEdit }: {
               ))}
             </div>
 
-            {/* Order history */}
             <div>
               <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--c-text)' }}>
                 Order History ({od.length})
@@ -405,6 +418,224 @@ function DetailModal({ discount, onClose, onEdit }: {
   )
 }
 
+// ── Inline Priority Editor ────────────────────────────────────
+
+function PriorityCell({ discount, onSave }: {
+  discount: Discount
+  onSave: (id: string, priority: number) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [val,     setVal]     = useState(discount.priority ?? 99)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  function startEdit() { setVal(discount.priority ?? 99); setEditing(true) }
+
+  async function commit() {
+    setEditing(false)
+    if (val !== (discount.priority ?? 99)) await onSave(discount.discount_id, val)
+  }
+
+  useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        type="number" min={1} max={999} value={val}
+        onChange={e => setVal(Math.max(1, parseInt(e.target.value) || 99))}
+        onBlur={commit}
+        onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+        className="w-14 rounded px-2 py-0.5 text-xs text-center font-mono"
+        style={{ background: 'var(--c-surface2)', border: '1px solid var(--c-accent)', color: 'var(--c-text)' }}
+      />
+    )
+  }
+  return (
+    <button onClick={startEdit} title="Click to edit priority"
+      className="text-xs px-2 py-0.5 rounded font-mono cursor-pointer transition-colors"
+      style={{
+        background: (discount.priority ?? 99) <= 10 ? 'rgba(255,193,7,0.15)' : 'var(--c-surface2)',
+        color: (discount.priority ?? 99) <= 10 ? '#FFC107' : 'var(--c-muted)',
+        border: '1px solid var(--c-border)',
+      }}>
+      P{discount.priority ?? 99}
+    </button>
+  )
+}
+
+// ── Report Tab ────────────────────────────────────────────────
+
+function ReportTab({ allDiscounts, onViewDetail }: {
+  allDiscounts: Discount[]
+  onViewDetail: (d: Discount) => void
+}) {
+  const [months,      setMonths]      = useState<DiscountMonthSummary[]>([])
+  const [loading,     setLoading]     = useState(true)
+  const [expanded,    setExpanded]    = useState<Set<string>>(new Set())
+  const [details,     setDetails]     = useState<Record<string, DiscountMonthDetail>>({})
+  const [detailLoad,  setDetailLoad]  = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    discountsAPI.report()
+      .then((r: { months: DiscountMonthSummary[] }) => setMonths(r.months || []))
+      .catch(() => setMonths([]))
+      .finally(() => setLoading(false))
+  }, [])
+
+  async function toggleMonth(key: string, year: number, month: number) {
+    if (expanded.has(key)) {
+      setExpanded(prev => { const s = new Set(prev); s.delete(key); return s })
+      return
+    }
+    setExpanded(prev => new Set(prev).add(key))
+    if (details[key]) return
+    setDetailLoad(prev => new Set(prev).add(key))
+    try {
+      const data: DiscountMonthDetail = await discountsAPI.report({ year, month })
+      setDetails(prev => ({ ...prev, [key]: data }))
+    } finally {
+      setDetailLoad(prev => { const s = new Set(prev); s.delete(key); return s })
+    }
+  }
+
+  function handleRowClick(row: DiscountReportRow) {
+    const d = allDiscounts.find(x => x.discount_id === row.discount_id)
+    if (d) onViewDetail(d)
+  }
+
+  if (loading) return <div className="flex justify-center py-16"><div className="spinner h-6 w-6" /></div>
+
+  const hasAnyData = months.some(m => m.orders_count > 0)
+
+  return (
+    <div className="space-y-2">
+      {!hasAnyData && (
+        <div className="text-center py-16" style={{ color: 'var(--c-muted)' }}>
+          <TrendingDown size={36} className="mx-auto mb-3 opacity-25" />
+          <p className="text-sm font-medium">No discount activity yet</p>
+          <p className="text-xs mt-1 opacity-70">Discount usage will appear here by month</p>
+        </div>
+      )}
+
+      {months.filter(m => m.orders_count > 0 || expanded.has(`${m.year}-${m.month}`)).map(m => {
+        const key      = `${m.year}-${String(m.month).padStart(2,'0')}`
+        const isOpen   = expanded.has(key)
+        const isLoading = detailLoad.has(key)
+        const detail   = details[key]
+
+        return (
+          <div key={key} className="rounded-xl overflow-hidden"
+               style={{ border: `1px solid ${isOpen ? '#2196F350' : 'var(--c-border)'}` }}>
+            {/* Month header */}
+            <button
+              onClick={() => toggleMonth(key, m.year, m.month)}
+              className="w-full flex items-center gap-4 px-4 py-3 text-left transition-colors"
+              style={{ background: isOpen ? 'rgba(33,150,243,0.05)' : 'var(--c-card)' }}>
+              <div className="flex-1 flex items-center gap-3">
+                <span className="font-bold text-sm" style={{ color: 'var(--c-text)', minWidth: 72 }}>{m.label}</span>
+                <span className="text-xs px-2 py-0.5 rounded"
+                      style={{ background: 'rgba(33,150,243,0.12)', color: '#64B5F6' }}>
+                  {m.active_discounts_count} discount{m.active_discounts_count !== 1 ? 's' : ''}
+                </span>
+                <span className="text-xs px-2 py-0.5 rounded"
+                      style={{ background: 'rgba(76,175,80,0.12)', color: '#81C784' }}>
+                  {m.orders_count} orders
+                </span>
+              </div>
+              <span className="font-bold text-sm mr-2" style={{ color: '#4CAF50' }}>
+                ৳{m.total_discount_amount.toLocaleString()}
+              </span>
+              {isOpen
+                ? <ChevronDown size={15} style={{ color: 'var(--c-muted)', flexShrink: 0 }} />
+                : <ChevronRight size={15} style={{ color: 'var(--c-muted)', flexShrink: 0 }} />
+              }
+            </button>
+
+            {/* Month body */}
+            {isOpen && (
+              <div style={{ borderTop: '1px solid var(--c-border)' }}>
+                {isLoading ? (
+                  <div className="flex justify-center py-6">
+                    <div className="spinner h-4 w-4" />
+                  </div>
+                ) : !detail || detail.rows.length === 0 ? (
+                  <p className="text-xs text-center py-5" style={{ color: 'var(--c-muted)' }}>No data for this month</p>
+                ) : (
+                  <>
+                    {/* Month summary stats */}
+                    <div className="flex items-center gap-4 px-4 py-2 text-xs"
+                         style={{ background: 'var(--c-surface2)', borderBottom: '1px solid var(--c-border)', color: 'var(--c-muted)' }}>
+                      <span>Total orders: <strong style={{ color: 'var(--c-text)' }}>{detail.total_orders}</strong></span>
+                      <span>Total discounted: <strong style={{ color: '#4CAF50' }}>৳{detail.total_discount_amount.toLocaleString()}</strong></span>
+                    </div>
+
+                    {/* Discount rows */}
+                    <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ background: 'var(--c-surface2)', borderBottom: '1px solid var(--c-border)' }}>
+                          {['P', 'Code', 'Name', 'Rules', 'Orders', 'Discounted', 'Status'].map(h => (
+                            <th key={h} className="px-3 py-2 text-left font-semibold"
+                                style={{ color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.rows.map((row, i) => (
+                          <tr key={row.discount_id || row.discount_code}
+                              onClick={() => handleRowClick(row)}
+                              className="cursor-pointer transition-colors"
+                              style={{
+                                background: i%2===0 ? 'var(--c-card)' : 'var(--c-surface)',
+                                borderTop: '1px solid var(--c-border)',
+                              }}>
+                            <td className="px-3 py-2">
+                              <span className="font-mono text-xs px-1.5 py-0.5 rounded"
+                                    style={{
+                                      background: row.priority <= 10 ? 'rgba(255,193,7,0.15)' : 'var(--c-surface2)',
+                                      color: row.priority <= 10 ? '#FFC107' : 'var(--c-muted)',
+                                    }}>
+                                P{row.priority}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className="font-mono text-xs px-1.5 py-0.5 rounded"
+                                    style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
+                                {row.discount_code}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-semibold" style={{ color: 'var(--c-text)' }}>
+                              {row.discount_name}
+                            </td>
+                            <td className="px-3 py-2 text-center" style={{ color: '#64B5F6' }}>
+                              {row.rules_count}
+                            </td>
+                            <td className="px-3 py-2 text-center font-semibold" style={{ color: '#2196F3' }}>
+                              {row.orders_count}
+                            </td>
+                            <td className="px-3 py-2 font-bold" style={{ color: '#4CAF50' }}>
+                              ৳{row.total_discount_amount.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2">
+                              {row.is_active
+                                ? <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(76,175,80,0.15)', color: '#81C784' }}>Active</span>
+                                : <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(144,164,174,0.15)', color: '#90A4AE' }}>Inactive</span>
+                              }
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────
 
 type Tab = 'discounts' | 'report'
@@ -419,10 +650,6 @@ export default function DiscountsPage() {
   const [search,    setSearch]    = useState('')
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // Report state
-  const [report,      setReport]      = useState<{ active_discounts: number; total_discount_amount: number; rows: DiscountReportRow[] } | null>(null)
-  const [reportLoading, setReportLoading] = useState(false)
-
   const load = useCallback(async () => {
     setLoading(true)
     try {
@@ -435,12 +662,6 @@ export default function DiscountsPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
-
-  useEffect(() => {
-    if (tab !== 'report' || report) return
-    setReportLoading(true)
-    discountsAPI.report().then(setReport).finally(() => setReportLoading(false))
-  }, [tab, report])
 
   async function handleSave(data: Record<string, unknown>) {
     setSaveError(null)
@@ -455,8 +676,8 @@ export default function DiscountsPage() {
       setModal(null)
       setDetail(null)
     } catch (err: unknown) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      setSaveError(detail || (err instanceof Error ? err.message : 'Failed to save discount. Please try again.'))
+      const errDetail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setSaveError(errDetail || (err instanceof Error ? err.message : 'Failed to save discount. Please try again.'))
     }
   }
 
@@ -468,6 +689,11 @@ export default function DiscountsPage() {
 
   async function handleToggle(d: Discount) {
     const updated = await discountsAPI.update(d.discount_id, { is_active: !d.is_active })
+    setDiscounts(prev => prev.map(x => x.discount_id === updated.discount_id ? updated : x))
+  }
+
+  async function handlePrioritySave(id: string, priority: number) {
+    const updated = await discountsAPI.update(id, { priority })
     setDiscounts(prev => prev.map(x => x.discount_id === updated.discount_id ? updated : x))
   }
 
@@ -522,7 +748,6 @@ export default function DiscountsPage() {
       {/* ── DISCOUNTS TAB ── */}
       {tab === 'discounts' && (
         <>
-          {/* Search */}
           <div className="relative mb-4">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--c-muted)' }} />
             <input value={search} onChange={e => setSearch(e.target.value)}
@@ -542,10 +767,10 @@ export default function DiscountsPage() {
           ) : (
             <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
               <div style={{ overflowX: 'auto' }}>
-                <table className="w-full text-sm" style={{ borderCollapse: 'collapse', minWidth: 800 }}>
+                <table className="w-full text-sm" style={{ borderCollapse: 'collapse', minWidth: 860 }}>
                   <thead>
                     <tr style={{ background: 'var(--c-surface2)', borderBottom: '1px solid var(--c-border)' }}>
-                      {['Code', 'Name', 'Rules', 'Eff. From', 'Eff. To', 'Active', 'Created', 'Actions'].map(h => (
+                      {['P', 'Code', 'Name', 'Rules', 'Eff. From', 'Eff. To', 'Active', 'Created', 'Actions'].map(h => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-semibold"
                             style={{ color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
@@ -559,6 +784,9 @@ export default function DiscountsPage() {
                             borderBottom: '1px solid var(--c-border)',
                             opacity: d.is_active ? 1 : 0.6,
                           }}>
+                        <td className="px-4 py-3">
+                          <PriorityCell discount={d} onSave={handlePrioritySave} />
+                        </td>
                         <td className="px-4 py-3">
                           <span className="font-mono text-xs px-2 py-0.5 rounded"
                                 style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
@@ -627,79 +855,10 @@ export default function DiscountsPage() {
 
       {/* ── REPORT TAB ── */}
       {tab === 'report' && (
-        <div>
-          {reportLoading ? (
-            <div className="flex justify-center py-16"><div className="spinner h-6 w-6" /></div>
-          ) : !report ? (
-            <p className="text-sm text-center py-8" style={{ color: 'var(--c-muted)' }}>No report data</p>
-          ) : (
-            <>
-              {/* Month stats */}
-              <div className="grid grid-cols-2 gap-3 mb-5">
-                <div className="rounded-xl p-4" style={{ background: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                  <p className="text-xs mb-1" style={{ color: 'var(--c-muted)' }}>Active Discounts Used</p>
-                  <p className="text-2xl font-bold" style={{ color: '#2196F3' }}>{report.active_discounts}</p>
-                  <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>this month</p>
-                </div>
-                <div className="rounded-xl p-4" style={{ background: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
-                  <p className="text-xs mb-1" style={{ color: 'var(--c-muted)' }}>Total Discounted</p>
-                  <p className="text-2xl font-bold" style={{ color: '#4CAF50' }}>৳{report.total_discount_amount.toFixed(2)}</p>
-                  <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>this month</p>
-                </div>
-              </div>
-
-              {/* Discount rows */}
-              {report.rows.length === 0 ? (
-                <p className="text-sm text-center py-8" style={{ color: 'var(--c-muted)' }}>
-                  No discount activity this month
-                </p>
-              ) : (
-                <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
-                  <table className="w-full text-sm" style={{ borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ background: 'var(--c-surface2)', borderBottom: '1px solid var(--c-border)' }}>
-                        {['Discount Code', 'Discount Name', 'Orders Used', 'Total Discounted'].map(h => (
-                          <th key={h} className="px-4 py-3 text-left text-xs font-semibold"
-                              style={{ color: 'var(--c-muted)' }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.rows.map((row, i) => (
-                        <tr key={row.discount_code}
-                            style={{
-                              background: i%2===0 ? 'var(--c-card)' : 'var(--c-surface)',
-                              borderBottom: '1px solid var(--c-border)',
-                              cursor: 'pointer',
-                            }}
-                            onClick={() => {
-                              const d = discounts.find(x => x.discount_code === row.discount_code)
-                              if (d) { setDetail(d); setTab('discounts') }
-                            }}>
-                          <td className="px-4 py-3">
-                            <span className="font-mono text-xs px-2 py-0.5 rounded"
-                                  style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
-                              {row.discount_code}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 font-semibold" style={{ color: 'var(--c-text)' }}>
-                            {row.discount_name}
-                          </td>
-                          <td className="px-4 py-3 text-center font-semibold" style={{ color: '#2196F3' }}>
-                            {row.orders_count}
-                          </td>
-                          <td className="px-4 py-3 font-bold" style={{ color: '#4CAF50' }}>
-                            ৳{Number(row.total_discount_amount).toFixed(2)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        <ReportTab
+          allDiscounts={discounts}
+          onViewDetail={(d) => setDetail(d)}
+        />
       )}
 
       {/* Modals */}

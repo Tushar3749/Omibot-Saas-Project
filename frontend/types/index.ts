@@ -211,6 +211,7 @@ export interface Discount {
   effective_to: string | null
   is_lifetime: boolean
   is_active: boolean
+  priority: number
   created_at: string
   // enriched by API
   rules?: DiscountRule[]
@@ -245,10 +246,33 @@ export interface OrderDiscount {
 }
 
 export interface DiscountReportRow {
+  discount_id: string
   discount_code: string
   discount_name: string
+  rules_count: number
   orders_count: number
   total_discount_amount: number
+  is_active: boolean
+  priority: number
+}
+
+export interface DiscountMonthSummary {
+  year: number
+  month: number
+  label: string
+  orders_count: number
+  total_discount_amount: number
+  active_discounts_count: number
+}
+
+export interface DiscountMonthDetail {
+  year: number
+  month: number
+  label: string
+  total_discount_amount: number
+  total_orders: number
+  active_discounts: number
+  rows: DiscountReportRow[]
 }
 
 export interface DiscountBreakdown {
