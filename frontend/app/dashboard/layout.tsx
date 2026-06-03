@@ -10,7 +10,7 @@ import {
   LogOut, Bot, Megaphone, BookOpen, FlaskConical,
   ChevronLeft, ChevronRight, Sun, Moon,
   RotateCcw, Layers, AlertTriangle, MoreHorizontal,
-  RefreshCw, Percent, Tag,
+  RefreshCw, Percent, Tag, Receipt,
 } from 'lucide-react'
 
 // ─── Nav configuration ────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@ const NAV_GROUPS = [
     items: [
       { href: '/dashboard/analytics',     icon: BarChart2,       label: 'Analytics' },
       { href: '/dashboard/complaints',    icon: AlertTriangle,   label: 'Complaints' },
+      { href: '/dashboard/discounts',     icon: Receipt,         label: 'Discounts Report' },
     ],
   },
   {

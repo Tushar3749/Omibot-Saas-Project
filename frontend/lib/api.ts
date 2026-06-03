@@ -228,6 +228,10 @@ export const discountsAPI = {
   list:       (limit = 50) => api.get('/api/discounts/', { params: { limit } }).then(r => r.data),
   getByCode:  (code: string) => api.get(`/api/discounts/${encodeURIComponent(code)}`).then(r => r.data),
   getByOrder: (orderId: string) => api.get(`/api/discounts/order/${orderId}`).then(r => r.data),
+  report:     (filters: Record<string, string | undefined>) =>
+    api.get('/api/discounts/report', { params: filters }).then(r => r.data),
+  toggle:     (discountCode: string, isActive: boolean) =>
+    api.patch(`/api/discounts/toggle/${encodeURIComponent(discountCode)}`, { is_active: isActive }).then(r => r.data),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

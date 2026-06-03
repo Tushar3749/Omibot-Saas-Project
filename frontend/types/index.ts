@@ -202,7 +202,15 @@ export interface DiscountRow {
   original_price: number | null
   discount_amount: number
   final_price: number | null
+  effective_from: string | null
+  effective_to: string | null
+  is_active: boolean
   created_at: string
+}
+
+export interface DiscountReportRow extends DiscountRow {
+  orders_count: number
+  total_discount_amount: number
 }
 
 export interface DiscountBreakdown {
