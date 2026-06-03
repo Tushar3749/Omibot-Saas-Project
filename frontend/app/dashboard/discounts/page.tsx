@@ -57,12 +57,13 @@ interface FormState {
 }
 
 function DiscountModal({
-  discount, allRules, onSave, onClose,
+  discount, allRules, onSave, onClose, error,
 }: {
   discount: Discount | null
   allRules: DiscountRule[]
   onSave: (data: Partial<FormState>) => Promise<void>
   onClose: () => void
+  error?: string | null
 }) {
   const isEdit = !!discount?.discount_id
   const today  = new Date().toISOString().split('T')[0]
@@ -252,6 +253,9 @@ function DiscountModal({
         </div>
 
         {/* Footer */}
+        {error && (
+          <p className="px-5 pb-1 text-xs" style={{ color: '#EF5350' }}>{error}</p>
+        )}
         <div className="flex gap-3 px-5 py-4" style={{ borderTop: '1px solid var(--c-border)' }}>
           <button onClick={handleSubmit} disabled={saving || !form.discount_name.trim()}
             className="flex-1 py-2 rounded font-semibold text-sm text-white"
@@ -413,6 +417,7 @@ export default function DiscountsPage() {
   const [modal,     setModal]     = useState<'create' | Discount | null>(null)
   const [detail,    setDetail]    = useState<Discount | null>(null)
   const [search,    setSearch]    = useState('')
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   // Report state
   const [report,      setReport]      = useState<{ active_discounts: number; total_discount_amount: number; rows: DiscountReportRow[] } | null>(null)
@@ -438,15 +443,21 @@ export default function DiscountsPage() {
   }, [tab, report])
 
   async function handleSave(data: Record<string, unknown>) {
-    if (modal === 'create') {
-      const created = await discountsAPI.create(data)
-      setDiscounts(prev => [created, ...prev])
-    } else if (modal && typeof modal !== 'string') {
-      const updated = await discountsAPI.update(modal.discount_id, data)
-      setDiscounts(prev => prev.map(d => d.discount_id === updated.discount_id ? updated : d))
+    setSaveError(null)
+    try {
+      if (modal === 'create') {
+        const created = await discountsAPI.create(data)
+        setDiscounts(prev => [created, ...prev])
+      } else if (modal && typeof modal !== 'string') {
+        const updated = await discountsAPI.update(modal.discount_id, data)
+        setDiscounts(prev => prev.map(d => d.discount_id === updated.discount_id ? updated : d))
+      }
+      setModal(null)
+      setDetail(null)
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setSaveError(detail || (err instanceof Error ? err.message : 'Failed to save discount. Please try again.'))
     }
-    setModal(null)
-    setDetail(null)
   }
 
   async function handleDelete(d: Discount) {
@@ -697,7 +708,8 @@ export default function DiscountsPage() {
           discount={editingDiscount}
           allRules={rules}
           onSave={handleSave}
-          onClose={() => setModal(null)}
+          onClose={() => { setModal(null); setSaveError(null) }}
+          error={saveError}
         />
       )}
       {detail && !modal && (
