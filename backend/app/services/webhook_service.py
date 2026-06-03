@@ -613,6 +613,7 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
                 "product_skus":  [sku] if sku else [],
                 "categories":    [category] if category else [],
                 "quantity":      quantity,
+                "district":      order_data.get("delivery_address") or "",
             },
         )
         discount_amount = float(discount_ctx.get("discount_amount") or 0)
@@ -623,18 +624,24 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         if discount_code and (discount_amount > 0 or has_bonus) and agreed_price:
             net_amount = round(max(0.0, agreed_price - discount_amount), 2)
             if discount_amount > 0:
+                pct_val  = float(discount_ctx.get("final_discount_pct") or 0)
+                flat_val = float(discount_ctx.get("final_discount_flat") or 0)
+                if pct_val > 0:
+                    disc_label = f"{pct_val:.0f}% ছাড়"
+                elif flat_val > 0:
+                    disc_label = f"৳{flat_val:.0f} ছাড়"
+                else:
+                    disc_label = f"৳{discount_amount:.0f} ছাড়"
                 discount_summary = (
-                    f"\n\n💰 মূল মূল্য: ৳{agreed_price:.0f} | "
-                    f"ছাড়: ৳{discount_amount:.2f} | "
-                    f"নেট মূল্য: ৳{net_amount:.2f} "
-                    f"[{discount_code}]"
+                    f"\n\n✅ আপনার অর্ডারে {disc_label} প্রযোজ্য হয়েছে।\n"
+                    f"মূল মূল্য: ৳{agreed_price:.0f}, নেট মূল্য: ৳{net_amount:.0f}"
                 )
             elif has_bonus:
                 items_str = ", ".join(
                     f"{b.get('name','')} ×{b.get('quantity',1)}"
                     for b in discount_ctx["bonus_items"][:3]
                 )
-                discount_summary = f"\n\n🎁 ফ্রি পাচ্ছেন: {items_str}"
+                discount_summary = f"\n\n🎁 আপনি বোনাস পণ্য পাচ্ছেন: {items_str}"
     except Exception as _de:
         logger.warning(f"Discount engine error in save_order: {_de}")
 

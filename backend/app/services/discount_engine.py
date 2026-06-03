@@ -162,8 +162,12 @@ def _check_single_rule(rule: dict, metrics: dict, ctx: dict) -> tuple[bool, str,
             return True, f"Qty {quantity} ≥ min {min_q}", r
 
     elif rtype == "district":
-        if district and district in conds.get("districts", []):
-            return True, f"District: {district}", reward
+        rule_districts = conds.get("districts", [])
+        if district and rule_districts:
+            addr_lower = district.lower()
+            for d in rule_districts:
+                if d.lower() in addr_lower:
+                    return True, f"District: {d}", reward
 
     elif rtype == "time_based":
         active_days = [d.lower()[:3] for d in conds.get("days_of_week", [])]

@@ -124,10 +124,24 @@ async def test_bot_chat(
     system_prompt = _build_system_prompt(ai_cfg, products)
     if rag_ctx:
         system_prompt += f"\n\n## জ্ঞানভাণ্ডার থেকে প্রাসঙ্গিক তথ্য:\n{rag_ctx}"
-    if discount_ctx.get("final_discount_pct", 0) > 0 or discount_ctx.get("final_discount_flat", 0) > 0:
-        pct = discount_ctx.get("final_discount_pct", 0)
-        msg = discount_ctx.get("discount_message", "")
-        system_prompt += f"\n\n[DISCOUNT ENGINE]\n{msg or f'Customer qualifies for {pct}% discount.'}"
+    pct_d  = discount_ctx.get("final_discount_pct", 0)
+    flat_d = discount_ctx.get("final_discount_flat", 0)
+    msg_d  = discount_ctx.get("discount_message", "")
+    bonus_d = discount_ctx.get("bonus_items") or []
+    if pct_d > 0 or flat_d > 0 or msg_d or bonus_d:
+        if not msg_d:
+            if pct_d > 0:
+                msg_d = f"Customer qualifies for {pct_d:.0f}% discount."
+            elif flat_d > 0:
+                msg_d = f"Customer qualifies for ৳{flat_d:.0f} flat discount."
+            elif bonus_d:
+                bonus_names = ", ".join(b.get("name", "") for b in bonus_d[:3])
+                msg_d = f"Customer qualifies for bonus items: {bonus_names}"
+        system_prompt += (
+            f"\n\n[DISCOUNT ENGINE — Active]\n"
+            f"{msg_d}\n"
+            f"Mention this discount naturally when confirming the order."
+        )
 
     # ── Call Gemini ───────────────────────────────────────────────────────────
     try:

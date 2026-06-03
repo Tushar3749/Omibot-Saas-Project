@@ -118,10 +118,11 @@ class AIService:
 
         discount_block = ""
         if discount_context:
-            pct  = discount_context.get("final_discount_pct", 0)
-            flat = discount_context.get("final_discount_flat", 0)
-            msg  = discount_context.get("discount_message", "")
-            rules = discount_context.get("applied_rules") or discount_context.get("matched_rules", [])
+            pct       = discount_context.get("final_discount_pct", 0)
+            flat      = discount_context.get("final_discount_flat", 0)
+            msg       = discount_context.get("discount_message", "")
+            rules     = discount_context.get("applied_rules") or discount_context.get("matched_rules", [])
+            has_bonus = bool(discount_context.get("bonus_items"))
             if pct > 0 or flat > 0:
                 reasons = "; ".join(r.get("reason", r.get("rule_name", "")) for r in rules[:2])
                 discount_block = (
@@ -129,7 +130,20 @@ class AIService:
                     f"এই গ্রাহক {f'{pct:.0f}% ছাড়' if pct > 0 else f'৳{flat:.0f} ছাড়'} পাওয়ার যোগ্য।\n"
                     f"কারণ: {reasons}\n"
                     f"মূল্য আলোচনায় স্বাভাবিকভাবে এই ছাড়ের কথা উল্লেখ করো এবং discounted price confirm করো।\n"
-                ) if not msg else f"\n[DISCOUNT ENGINE]\n{msg}\n"
+                )
+            elif msg:
+                discount_block = (
+                    f"\n[DISCOUNT ENGINE — সক্রিয়]\n"
+                    f"{msg}\n"
+                    f"অর্ডার confirm হলে স্বাভাবিকভাবে এই ছাড়ের কথা উল্লেখ করো।\n"
+                )
+            elif has_bonus:
+                bonus_names = ", ".join(b.get("name", "") for b in discount_context["bonus_items"][:3])
+                discount_block = (
+                    f"\n[DISCOUNT ENGINE — সক্রিয়]\n"
+                    f"এই গ্রাহক বোনাস পণ্য পাবেন: {bonus_names}\n"
+                    f"অর্ডার confirm হলে এটি স্বাভাবিকভাবে উল্লেখ করো।\n"
+                )
 
         protection = (
             "[SYSTEM PROTECTION - START]\n"
