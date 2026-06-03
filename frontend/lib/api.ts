@@ -235,6 +235,7 @@ export const discountsAPI = {
   reportMonthly:      () => api.get('/api/discounts/report/monthly').then(r => r.data),
   reportMonthlyDetail:(year: number, month: number) => api.get(`/api/discounts/report/monthly/${year}/${month}`).then(r => r.data),
   updatePriority:     (id: string, priority: number) => api.put(`/api/discounts/${id}/priority`, { priority }).then(r => r.data),
+  simulate:           (id: string, params: Record<string, unknown>) => api.post(`/api/discounts/${id}/simulate`, params).then(r => r.data),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

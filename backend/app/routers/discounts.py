@@ -62,6 +62,14 @@ class PriorityUpdate(BaseModel):
     priority: int
 
 
+class SimulateRequest(BaseModel):
+    product_sku:    Optional[str]   = None
+    quantity:       int             = 1
+    cart_value:     float           = 0.0
+    customer_phone: Optional[str]   = None
+    district:       Optional[str]   = None
+
+
 # ── Helpers ───────────────────────────────────────────────────
 
 def _enrich(discounts: list, tenant_id: str) -> list:
@@ -456,6 +464,87 @@ async def update_discount_priority(
     if not res.data:
         raise HTTPException(404, "Discount not found")
     return _enrich(res.data, tid)[0]
+
+
+@router.post("/{discount_id}/simulate")
+async def simulate_discount(
+    discount_id: str,
+    body: SimulateRequest,
+    tenant=Depends(get_current_tenant),
+):
+    """Simulate discount application for a given cart context without creating an order."""
+    from app.services.discount_engine import (
+        _check_single_rule, get_customer_metrics, _compute_amount,
+    )
+    tid = tenant["tenant_id"]
+
+    disc = (
+        supabase.table("discounts")
+        .select("*")
+        .eq("tenant_id", tid)
+        .eq("discount_id", discount_id)
+        .maybe_single()
+        .execute().data
+    )
+    if not disc:
+        raise HTTPException(404, "Discount not found")
+
+    rule_ids = [str(r) for r in (disc.get("rule_ids") or [])]
+    rules_data: list = []
+    if rule_ids:
+        try:
+            rules_data = (
+                supabase.table("discount_rules")
+                .select("*")
+                .eq("tenant_id", tid)
+                .in_("rule_id", rule_ids)
+                .execute().data or []
+            )
+        except Exception:
+            pass
+    rules_map = {str(r["rule_id"]): r for r in rules_data}
+
+    metrics = get_customer_metrics(tid, customer_phone=body.customer_phone or None)
+
+    ctx = {
+        "cart_amount":  body.cart_value,
+        "product_skus": [body.product_sku] if body.product_sku else [],
+        "quantity":     body.quantity,
+        "district":     body.district or "",
+        "categories":   [],
+    }
+
+    rule_results = []
+    for rid in rule_ids:
+        rule = rules_map.get(rid)
+        if not rule:
+            continue
+        hit, reason, reward = _check_single_rule(rule, metrics, ctx)
+        disc_amount = _compute_amount(reward, body.cart_value) if hit else 0.0
+        rule_results.append({
+            "rule_id":        rid,
+            "rule_name":      rule.get("rule_name", ""),
+            "rule_type":      rule.get("rule_type", ""),
+            "matched":        hit,
+            "reason":         reason if hit else "Condition not met",
+            "reward_type":    reward.get("reward_type", "percentage"),
+            "discount_value": float(reward.get("discount_value", 0)),
+            "discount_amount": round(disc_amount, 2),
+        })
+
+    matched = next((r for r in rule_results if r["matched"]), None)
+    total_discount = matched["discount_amount"] if matched else 0.0
+    net_amount     = round(max(0.0, body.cart_value - total_discount), 2)
+
+    return {
+        "discount_id":    discount_id,
+        "discount_code":  disc.get("discount_code", ""),
+        "discount_name":  disc.get("discount_name", ""),
+        "cart_value":     body.cart_value,
+        "rules":          rule_results,
+        "total_discount": round(total_discount, 2),
+        "net_amount":     net_amount,
+    }
 
 
 @router.delete("/{discount_id}")
