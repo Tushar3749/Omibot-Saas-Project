@@ -91,13 +91,86 @@ function banglaMonthLabel(year: number, month: number) {
   return `${BANGLA_MONTHS[month] || ''} ${year}`
 }
 
-function rewardLabel(reward: DiscountRule['reward'] | undefined) {
-  if (!reward) return '—'
-  if (reward.reward_type === 'percentage')    return `${reward.discount_value}% off`
-  if (reward.reward_type === 'flat')          return `৳${reward.discount_value} off`
-  if (reward.reward_type === 'bonus')         return `Bonus items`
-  if (reward.reward_type === 'free_delivery') return 'Free delivery'
-  return '—'
+function banglaDateShort(v: string | null | undefined): string {
+  if (!v) return ''
+  try {
+    const d = new Date(v)
+    if (isNaN(d.getTime())) return ''
+    return `${d.getDate()} ${BANGLA_MONTHS[d.getMonth() + 1] || ''}`
+  } catch { return '' }
+}
+
+function effectiveDateLabel(row: { effective_from?: string | null; effective_to?: string | null; is_lifetime?: boolean }): string {
+  const from = banglaDateShort(row.effective_from)
+  if (!from) return ''
+  if (row.is_lifetime) return `${from} → আজীবন`
+  const to = banglaDateShort(row.effective_to)
+  return to ? `${from} → ${to}` : from
+}
+
+function conditionText(rule: DiscountRule): string {
+  const c = rule.conditions || {}
+  const g = (k: string) => (c as Record<string, unknown>)[k]
+  switch (rule.rule_type) {
+    case 'cart_value':        return `Cart ≥ ৳${g('min_cart_value') || g('cart_value') || '?'}`
+    case 'specific_category': return `Category = ${(g('categories') as string[] | undefined)?.[0] || g('category') || '?'}`
+    case 'specific_product':  return `Product = ${g('product_name') || g('sku') || '?'}`
+    case 'new_customer':      return 'First order'
+    case 'repeated_customer': return `Orders ≥ ${g('min_orders') || '?'}`
+    case 'bulk_quantity':     return `Qty ≥ ${g('min_quantity') || '?'}`
+    case 'district':          return `District = ${(g('districts') as string[] | undefined)?.[0] || g('district') || '?'}`
+    case 'time_based':        return `${g('start_time') || '?'} – ${g('end_time') || '?'}`
+    case 'seasonal':          return `${g('season') || g('holiday') || '?'}`
+    case 'lifetime_value':    return `LTV ≥ ৳${g('min_lifetime_value') || '?'}`
+    default:
+      return Object.entries(c as Record<string, unknown>).slice(0, 2).map(([k, v]) => `${k}: ${v}`).join(', ') || '—'
+  }
+}
+
+// ── RewardBadge ───────────────────────────────────────────────
+
+const REWARD_STYLES = {
+  percentage:    { bg: 'rgba(76,175,80,0.15)',   color: '#4CAF50' },
+  flat:          { bg: 'rgba(33,150,243,0.15)',  color: '#42A5F5' },
+  bonus:         { bg: 'rgba(156,39,176,0.15)',  color: '#CE93D8' },
+  free_delivery: { bg: 'rgba(255,112,67,0.15)',  color: '#FF7043' },
+} as const
+
+function RewardBadge({ reward }: { reward: DiscountRule['reward'] | undefined }) {
+  if (!reward) return null
+  const s = REWARD_STYLES[reward.reward_type as keyof typeof REWARD_STYLES] || { bg: 'var(--c-surface2)', color: 'var(--c-muted)' }
+  let label = ''
+  if (reward.reward_type === 'percentage')         label = `${reward.discount_value}% ছাড়`
+  else if (reward.reward_type === 'flat')          label = `৳${reward.discount_value} ছাড়`
+  else if (reward.reward_type === 'free_delivery') label = 'ফ্রি ডেলিভারি'
+  else if (reward.reward_type === 'bonus') {
+    const items = (reward.bonus_items || []).slice(0, 2).map(b => `${b.name} ×${b.quantity}`).join(', ')
+    label = `ফ্রি: ${items || 'Bonus'}`
+  }
+  return (
+    <span style={{
+      fontSize: 11, padding: '2px 7px', borderRadius: 4,
+      background: s.bg, color: s.color, fontWeight: 600, whiteSpace: 'nowrap',
+    }}>
+      {label}
+    </span>
+  )
+}
+
+function RewardSummary({ rules }: { rules?: DiscountRule[] }) {
+  const rs = rules || []
+  if (rs.length === 0) return <span style={{ color: 'var(--c-muted)' }}>—</span>
+  return (
+    <div className="flex flex-wrap gap-1">
+      {rs.map(r => <RewardBadge key={r.rule_id} reward={r.reward} />)}
+    </div>
+  )
+}
+
+function priorityStyle(priority: number) {
+  if (priority === 1)      return { bg: 'rgba(255,193,7,0.18)',  color: '#FFC107' }
+  if (priority <= 5)       return { bg: 'rgba(255,213,79,0.14)', color: '#FFD54F' }
+  return { bg: 'var(--c-surface2)', color: 'var(--c-muted)' }
 }
 
 // ── Discount Form Modal ───────────────────────────────────────
@@ -166,6 +239,7 @@ function DiscountModal({
     r.rule_type.toLowerCase().includes(ruleSearch.toLowerCase())
   )
   const selectedRules = allRules.filter(r => form.rule_ids.includes(r.rule_id))
+  const ps = priorityStyle(form.priority)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -217,12 +291,12 @@ function DiscountModal({
                 onClick={() => set('is_active', !form.is_active)}
                 className="flex items-center gap-2 px-3 py-2 rounded text-sm"
                 style={{
-                  background: form.is_active ? 'rgba(76,175,80,0.12)' : 'var(--c-surface2)',
-                  border: `1px solid ${form.is_active ? '#4CAF50' : 'var(--c-border)'}`,
-                  color: form.is_active ? '#4CAF50' : 'var(--c-muted)',
+                  background: form.is_active ? 'rgba(76,175,80,0.12)' : 'rgba(239,83,80,0.08)',
+                  border: `1px solid ${form.is_active ? '#4CAF50' : '#EF5350'}`,
+                  color: form.is_active ? '#4CAF50' : '#EF5350',
                 }}>
                 <span className="w-2 h-2 rounded-full"
-                      style={{ background: form.is_active ? '#4CAF50' : '#607D8B' }} />
+                      style={{ background: form.is_active ? '#4CAF50' : '#EF5350' }} />
                 {form.is_active ? 'সক্রিয়' : 'বন্ধ'}
               </button>
             </div>
@@ -319,7 +393,7 @@ function DiscountModal({
                         }}>
                     {r.rule_type.replace(/_/g, ' ')}
                   </span>
-                  <span style={{ color: 'var(--c-muted)' }}>{rewardLabel(r.reward)}</span>
+                  <RewardBadge reward={r.reward} />
                 </button>
               ))}
             </div>
@@ -367,6 +441,7 @@ function DetailModal({ discount, onClose, onEdit }: {
   const totalDisc   = od.reduce((s, r) => s + (Number(r.discount_amount) || 0), 0)
   const uniqueOrders = new Set(od.map(r => r.order_id)).size
   const avgPerOrder  = uniqueOrders > 0 ? totalDisc / uniqueOrders : 0
+  const ps = priorityStyle(discount.priority ?? 99)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -386,16 +461,13 @@ function DetailModal({ discount, onClose, onEdit }: {
                 {discount.discount_code}
               </span>
               <span className="text-xs px-1.5 py-0.5 rounded font-mono"
-                    style={{
-                      background: (discount.priority ?? 99) <= 10 ? 'rgba(255,193,7,0.15)' : 'var(--c-surface2)',
-                      color: (discount.priority ?? 99) <= 10 ? '#FFC107' : 'var(--c-muted)',
-                    }}>
+                    style={{ background: ps.bg, color: ps.color }}>
                 P{discount.priority ?? 99}
               </span>
               <span className="text-xs px-1.5 py-0.5 rounded"
                     style={{
-                      background: discount.is_active ? 'rgba(76,175,80,0.12)' : 'var(--c-surface2)',
-                      color:      discount.is_active ? '#4CAF50' : '#90A4AE',
+                      background: discount.is_active ? 'rgba(76,175,80,0.12)' : 'rgba(239,83,80,0.1)',
+                      color:      discount.is_active ? '#4CAF50' : '#EF5350',
                     }}>
                 {discount.is_active ? 'সক্রিয়' : 'বন্ধ'}
               </span>
@@ -418,8 +490,8 @@ function DetailModal({ discount, onClose, onEdit }: {
             <div className="grid grid-cols-3 gap-3">
               {[
                 { label: 'Orders Used',      value: uniqueOrders,               color: '#2196F3', Icon: ShoppingBag },
-                { label: 'Total Discounted', value: `৳${totalDisc.toFixed(2)}`, color: '#4CAF50', Icon: TrendingDown },
-                { label: 'Avg per Order',    value: `৳${avgPerOrder.toFixed(2)}`, color: '#FF7043', Icon: Receipt },
+                { label: 'Total Discounted', value: uniqueOrders > 0 ? `৳${totalDisc.toFixed(2)}` : '—', color: '#4CAF50', Icon: TrendingDown },
+                { label: 'Avg per Order',    value: uniqueOrders > 0 ? `৳${avgPerOrder.toFixed(2)}` : '—', color: '#FF7043', Icon: Receipt },
               ].map(({ label, value, color, Icon }) => (
                 <div key={label} className="rounded-xl p-3 text-center"
                      style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
@@ -452,18 +524,22 @@ function DetailModal({ discount, onClose, onEdit }: {
                   <span className="flex-1 text-sm font-medium" style={{ color: 'var(--c-text)' }}>
                     {r.rule_name}
                   </span>
-                  <span className="text-xs" style={{ color: '#4CAF50' }}>{rewardLabel(r.reward)}</span>
+                  <RewardBadge reward={r.reward} />
                 </div>
               ))}
             </div>
             <div>
               <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--c-text)' }}>
-                Order History ({uniqueOrders} orders, {od.length} rows)
+                Order History ({uniqueOrders} orders)
               </h3>
               {od.length === 0 ? (
-                <p className="text-xs" style={{ color: 'var(--c-muted)' }}>
-                  No orders have used this discount yet.
-                </p>
+                <div className="rounded-lg p-4 text-center"
+                     style={{ background: 'var(--c-surface)', border: '1px dashed var(--c-border)' }}>
+                  <p className="text-xs font-medium" style={{ color: 'var(--c-muted)' }}>No orders yet</p>
+                  <p className="text-xs mt-1 opacity-60" style={{ color: 'var(--c-muted)' }}>
+                    Orders will appear here after a customer uses this discount
+                  </p>
+                </div>
               ) : (
                 <>
                   <div className="rounded overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
@@ -552,6 +628,7 @@ function PriorityCell({ priority, discountId, onSave }: {
   }
 
   useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
+  const ps = priorityStyle(priority)
 
   if (editing) {
     return (
@@ -569,8 +646,8 @@ function PriorityCell({ priority, discountId, onSave }: {
     <button onClick={startEdit} title="Click to edit priority"
       className="text-xs px-2 py-0.5 rounded font-mono cursor-pointer transition-colors"
       style={{
-        background: priority <= 10 ? 'rgba(255,193,7,0.15)' : 'var(--c-surface2)',
-        color:      priority <= 10 ? '#FFC107' : 'var(--c-muted)',
+        background: ps.bg,
+        color:      ps.color,
         border: '1px solid var(--c-border)',
       }}>
       P{priority}
@@ -599,7 +676,7 @@ function RulesCell({ rules }: { rules?: DiscountRule[] }) {
               <span className="w-1.5 h-1.5 rounded-full flex-shrink-0"
                     style={{ background: RULE_TYPE_COLORS[r.rule_type] || '#607D8B' }} />
               <span style={{ color: 'var(--c-text)' }}>{r.rule_name}</span>
-              <span style={{ color: 'var(--c-muted)' }}>{rewardLabel(r.reward)}</span>
+              <RewardBadge reward={r.reward} />
             </div>
           ))}
         </div>
@@ -696,28 +773,21 @@ function DiscountCalculator({ discountId, discountName, onClose }: {
 
       <button onClick={runCalc} disabled={loading || !form.cart_value}
         className="flex items-center gap-2 px-4 py-1.5 rounded text-xs font-semibold text-white"
-        style={{
-          background: loading || !form.cart_value ? 'var(--c-muted)' : '#2196F3',
-        }}>
+        style={{ background: loading || !form.cart_value ? 'var(--c-muted)' : '#2196F3' }}>
         {loading ? 'Calculating…' : <><Calculator size={12} /> Calculate</>}
       </button>
 
-      {error && (
-        <p className="mt-2 text-xs" style={{ color: '#EF5350' }}>{error}</p>
-      )}
+      {error && <p className="mt-2 text-xs" style={{ color: '#EF5350' }}>{error}</p>}
 
       {result && (
         <div className="mt-3 space-y-2">
-          {/* Rule results */}
           {result.rules.map(r => (
             <div key={r.rule_id} className="flex items-start gap-2 rounded px-3 py-2 text-xs"
                  style={{
                    background: r.matched ? 'rgba(76,175,80,0.08)' : 'rgba(144,164,174,0.08)',
                    border: `1px solid ${r.matched ? 'rgba(76,175,80,0.25)' : 'rgba(144,164,174,0.2)'}`,
                  }}>
-              <span className="mt-0.5 flex-shrink-0" style={{ color: r.matched ? '#4CAF50' : '#90A4AE' }}>
-                {r.matched ? '✅' : '❌'}
-              </span>
+              <span className="mt-0.5 flex-shrink-0">{r.matched ? '✅' : '❌'}</span>
               <div className="flex-1">
                 <p className="font-semibold" style={{ color: r.matched ? '#4CAF50' : '#90A4AE' }}>
                   {r.rule_name}
@@ -727,14 +797,12 @@ function DiscountCalculator({ discountId, discountName, onClose }: {
                   <p className="font-semibold mt-0.5" style={{ color: '#FF7043' }}>
                     ছাড়: ৳{r.discount_amount.toFixed(2)}
                     {r.reward_type === 'percentage' && ` (${r.discount_value}%)`}
-                    {r.reward_type === 'flat' && ` (flat)`}
+                    {r.reward_type === 'flat' && ' (flat)'}
                   </p>
                 )}
               </div>
             </div>
           ))}
-
-          {/* Summary */}
           {result.total_discount > 0 ? (
             <div className="rounded px-3 py-2 text-xs"
                  style={{ background: 'rgba(76,175,80,0.08)', border: '1px solid rgba(76,175,80,0.25)' }}>
@@ -769,10 +837,10 @@ function ReportDiscountRow({ row, onPrioritySave }: {
   row:            DiscountReportRow
   onPrioritySave: (id: string, p: number) => Promise<void>
 }) {
-  const [calcOpen,     setCalcOpen]     = useState(false)
-  const [expandOpen,   setExpandOpen]   = useState(false)
-  const [expandData,   setExpandData]   = useState<Discount | null>(null)
-  const [expandLoad,   setExpandLoad]   = useState(false)
+  const [calcOpen,   setCalcOpen]   = useState(false)
+  const [expandOpen, setExpandOpen] = useState(false)
+  const [expandData, setExpandData] = useState<Discount | null>(null)
+  const [expandLoad, setExpandLoad] = useState(false)
 
   async function toggleExpand() {
     if (expandOpen) { setExpandOpen(false); return }
@@ -787,9 +855,11 @@ function ReportDiscountRow({ row, onPrioritySave }: {
     }
   }
 
-  const od: OrderDiscount[] = expandData?.order_discounts || []
+  const od: OrderDiscount[]  = expandData?.order_discounts || []
   const uniqueOrders = new Set(od.map(r => r.order_id)).size
   const totalDisc    = od.reduce((s, r) => s + (Number(r.discount_amount) || 0), 0)
+  const ps           = priorityStyle(row.priority ?? 99)
+  const dateLabel    = effectiveDateLabel(row)
 
   return (
     <div className="rounded-xl overflow-hidden"
@@ -797,51 +867,63 @@ function ReportDiscountRow({ row, onPrioritySave }: {
            border: `1px solid ${expandOpen || calcOpen ? '#2196F330' : 'var(--c-border)'}`,
            marginBottom: 6,
          }}>
-      {/* Main row */}
+
+      {/* ── Header row ── */}
       <div className="flex items-center gap-2 px-3 py-2.5"
            style={{ background: expandOpen ? 'rgba(33,150,243,0.04)' : 'var(--c-card)' }}>
-        {/* Priority */}
+
         <div className="flex-shrink-0">
           <PriorityCell priority={row.priority ?? 99} discountId={row.discount_id} onSave={onPrioritySave} />
         </div>
 
-        {/* Code */}
         <span className="font-mono text-xs px-1.5 py-0.5 rounded flex-shrink-0"
               style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
           {row.discount_code}
         </span>
 
-        {/* Name */}
-        <span className="flex-1 text-xs font-semibold truncate" style={{ color: 'var(--c-text)' }}>
+        <span className="flex-1 text-xs font-semibold truncate" style={{ color: 'var(--c-text)', minWidth: 0 }}>
           {row.discount_name}
         </span>
 
-        {/* Stats */}
+        {/* Rules count */}
         <span className="text-xs px-1.5 py-0.5 rounded flex-shrink-0"
               style={{ background: 'rgba(33,150,243,0.1)', color: '#64B5F6' }}>
-          {row.rules_count}r
+          {row.rules_count} rule{row.rules_count !== 1 ? 's' : ''}
         </span>
-        <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#2196F3' }}>
-          {row.orders_count} orders
-        </span>
-        <span className="text-xs font-bold flex-shrink-0" style={{ color: '#FF7043' }}>
-          ৳{(row.total_discount_amount || 0).toLocaleString()}
-        </span>
+
+        {/* Effective date */}
+        {dateLabel && (
+          <span className="text-xs flex-shrink-0" style={{ color: 'var(--c-muted)' }}>
+            {dateLabel}
+          </span>
+        )}
 
         {/* Status */}
         <span className="text-xs px-1.5 py-0.5 rounded flex-shrink-0"
               style={{
-                background: row.is_active ? 'rgba(76,175,80,0.12)' : 'rgba(144,164,174,0.1)',
-                color:      row.is_active ? '#81C784' : '#90A4AE',
+                background: row.is_active ? 'rgba(76,175,80,0.12)' : 'rgba(239,83,80,0.1)',
+                color:      row.is_active ? '#4CAF50' : '#EF5350',
               }}>
           {row.is_active ? 'সক্রিয়' : 'বন্ধ'}
         </span>
 
-        {/* Action buttons */}
+        {/* Orders count — grey if 0 */}
+        <span className="text-xs flex-shrink-0"
+              style={{ color: row.orders_count > 0 ? '#2196F3' : 'var(--c-muted)' }}>
+          {row.orders_count} orders
+        </span>
+
+        {/* Discount amount — only if > 0 */}
+        {row.total_discount_amount > 0 && (
+          <span className="text-xs font-bold flex-shrink-0" style={{ color: '#FF7043' }}>
+            ৳{row.total_discount_amount.toLocaleString()}
+          </span>
+        )}
+
         <button
           onClick={() => { setCalcOpen(p => !p); if (expandOpen) setExpandOpen(false) }}
           title="Open Calculator"
-          className="flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors"
+          className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded transition-colors"
           style={{
             background: calcOpen ? 'rgba(33,150,243,0.15)' : 'var(--c-surface2)',
             color: calcOpen ? '#64B5F6' : 'var(--c-muted)',
@@ -853,7 +935,7 @@ function ReportDiscountRow({ row, onPrioritySave }: {
         <button
           onClick={toggleExpand}
           title="Expand details"
-          className="flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors"
+          className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded transition-colors"
           style={{
             background: expandOpen ? 'rgba(33,150,243,0.15)' : 'var(--c-surface2)',
             color: expandOpen ? '#64B5F6' : 'var(--c-muted)',
@@ -863,7 +945,7 @@ function ReportDiscountRow({ row, onPrioritySave }: {
         </button>
       </div>
 
-      {/* Calculator panel */}
+      {/* ── Calculator panel ── */}
       {calcOpen && (
         <div className="px-3 pb-3" style={{ borderTop: '1px solid var(--c-border)' }}>
           <DiscountCalculator
@@ -874,54 +956,89 @@ function ReportDiscountRow({ row, onPrioritySave }: {
         </div>
       )}
 
-      {/* Expanded panel */}
+      {/* ── Expanded panel ── */}
       {expandOpen && (
-        <div className="px-3 pb-3 space-y-3" style={{ borderTop: '1px solid var(--c-border)' }}>
+        <div className="p-3 space-y-3" style={{ borderTop: '1px solid var(--c-border)' }}>
           {expandLoad ? (
             <div className="flex justify-center py-4"><div className="spinner h-4 w-4" /></div>
           ) : !expandData ? (
             <p className="text-xs text-center py-3" style={{ color: 'var(--c-muted)' }}>Failed to load details</p>
           ) : (
             <>
-              {/* Attached rules */}
-              <div className="pt-3">
-                <p className="text-xs font-semibold mb-2" style={{ color: 'var(--c-muted)' }}>
-                  Attached Rules ({(expandData.rules || []).length})
+              {/* ── Attached Rules ── */}
+              <div className="rounded-xl p-3"
+                   style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
+                <p className="text-xs font-bold mb-3 flex items-center gap-1.5" style={{ color: 'var(--c-text)' }}>
+                  📋 Attached Rules
+                  <span className="text-xs font-normal px-1.5 py-0.5 rounded"
+                        style={{ background: 'rgba(33,150,243,0.1)', color: '#64B5F6' }}>
+                    {(expandData.rules || []).length}
+                  </span>
                 </p>
+
                 {(expandData.rules || []).length === 0 ? (
                   <p className="text-xs" style={{ color: 'var(--c-muted)' }}>No rules attached.</p>
-                ) : (expandData.rules || []).map(r => (
-                  <div key={r.rule_id}
-                       className="flex items-center gap-2 rounded px-3 py-1.5 mb-1 text-xs"
-                       style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
-                    <span className="px-1.5 py-0.5 rounded"
-                          style={{
-                            background: `${RULE_TYPE_COLORS[r.rule_type] || '#607D8B'}20`,
-                            color: RULE_TYPE_COLORS[r.rule_type] || '#90A4AE',
-                          }}>
-                      {r.rule_type.replace(/_/g, ' ')}
-                    </span>
-                    <span className="flex-1 font-medium" style={{ color: 'var(--c-text)' }}>{r.rule_name}</span>
-                    <span style={{ color: '#4CAF50' }}>{rewardLabel(r.reward)}</span>
+                ) : (
+                  <div className="space-y-2">
+                    {(expandData.rules || []).map((r, idx) => (
+                      <div key={r.rule_id} className="rounded-lg p-3"
+                           style={{ background: 'var(--c-card)', border: '1px solid var(--c-border)' }}>
+                        <div className="flex items-start justify-between gap-2 mb-1.5">
+                          <span className="text-xs font-semibold" style={{ color: 'var(--c-text)' }}>
+                            Rule {idx + 1}: {r.rule_name}
+                          </span>
+                          <span className="text-xs px-1.5 py-0.5 rounded flex-shrink-0"
+                                style={{
+                                  background: `${RULE_TYPE_COLORS[r.rule_type] || '#607D8B'}20`,
+                                  color: RULE_TYPE_COLORS[r.rule_type] || '#90A4AE',
+                                }}>
+                            {r.rule_type.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs" style={{ color: 'var(--c-muted)' }}>
+                            Condition: <span style={{ color: 'var(--c-text)' }}>{conditionText(r)}</span>
+                          </span>
+                          <span style={{ color: 'var(--c-border)' }}>·</span>
+                          <span className="text-xs" style={{ color: 'var(--c-muted)' }}>Reward:</span>
+                          <RewardBadge reward={r.reward} />
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
 
-              {/* Orders */}
-              <div>
-                <p className="text-xs font-semibold mb-2" style={{ color: 'var(--c-muted)' }}>
-                  Orders ({uniqueOrders})
+              {/* ── Orders ── */}
+              <div className="rounded-xl p-3"
+                   style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
+                <p className="text-xs font-bold mb-3 flex items-center gap-1.5" style={{ color: 'var(--c-text)' }}>
+                  📦 Orders
+                  <span className="text-xs font-normal px-1.5 py-0.5 rounded"
+                        style={{
+                          background: uniqueOrders > 0 ? 'rgba(33,150,243,0.1)' : 'var(--c-surface2)',
+                          color: uniqueOrders > 0 ? '#64B5F6' : 'var(--c-muted)',
+                        }}>
+                    {uniqueOrders}
+                  </span>
                 </p>
+
                 {od.length === 0 ? (
-                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>No orders yet.</p>
+                  <div className="rounded-lg p-4 text-center"
+                       style={{ background: 'var(--c-card)', border: '1px dashed var(--c-border)' }}>
+                    <p className="text-xs font-medium" style={{ color: 'var(--c-muted)' }}>No orders yet</p>
+                    <p className="text-xs mt-1 opacity-60" style={{ color: 'var(--c-muted)' }}>
+                      Orders will appear here after a customer uses this discount
+                    </p>
+                  </div>
                 ) : (
                   <>
                     <div className="rounded overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
                       <div style={{ overflowX: 'auto' }}>
-                        <table className="w-full text-xs" style={{ borderCollapse: 'collapse', minWidth: 580 }}>
+                        <table className="w-full text-xs" style={{ borderCollapse: 'collapse', minWidth: 520 }}>
                           <thead>
                             <tr style={{ background: 'var(--c-surface2)' }}>
-                              {['Order ID', 'Customer', 'Amount', 'Discount', 'Net', 'Date'].map(h => (
+                              {['Order ID', 'Customer', 'Original ৳', 'Discount ৳', 'Net ৳', 'Date'].map(h => (
                                 <th key={h} className="px-2 py-1.5 text-left font-semibold"
                                     style={{ color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>{h}</th>
                               ))}
@@ -957,7 +1074,6 @@ function ReportDiscountRow({ row, onPrioritySave }: {
                         </table>
                       </div>
                     </div>
-                    {/* Summary */}
                     <div className="flex gap-4 mt-1.5 px-2 py-1.5 rounded text-xs"
                          style={{ background: 'var(--c-surface2)', border: '1px solid var(--c-border)' }}>
                       <span style={{ color: 'var(--c-muted)' }}>
@@ -1012,7 +1128,6 @@ function ReportTab({ crMode }: { crMode: string }) {
     setDetailLoad(prev => new Set(prev).add(key))
     try {
       const data: DiscountMonthDetail = await discountsAPI.reportMonthlyDetail(year, month)
-      // Pre-sort by priority
       data.rows.sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
       setDetails(prev => ({ ...prev, [key]: data }))
     } finally {
@@ -1034,12 +1149,12 @@ function ReportTab({ crMode }: { crMode: string }) {
 
   if (loading) return <div className="flex justify-center py-16"><div className="spinner h-6 w-6" /></div>
 
-  const cr = CR_META[crMode] || CR_META['best_deal']
+  const cr         = CR_META[crMode] || CR_META['best_deal']
   const hasAnyData = months.length > 0
 
   return (
     <div className="space-y-4">
-      {/* Conflict Resolution Banner */}
+      {/* ── Conflict Resolution Banner ── */}
       <div className="rounded-xl p-4"
            style={{ background: cr.bg, border: `1px solid ${cr.border}` }}>
         <div className="flex items-start justify-between gap-3">
@@ -1047,7 +1162,7 @@ function ReportTab({ crMode }: { crMode: string }) {
             <Settings size={16} className="mt-0.5 flex-shrink-0" style={{ color: cr.color }} />
             <div>
               <p className="text-sm font-bold" style={{ color: cr.color }}>
-                বর্তমান নিয়ম: {cr.bangla}
+                ⚙️ বর্তমান নিয়ম: {cr.bangla}
               </p>
               <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>
                 {cr.desc}
@@ -1055,14 +1170,14 @@ function ReportTab({ crMode }: { crMode: string }) {
             </div>
           </div>
           <a href="/dashboard/ai-config"
-             className="flex items-center gap-1 text-xs flex-shrink-0 px-2 py-1 rounded"
-             style={{ color: cr.color, background: `${cr.border}`, border: `1px solid ${cr.border}` }}>
-            AI Settings <ArrowRight size={11} />
+             className="flex items-center gap-1 text-xs flex-shrink-0 px-2.5 py-1.5 rounded font-medium"
+             style={{ color: cr.color, background: cr.bg, border: `1px solid ${cr.border}` }}>
+            AI Settings থেকে পরিবর্তন করুন <ArrowRight size={11} />
           </a>
         </div>
       </div>
 
-      {/* Current month summary cards */}
+      {/* ── Current month summary cards ── */}
       <div className="grid grid-cols-3 gap-3">
         {[
           {
@@ -1072,7 +1187,9 @@ function ReportTab({ crMode }: { crMode: string }) {
           },
           {
             label: 'এই মাসের মোট ছাড়',
-            value: `৳${(curMonth?.total_discount_amount ?? 0).toLocaleString()}`,
+            value: (curMonth?.total_discount_amount ?? 0) > 0
+              ? `৳${(curMonth!.total_discount_amount).toLocaleString()}`
+              : 'অর্ডার হলে দেখাবে',
             color: '#FF7043', Icon: TrendingDown,
           },
           {
@@ -1098,9 +1215,9 @@ function ReportTab({ crMode }: { crMode: string }) {
         </div>
       )}
 
-      {/* Month accordion — backend already filters to months with active discounts */}
+      {/* ── Month accordion ── */}
       {months.map(m => {
-        const key       = `${m.year}-${String(m.month).padStart(2,'0')}`
+        const key       = `${m.year}-${String(m.month).padStart(2, '0')}`
         const isOpen    = expanded.has(key)
         const isLoading = detailLoad.has(key)
         const detail    = details[key]
@@ -1108,27 +1225,37 @@ function ReportTab({ crMode }: { crMode: string }) {
         return (
           <div key={key} className="rounded-xl overflow-hidden"
                style={{ border: `1px solid ${isOpen ? '#2196F340' : 'var(--c-border)'}` }}>
-            {/* Month header */}
+
+            {/* Month header button */}
             <button
               onClick={() => toggleMonth(key, m.year, m.month)}
-              className="w-full flex items-center gap-4 px-4 py-3 text-left transition-colors"
+              className="w-full flex items-center gap-3 px-4 py-3 text-left transition-colors"
               style={{ background: isOpen ? 'rgba(33,150,243,0.04)' : 'var(--c-card)' }}>
-              <div className="flex-1 flex items-center gap-3">
-                <span className="font-bold text-sm" style={{ color: 'var(--c-text)', minWidth: 120 }}>
-                  {banglaMonthLabel(m.year, m.month)}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded"
-                      style={{ background: 'rgba(33,150,243,0.12)', color: '#64B5F6' }}>
-                  {m.active_discounts_count} discount{m.active_discounts_count !== 1 ? 's' : ''}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded"
-                      style={{ background: 'rgba(76,175,80,0.12)', color: '#81C784' }}>
-                  {m.orders_count} orders
-                </span>
-              </div>
-              <span className="font-bold text-sm mr-2" style={{ color: '#FF7043' }}>
-                ৳{m.total_discount_amount.toLocaleString()}
+              <span className="font-bold text-sm flex-1" style={{ color: 'var(--c-text)' }}>
+                {banglaMonthLabel(m.year, m.month)}
               </span>
+
+              <span className="text-xs px-2 py-0.5 rounded"
+                    style={{ background: 'rgba(33,150,243,0.12)', color: '#64B5F6', flexShrink: 0 }}>
+                {m.active_discounts_count} discount{m.active_discounts_count !== 1 ? 's' : ''}
+              </span>
+
+              {/* Orders — grey if 0 */}
+              <span className="text-xs px-2 py-0.5 rounded flex-shrink-0"
+                    style={{
+                      background: m.orders_count > 0 ? 'rgba(76,175,80,0.12)' : 'var(--c-surface2)',
+                      color:      m.orders_count > 0 ? '#81C784' : 'var(--c-muted)',
+                    }}>
+                {m.orders_count} orders
+              </span>
+
+              {/* Amount — only if > 0 */}
+              {m.total_discount_amount > 0 && (
+                <span className="font-bold text-sm flex-shrink-0" style={{ color: '#FF7043' }}>
+                  ৳{m.total_discount_amount.toLocaleString()}
+                </span>
+              )}
+
               {isOpen
                 ? <ChevronDown  size={15} style={{ color: 'var(--c-muted)', flexShrink: 0 }} />
                 : <ChevronRight size={15} style={{ color: 'var(--c-muted)', flexShrink: 0 }} />
@@ -1146,17 +1273,27 @@ function ReportTab({ crMode }: { crMode: string }) {
                   </p>
                 ) : (
                   <>
-                    {/* Month stats bar */}
+                    {/* Stats bar */}
                     <div className="flex items-center gap-4 mb-3 px-1 text-xs"
                          style={{ color: 'var(--c-muted)' }}>
-                      <span>মোট orders: <strong style={{ color: 'var(--c-text)' }}>{detail.total_orders}</strong></span>
-                      <span>মোট ছাড়: <strong style={{ color: '#FF7043' }}>৳{detail.total_discount_amount.toLocaleString()}</strong></span>
+                      <span>
+                        সক্রিয়: <strong style={{ color: 'var(--c-text)' }}>{detail.active_discounts}</strong>
+                      </span>
+                      {detail.total_orders > 0 && (
+                        <span>
+                          Orders: <strong style={{ color: '#2196F3' }}>{detail.total_orders}</strong>
+                        </span>
+                      )}
+                      {detail.total_discount_amount > 0 && (
+                        <span>
+                          মোট ছাড়: <strong style={{ color: '#FF7043' }}>৳{detail.total_discount_amount.toLocaleString()}</strong>
+                        </span>
+                      )}
                       <span style={{ color: 'var(--c-muted)', fontSize: 11 }}>
-                        Priority অনুযায়ী সাজানো — click <Calculator size={10} style={{ display: 'inline' }} /> to simulate
+                        Priority অনুযায়ী সাজানো
                       </span>
                     </div>
 
-                    {/* Discount rows */}
                     {detail.rows.map(row => (
                       <ReportDiscountRow
                         key={row.discount_id || row.discount_code}
@@ -1320,79 +1457,83 @@ export default function DiscountsPage() {
           ) : (
             <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--c-border)' }}>
               <div style={{ overflowX: 'auto' }}>
-                <table className="w-full text-sm" style={{ borderCollapse: 'collapse', minWidth: 860 }}>
+                <table className="w-full text-sm" style={{ borderCollapse: 'collapse', minWidth: 980 }}>
                   <thead>
                     <tr style={{ background: 'var(--c-surface2)', borderBottom: '1px solid var(--c-border)' }}>
-                      {['P', 'Discount Name', 'Code', 'Rules', 'Eff. From', 'Eff. To', 'Status', 'Actions'].map(h => (
+                      {['P', 'Discount Name', 'Code', 'Rules', 'Reward Summary', 'Effective', 'Status', 'Actions'].map(h => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-semibold"
                             style={{ color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.map((d, i) => (
-                      <tr key={d.discount_id}
-                          style={{
-                            background: i%2===0 ? 'var(--c-card)' : 'var(--c-surface)',
-                            borderBottom: '1px solid var(--c-border)',
-                          }}>
-                        <td className="px-4 py-3">
-                          <PriorityCell priority={d.priority ?? 99} discountId={d.discount_id} onSave={handlePrioritySave} />
-                        </td>
-                        <td className="px-4 py-3 font-semibold" style={{ color: 'var(--c-text)' }}>
-                          {d.discount_name}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="font-mono text-xs px-2 py-0.5 rounded"
-                                style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
-                            {d.discount_code}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <RulesCell rules={d.rules} />
-                        </td>
-                        <td className="px-4 py-3 text-xs" style={{ color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>
-                          {fmtDate(d.effective_from)}
-                        </td>
-                        <td className="px-4 py-3 text-xs" style={{ whiteSpace: 'nowrap' }}>
-                          {d.is_lifetime
-                            ? <span className="px-1.5 py-0.5 rounded text-xs"
-                                    style={{ background: 'rgba(76,175,80,0.12)', color: '#4CAF50' }}>আজীবন</span>
-                            : <span style={{ color: 'var(--c-muted)' }}>{fmtDate(d.effective_to)}</span>
-                          }
-                        </td>
-                        <td className="px-4 py-3">
-                          <button onClick={() => handleToggle(d)} title={d.is_active ? 'Click to deactivate' : 'Click to activate'}>
-                            <span className="text-xs px-2 py-0.5 rounded"
-                                  style={{
-                                    background: d.is_active ? 'rgba(76,175,80,0.12)' : 'rgba(144,164,174,0.12)',
-                                    color:      d.is_active ? '#4CAF50' : '#90A4AE',
-                                  }}>
-                              {d.is_active ? 'সক্রিয়' : 'বন্ধ'}
+                    {filtered.map((d, i) => {
+                      const ps = priorityStyle(d.priority ?? 99)
+                      return (
+                        <tr key={d.discount_id}
+                            style={{
+                              background: i%2===0 ? 'var(--c-card)' : 'var(--c-surface)',
+                              borderBottom: '1px solid var(--c-border)',
+                            }}>
+                          <td className="px-4 py-3">
+                            <PriorityCell priority={d.priority ?? 99} discountId={d.discount_id} onSave={handlePrioritySave} />
+                          </td>
+                          <td className="px-4 py-3 font-semibold" style={{ color: 'var(--c-text)' }}>
+                            {d.discount_name}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="font-mono text-xs px-2 py-0.5 rounded"
+                                  style={{ background: 'rgba(4,170,109,0.12)', color: '#04AA6D' }}>
+                              {d.discount_code}
                             </span>
-                          </button>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5">
-                            <button onClick={() => setDetail(d)} title="View"
-                              className="w-7 h-7 rounded flex items-center justify-center"
-                              style={{ background: 'rgba(33,150,243,0.12)' }}>
-                              <Eye size={12} style={{ color: '#64B5F6' }} />
+                          </td>
+                          <td className="px-4 py-3">
+                            <RulesCell rules={d.rules} />
+                          </td>
+                          <td className="px-4 py-3">
+                            <RewardSummary rules={d.rules} />
+                          </td>
+                          <td className="px-4 py-3 text-xs" style={{ color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>
+                            {fmtDate(d.effective_from)}
+                            <span style={{ color: 'var(--c-border)', margin: '0 4px' }}>→</span>
+                            {d.is_lifetime
+                              ? <span style={{ color: '#4CAF50' }}>আজীবন</span>
+                              : (d.effective_to ? fmtDate(d.effective_to) : '—')
+                            }
+                          </td>
+                          <td className="px-4 py-3">
+                            <button onClick={() => handleToggle(d)} title={d.is_active ? 'Click to deactivate' : 'Click to activate'}>
+                              <span className="text-xs px-2 py-0.5 rounded"
+                                    style={{
+                                      background: d.is_active ? 'rgba(76,175,80,0.12)' : 'rgba(239,83,80,0.1)',
+                                      color:      d.is_active ? '#4CAF50' : '#EF5350',
+                                    }}>
+                                {d.is_active ? 'সক্রিয়' : 'বন্ধ'}
+                              </span>
                             </button>
-                            <button onClick={() => setModal(d)} title="Edit"
-                              className="w-7 h-7 rounded flex items-center justify-center"
-                              style={{ background: 'var(--c-surface2)' }}>
-                              <Edit2 size={12} style={{ color: 'var(--c-muted)' }} />
-                            </button>
-                            <button onClick={() => handleDelete(d)} title="Delete"
-                              className="w-7 h-7 rounded flex items-center justify-center"
-                              style={{ background: 'rgba(244,67,54,0.12)' }}>
-                              <Trash2 size={12} style={{ color: '#ef9a9a' }} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5">
+                              <button onClick={() => setDetail(d)} title="View"
+                                className="w-7 h-7 rounded flex items-center justify-center"
+                                style={{ background: 'rgba(33,150,243,0.12)' }}>
+                                <Eye size={12} style={{ color: '#64B5F6' }} />
+                              </button>
+                              <button onClick={() => setModal(d)} title="Edit"
+                                className="w-7 h-7 rounded flex items-center justify-center"
+                                style={{ background: 'var(--c-surface2)' }}>
+                                <Edit2 size={12} style={{ color: 'var(--c-muted)' }} />
+                              </button>
+                              <button onClick={() => handleDelete(d)} title="Delete"
+                                className="w-7 h-7 rounded flex items-center justify-center"
+                                style={{ background: 'rgba(244,67,54,0.12)' }}>
+                                <Trash2 size={12} style={{ color: '#ef9a9a' }} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

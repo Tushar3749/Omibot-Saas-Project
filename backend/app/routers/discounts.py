@@ -223,6 +223,9 @@ def _report_month_detail(tid: str, year: int, month: int) -> dict:
             "total_discount_amount": round(odata.get("total", 0.0), 2),
             "is_active":             disc.get("is_active", True),
             "priority":              int(disc.get("priority") or 99),
+            "effective_from":        disc.get("effective_from"),
+            "effective_to":          disc.get("effective_to"),
+            "is_lifetime":           disc.get("is_lifetime", False),
         })
 
     result_rows.sort(key=lambda r: (r["priority"], -r["total_discount_amount"]))

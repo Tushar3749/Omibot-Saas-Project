@@ -258,6 +258,9 @@ export interface DiscountReportRow {
   total_discount_amount: number
   is_active: boolean
   priority: number
+  effective_from?: string | null
+  effective_to?: string | null
+  is_lifetime?: boolean
 }
 
 export interface DiscountMonthSummary {
