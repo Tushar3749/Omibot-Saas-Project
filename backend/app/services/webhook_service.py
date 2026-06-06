@@ -61,6 +61,35 @@ def _is_return_trigger(text: str) -> bool:
     return any(kw in t for kw in _RETURN_TRIGGERS)
 
 
+# ── Abuse & sentiment detection ───────────────────────────────────────────────
+
+_ABUSE_WORDS = [
+    "হেডা", "বাল", "মাগি", "মাগী", "চোদা", "মাদারচোদ", "শালা", "হারামি",
+    "বেশ্যা", "গাধা", "বোকাচোদা", "খানকি", "কুত্তা", "শুওরের বাচ্চা",
+    "shala", "harami", "madarchod", "khankir",
+]
+
+_ANGRY_KEYWORDS    = ["কেন", "কবে", "কই", "বলছ না", "দিচ্ছ না", "কেন দিচ্ছ না", "কোথায় গেল"]
+_FRUSTRATED_KEYWORDS = ["আবার", "এখনো", "কতক্ষণ", "বুঝছ না", "বুঝলে না", "আগেও বললাম", "কতবার বলব"]
+
+
+def _detect_abuse(text: str) -> bool:
+    t = text.lower()
+    return any(w.lower() in t for w in _ABUSE_WORDS)
+
+
+def _detect_sentiment(text: str) -> str:
+    """Returns 'angry', 'frustrated', or '' based on message heuristics."""
+    t = text.strip()
+    exclaim_count = t.count("!") + t.count("！")
+    caps_ratio    = sum(1 for c in t if c.isupper()) / max(len(t), 1)
+    if exclaim_count >= 2 or caps_ratio > 0.4 or any(k in t for k in _ANGRY_KEYWORDS):
+        return "angry"
+    if any(k in t for k in _FRUSTRATED_KEYWORDS):
+        return "frustrated"
+    return ""
+
+
 def _get_delivered_orders_for_return(tenant_id: str, phone: str, window_days: int) -> list[dict]:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
     result = (
@@ -1291,7 +1320,11 @@ async def process_message(
     conv            = get_or_create_conversation(tenant_id, sender_id, platform)
     conversation_id = conv["conversation_id"]
 
-    # Save customer message (use first image URL as content if no text)
+    # Fetch history BEFORE saving current message — prevents context duplication in AI
+    messages = get_recent_messages(conversation_id, limit=20)
+    summary  = conv.get("conversation_summary")
+
+    # Save customer message immediately (all paths need this)
     content_to_save = message_text or (f"[Image: {image_urls[0]}]" if image_urls else "")
     if content_to_save:
         save_message(conversation_id, tenant_id, "customer", content_to_save)
@@ -1324,6 +1357,31 @@ async def process_message(
                     return
             except Exception:
                 pass
+
+    # ── 0.5. Abuse detection ──────────────────────────────────────────────────
+    if message_text and _detect_abuse(message_text):
+        abusive_count = state.get("abusive_count", 0) + 1
+        state = {**state, "abusive_count": abusive_count}
+        if abusive_count >= 3:
+            supabase.table("conversations").update({
+                "is_ai_active": False,
+                "conversation_state": state,
+            }).eq("conversation_id", conversation_id).execute()
+            escalation = (
+                "আমি আপনার সমস্যা সমাধানে অক্ষম।\n"
+                "আমাদের টিম শীঘ্রই যোগাযোগ করবে।"
+            )
+            save_message(conversation_id, tenant_id, "bot", escalation)
+            send_reply(sender_id, escalation, plain_token)
+            return
+        _set_conv_state(conversation_id, state)
+        calm_reply = (
+            "আমি আপনাকে সাহায্য করতে এখানে আছি।\n"
+            "আপনার কি কোনো পণ্য দরকার বা অন্য কিছু জানতে চান?"
+        )
+        save_message(conversation_id, tenant_id, "bot", calm_reply)
+        send_reply(sender_id, calm_reply, plain_token)
+        return
 
     # ── 1. OTP Flow ───────────────────────────────────────────────────────────
     if otp_flow and message_text:
@@ -1425,8 +1483,7 @@ async def process_message(
         logger.warning(f"Discount engine error: {_de}")
 
     # ── 8. Normal AI flow ─────────────────────────────────────────────────────
-    messages = get_recent_messages(conversation_id)
-    summary  = conv.get("conversation_summary")
+    sentiment = _detect_sentiment(message_text) if message_text else ""
 
     result = await ai_service.generate_reply(
         tenant_id=tenant_id,
@@ -1437,6 +1494,7 @@ async def process_message(
         conversation_state=state,
         conversation_summary=summary,
         discount_context=discount_ctx,
+        sentiment_hint=sentiment,
     )
 
     reply_text   = result["reply"]

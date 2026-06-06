@@ -95,7 +95,7 @@ class AIService:
 
     # ── System Prompt ─────────────────────────────────────────────────────────
 
-    def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None) -> str:
+    def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None, sentiment_hint: str = "") -> str:
         bot_name    = ai_config.get("bot_name", "Assistant")
         language    = ai_config.get("language", "bangla")
         base_prompt = ai_config.get("system_prompt", "")
@@ -159,12 +159,27 @@ class AIService:
             else "\n[Knowledge Base: কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি।]"
         )
 
+        sentiment_block = (
+            "\n[আচরণ নির্দেশনা — গালি ও আবেগ সনাক্তকরণ]\n"
+            "• গালিগালাজ (শালা, হারামি, মাদারচোদ, বাল ইত্যাদি) পেলে সরাসরি গালিতে সাড়া দিও না। "
+            "শান্তভাবে বলো: 'আমি আপনাকে সাহায্য করতে এখানে আছি। "
+            "আপনার কি কোনো পণ্য দরকার বা অন্য কিছু জানতে চান?'\n"
+            "• রাগী বার্তায় (একাধিক !!!, CAPS, কেন/কবে/কই বারবার): সহানুভূতি দেখাও এবং সাহায্য করো। "
+            "বলো: 'আমি বুঝতে পারছি আপনি বিরক্ত। আমি এখনই সাহায্য করছি।' — তারপর সমাধান দাও।\n"
+            "• হতাশ বার্তায় (আবার/এখনো/কতক্ষণ/বুঝছ না): পূর্বের উত্তর পুনরাবৃত্তি না করে "
+            "সরাসরি ও স্পষ্টভাবে উত্তর দাও।\n"
+        )
+        if sentiment_hint == "angry":
+            sentiment_block += "[⚠️ বর্তমান বার্তায় রাগের চিহ্ন শনাক্ত হয়েছে — সহানুভূতিশীলভাবে সাড়া দাও।]\n"
+        elif sentiment_hint == "frustrated":
+            sentiment_block += "[⚠️ বর্তমান বার্তায় হতাশার চিহ্ন শনাক্ত হয়েছে — সরাসরি ও স্পষ্ট উত্তর দাও।]\n"
+
         return (
             f"{protection}\n\n"
             f"তোমার নাম: {bot_name}\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
-            f"{forbidden_instr}{state_instr}{discount_block}"
+            f"{forbidden_instr}{state_instr}{discount_block}{sentiment_block}"
             f"{rag_block}\n\n"
             "গুরুত্বপূর্ণ নিয়ম:\n"
             "- সবসময় বিনয়ী ও helpful থাকো।\n"
@@ -203,6 +218,7 @@ class AIService:
         conversation_state: dict,
         conversation_summary: Optional[str] = None,
         discount_context: Optional[dict] = None,
+        sentiment_hint: str = "",
     ) -> dict:
         """
         Returns:
@@ -222,7 +238,7 @@ class AIService:
         )
 
         # 4. System prompt
-        system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context)
+        system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint)
 
         # 5. Build contents list for Gemini (history + current message)
         contents: list[genai_types.Content] = []
