@@ -22,6 +22,8 @@ from app.services.rag_service import RAGService
 class TestBotRequest(BaseModel):
     message: str
     customer_phone: Optional[str] = None
+    quick_reply_payload: Optional[str] = None
+    order_state: Optional[dict] = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -120,10 +122,52 @@ async def test_bot_chat(
         except Exception as _de:
             logger.warning(f"Test bot discount engine error: {_de}")
 
+    # ── Order flow simulation hint ────────────────────────────────────────────
+    order_flow_note: Optional[dict] = None
+    effective_message = body.message
+
+    if body.quick_reply_payload:
+        payload_labels = {
+            "ORDER_START":   "অর্ডার শুরু করুন",
+            "ORDER_INFO":    "আরো তথ্য",
+            "ORDER_CONFIRM": "অর্ডার নিশ্চিত",
+            "ORDER_CANCEL":  "অর্ডার বাতিল",
+        }
+        label = payload_labels.get(body.quick_reply_payload, body.quick_reply_payload)
+        order_flow_note = {
+            "payload":      body.quick_reply_payload,
+            "label":        label,
+            "description":  f"Quick Reply tapped: [{label}] (payload: {body.quick_reply_payload})",
+        }
+        effective_message = f"[Quick Reply: {label}] {body.message}".strip()
+
+    if body.order_state:
+        step = body.order_state.get("state", "")
+        step_hints = {
+            "triggered":      "Bot showed order QR buttons. Waiting for ORDER_START or ORDER_INFO.",
+            "asking_name":    "Bot asked for customer name.",
+            "asking_phone":   "Bot asked for phone number (01XXXXXXXXX format).",
+            "asking_address": "Bot asked for delivery address.",
+            "confirming":     "Bot showed order summary. Waiting for ORDER_CONFIRM or ORDER_CANCEL.",
+        }
+        hint = step_hints.get(step, f"Order flow step: {step}")
+        if order_flow_note:
+            order_flow_note["order_step"] = hint
+        else:
+            order_flow_note = {"order_step": hint}
+
     # ── Build system prompt ───────────────────────────────────────────────────
     system_prompt = _build_system_prompt(ai_cfg, products)
     if rag_ctx:
         system_prompt += f"\n\n## জ্ঞানভাণ্ডার থেকে প্রাসঙ্গিক তথ্য:\n{rag_ctx}"
+
+    if order_flow_note:
+        system_prompt += (
+            "\n\n## অর্ডার ফ্লো সিমুলেশন\n"
+            "এটি একটি অর্ডার ফ্লো টেস্ট। "
+            "অর্ডার নেওয়ার সময় নাম, ফোন, ঠিকানা সংগ্রহ করো এবং "
+            "Quick Reply বোতাম সম্পর্কে সচেতন থাকো।"
+        )
     pct_d  = discount_ctx.get("final_discount_pct", 0)
     flat_d = discount_ctx.get("final_discount_flat", 0)
     msg_d  = discount_ctx.get("discount_message", "")
@@ -147,7 +191,7 @@ async def test_bot_chat(
     try:
         response = _client.models.generate_content(
             model    = settings.GEMINI_MODEL,
-            contents = body.message,
+            contents = effective_message,
             config   = genai_types.GenerateContentConfig(
                 system_instruction = system_prompt,
                 max_output_tokens  = 1024,
@@ -162,9 +206,24 @@ async def test_bot_chat(
             detail=f"AI সার্ভিস সাময়িকভাবে অনুপলব্ধ: {exc}"
         )
 
+    # Suggest what QR buttons the real bot would show next
+    quick_replies_hint: Optional[list] = None
+    if "অর্ডার করতে চান" in reply or "অর্ডার করবেন" in reply:
+        quick_replies_hint = [
+            {"title": "✅ অর্ডার করি",  "payload": "ORDER_START"},
+            {"title": "❓ আরো জানি",    "payload": "ORDER_INFO"},
+        ]
+    elif "নিশ্চিত করবেন" in reply or "অর্ডার সামারি" in reply:
+        quick_replies_hint = [
+            {"title": "✅ নিশ্চিত করুন", "payload": "ORDER_CONFIRM"},
+            {"title": "❌ বাতিল",        "payload": "ORDER_CANCEL"},
+        ]
+
     return {
-        "message":          body.message,
-        "reply":            reply,
-        "model":            settings.GEMINI_MODEL,
-        "discount_context": discount_ctx or None,
+        "message":           body.message,
+        "reply":             reply,
+        "model":             settings.GEMINI_MODEL,
+        "discount_context":  discount_ctx or None,
+        "order_flow":        order_flow_note,
+        "quick_replies_hint": quick_replies_hint,
     }

@@ -60,8 +60,9 @@ async def _handle_webhook(request: Request, platform: str, background_tasks: Bac
             if sender_id == page_id:
                 continue
 
-            text        = message.get("text", "")
-            attachments = message.get("attachments", [])
+            text                = message.get("text", "")
+            attachments         = message.get("attachments", [])
+            quick_reply_payload = (message.get("quick_reply") or {}).get("payload")
 
             # Extract image URLs from attachments
             image_urls = [
@@ -70,8 +71,8 @@ async def _handle_webhook(request: Request, platform: str, background_tasks: Bac
                 if a.get("type") == "image" and a.get("payload", {}).get("url")
             ]
 
-            # Skip if no text AND no images
-            if not text and not image_urls:
+            # Skip if no text AND no images AND no quick reply
+            if not text and not image_urls and not quick_reply_payload:
                 continue
 
             page_info = get_tenant_by_page_id(page_id)
@@ -88,6 +89,7 @@ async def _handle_webhook(request: Request, platform: str, background_tasks: Bac
                 platform=platform,
                 access_token=page_info["access_token_encrypted"],
                 image_urls=image_urls or None,
+                quick_reply_payload=quick_reply_payload,
             )
 
     return {"status": "ok"}

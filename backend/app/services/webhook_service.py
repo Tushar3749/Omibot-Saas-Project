@@ -32,6 +32,21 @@ META_GRAPH_API = "https://graph.facebook.com/v19.0"
 ai_service     = AIService()
 memory_service = MemoryService()
 
+# ── Order flow trigger keywords ───────────────────────────────────────────────
+
+_ORDER_TRIGGERS = [
+    "অর্ডার করতে চাই", "অর্ডার করব", "অর্ডার দিতে চাই", "অর্ডার করি",
+    "কিনতে চাই", "কিনব", "নিতে চাই", "নেব", "নিয়ে যাব",
+    "বুক করব", "বুকিং দিতে চাই", "অর্ডার করতে চাইছি",
+    "order korte chai", "order debo", "buy korbo", "nite chai",
+]
+
+
+def _is_order_trigger(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in _ORDER_TRIGGERS)
+
+
 # ── Return flow trigger keywords ──────────────────────────────────────────────
 
 _RETURN_TRIGGERS = [
@@ -478,6 +493,29 @@ def send_reply(recipient_id: str, text: str, access_token: str) -> bool:
         return False
 
 
+def send_quick_reply(recipient_id: str, text: str, quick_replies: list, access_token: str) -> bool:
+    """Send a message with Quick Reply buttons."""
+    try:
+        resp = httpx.post(
+            f"{META_GRAPH_API}/me/messages",
+            json={
+                "recipient": {"id": recipient_id},
+                "message": {
+                    "text": text,
+                    "quick_replies": quick_replies,
+                },
+                "messaging_type": "RESPONSE",
+            },
+            params={"access_token": access_token},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"send_quick_reply error to {recipient_id}: {e}")
+        return False
+
+
 def send_image_attachment(recipient_id: str, image_url: str, access_token: str) -> bool:
     """Send an image attachment (reusable) via Meta Graph API."""
     try:
@@ -572,6 +610,345 @@ def _generate_discount_code() -> str:
     chars = string.ascii_uppercase + string.digits
     rand_part = "".join(random.choices(chars, k=4))
     return f"DISC-{today}-{rand_part}"
+
+
+def _gen_order_ref() -> str:
+    import random
+    today = datetime.now().strftime("%Y%m%d")
+    return f"ORD-{today}-{random.randint(0, 9999):04d}"
+
+
+def _is_mid_order_interruption(text: str, current_step: str) -> bool:
+    """Return True if the text looks like a question/comment rather than the expected input."""
+    t = text.strip()
+    if "?" in t or "?" in t:
+        return True
+    if current_step == "asking_phone" and len(t) > 20:
+        return True
+    if current_step in ("asking_phone", "asking_address"):
+        _Q = ["কি ", "কেন", "কোথায়", "কত ", "দাম", "মান", "ভালো", "কবে", "কিভাবে", "কীভাবে", "জানতে চাই"]
+        t_lower = t.lower()
+        if any(q in t_lower for q in _Q) and len(t) > 10:
+            return True
+    return False
+
+
+async def _pause_order_flow(
+    tenant_id: str,
+    conversation_id: str,
+    sender_id: str,
+    question: str,
+    state: dict,
+    order_flow: dict,
+    current_step: str,
+    ai_config: dict,
+    plain_token: str,
+) -> bool:
+    """Answer an interruption question via AI, then restore order flow step."""
+    _set_conv_state(conversation_id, {**state, "order_flow": {
+        **order_flow, "state": "paused",
+        "paused_at": current_step, "paused_question": question,
+    }})
+
+    discount_ctx: dict = {}
+    try:
+        discount_ctx = get_discount_ctx(tenant_id=tenant_id, customer_platform_id=sender_id)
+    except Exception:
+        pass
+
+    recent_msgs = get_recent_messages(conversation_id)
+    result = await ai_service.generate_reply(
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        customer_message=question,
+        ai_config=ai_config,
+        raw_messages=recent_msgs,
+        conversation_state=state,
+        conversation_summary=None,
+        discount_context=discount_ctx,
+    )
+    ai_reply = result.get("reply", "")
+
+    step_prompts = {
+        "asking_name":    "আপনার নামটি দিন:",
+        "asking_phone":   "ফোন নম্বর দিন (01XXXXXXXXX):",
+        "asking_address": "ডেলিভারি ঠিকানা দিন:",
+    }
+    reminder = step_prompts.get(current_step, "অর্ডার চালিয়ে যেতে পারেন।")
+
+    # Resume from where we paused
+    _set_conv_state(conversation_id, {**state, "order_flow": {
+        **order_flow, "state": current_step, "paused_at": None, "paused_question": None,
+    }})
+
+    full_reply = f"{ai_reply}\n\n⬆️ অর্ডার চলমান — {reminder}"
+    save_message(conversation_id, tenant_id, "bot", full_reply)
+    send_reply(sender_id, full_reply, plain_token)
+    return True
+
+
+_ORDER_QR_BUTTONS = [
+    {"content_type": "text", "title": "✅ অর্ডার করি",  "payload": "ORDER_START"},
+    {"content_type": "text", "title": "❓ আরো জানি",    "payload": "ORDER_INFO"},
+]
+_CONFIRM_QR_BUTTONS = [
+    {"content_type": "text", "title": "✅ নিশ্চিত করুন", "payload": "ORDER_CONFIRM"},
+    {"content_type": "text", "title": "❌ বাতিল",        "payload": "ORDER_CANCEL"},
+]
+
+
+async def _handle_order_flow(
+    tenant_id: str,
+    conversation_id: str,
+    sender_id: str,
+    message_text: str,
+    quick_reply_payload: Optional[str],
+    state: dict,
+    order_flow: dict,
+    ai_config: dict,
+    plain_token: str,
+) -> bool:
+    """
+    Order flow state machine.
+    Returns True if the message was fully handled (no further processing needed).
+    """
+    flow_state = order_flow.get("state", "")
+    msg        = (message_text or "").strip()
+    msg_lower  = msg.lower()
+    payload    = quick_reply_payload or ""
+
+    # Universal cancel — works in any active step except the first trigger
+    if payload == "ORDER_CANCEL" or (
+        flow_state not in ("triggered", "") and
+        any(w in msg_lower for w in ["বাতিল", "cancel"])
+    ):
+        _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "order_flow"})
+        reply = "❌ অর্ডার বাতিল করা হয়েছে।"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
+
+    # ── TRIGGERED: waiting for QR response ────────────────────────────────────
+    if flow_state == "triggered":
+        cart = order_flow.get("cart", [])
+
+        should_start = (
+            payload == "ORDER_START"
+            or any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "করি", "দিতে চাই", "নেব", "নিব"])
+        )
+        if should_start:
+            _set_conv_state(conversation_id, {**state, "order_flow": {
+                **order_flow, "state": "asking_name", "misses": 0,
+            }})
+            reply = "চমৎকার! 😊 আপনার নামটি বলুন:"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+
+        # ORDER_INFO or any other message → answer via AI, re-show QR
+        question = msg or "এই পণ্য সম্পর্কে আরো তথ্য দিন"
+        discount_ctx: dict = {}
+        try:
+            discount_ctx = get_discount_ctx(tenant_id=tenant_id, customer_platform_id=sender_id)
+        except Exception:
+            pass
+        recent_msgs = get_recent_messages(conversation_id)
+        result = await ai_service.generate_reply(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            customer_message=question,
+            ai_config=ai_config,
+            raw_messages=recent_msgs,
+            conversation_state=state,
+            conversation_summary=None,
+            discount_context=discount_ctx,
+        )
+        ai_reply = result.get("reply", "আরো কিছু জানতে চাইলে বলুন।")
+        qr_text  = f"{ai_reply}\n\n---\nঅর্ডার করবেন?"
+        save_message(conversation_id, tenant_id, "bot", qr_text)
+        send_quick_reply(sender_id, qr_text, _ORDER_QR_BUTTONS, plain_token)
+        return True
+
+    # ── ASKING NAME ────────────────────────────────────────────────────────────
+    if flow_state == "asking_name":
+        if not msg:
+            return False
+        if _is_mid_order_interruption(msg, "asking_name"):
+            return await _pause_order_flow(
+                tenant_id, conversation_id, sender_id, msg,
+                state, order_flow, "asking_name", ai_config, plain_token,
+            )
+        if len(msg) < 2:
+            reply = "আপনার পুরো নামটি বলুন:"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+        _set_conv_state(conversation_id, {**state, "order_flow": {
+            **order_flow, "state": "asking_phone", "customer_name": msg, "misses": 0,
+        }})
+        reply = f"ধন্যবাদ! 📞 আপনার ফোন নম্বর দিন (01XXXXXXXXX):"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
+
+    # ── ASKING PHONE ───────────────────────────────────────────────────────────
+    if flow_state == "asking_phone":
+        if not msg:
+            return False
+        phone = normalize_bd_phone(msg)
+        if not phone:
+            if _is_mid_order_interruption(msg, "asking_phone"):
+                return await _pause_order_flow(
+                    tenant_id, conversation_id, sender_id, msg,
+                    state, order_flow, "asking_phone", ai_config, plain_token,
+                )
+            misses = order_flow.get("misses", 0) + 1
+            if misses >= 3:
+                _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "order_flow"})
+                reply = "বৈধ ফোন নম্বর পাইনি। অর্ডার বাতিল। আবার 'অর্ডার করতে চাই' লিখুন।"
+                save_message(conversation_id, tenant_id, "bot", reply)
+                send_reply(sender_id, reply, plain_token)
+                return True
+            _set_conv_state(conversation_id, {**state, "order_flow": {**order_flow, "misses": misses}})
+            reply = f"সঠিক বাংলাদেশি নম্বর দিন (যেমন: 01712345678) — {3 - misses}টি সুযোগ বাকি"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+        _set_conv_state(conversation_id, {**state, "order_flow": {
+            **order_flow, "state": "asking_address", "customer_phone": phone, "misses": 0,
+        }})
+        reply = "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
+
+    # ── ASKING ADDRESS ─────────────────────────────────────────────────────────
+    if flow_state == "asking_address":
+        if not msg:
+            return False
+        if _is_mid_order_interruption(msg, "asking_address"):
+            return await _pause_order_flow(
+                tenant_id, conversation_id, sender_id, msg,
+                state, order_flow, "asking_address", ai_config, plain_token,
+            )
+        if len(msg) < 5:
+            reply = "সম্পূর্ণ ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+
+        cart           = order_flow.get("cart", [])
+        customer_name  = order_flow.get("customer_name", "")
+        customer_phone = order_flow.get("customer_phone", "")
+
+        _set_conv_state(conversation_id, {**state, "order_flow": {
+            **order_flow, "state": "confirming", "delivery_address": msg, "misses": 0,
+        }})
+
+        cart_lines: list[str] = []
+        total = 0.0
+        if cart:
+            for item in cart:
+                price = float(item.get("price") or 0)
+                qty   = int(item.get("quantity") or 1)
+                total += price * qty
+                cart_lines.append(f"• {item['product_name']} × {qty} — ৳{price:.0f}")
+        else:
+            int_product = state.get("interested_product")
+            neg_price   = state.get("negotiated_price")
+            if int_product:
+                price_str = f" — ৳{int(neg_price)}" if neg_price else ""
+                cart_lines.append(f"• {int_product} × 1{price_str}")
+                if neg_price:
+                    total = float(neg_price)
+        if not cart_lines:
+            cart_lines = ["• (পণ্য কথোপকথন অনুযায়ী)"]
+
+        total_text = f"৳{total:.0f}" if total > 0 else "আলোচনা অনুযায়ী"
+        summary = (
+            f"📋 অর্ডার সামারি:\n\n"
+            f"{chr(10).join(cart_lines)}\n\n"
+            f"👤 নাম: {customer_name}\n"
+            f"📞 ফোন: {customer_phone}\n"
+            f"📍 ঠিকানা: {msg}\n"
+            f"💰 মোট: {total_text}\n\n"
+            f"অর্ডারটি নিশ্চিত করবেন?"
+        )
+        save_message(conversation_id, tenant_id, "bot", summary)
+        send_quick_reply(sender_id, summary, _CONFIRM_QR_BUTTONS, plain_token)
+        return True
+
+    # ── CONFIRMING ─────────────────────────────────────────────────────────────
+    if flow_state == "confirming":
+        confirmed = (
+            payload == "ORDER_CONFIRM"
+            or any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে"])
+        )
+        cancelled = (
+            payload == "ORDER_CANCEL"
+            or any(w in msg_lower for w in ["না", "no", "বাতিল", "cancel"])
+        )
+
+        if cancelled:
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "order_flow"})
+            reply = "❌ অর্ডার বাতিল করা হয়েছে।"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+
+        if confirmed:
+            cart             = order_flow.get("cart", [])
+            customer_name    = order_flow.get("customer_name", "")
+            customer_phone   = order_flow.get("customer_phone", "")
+            delivery_address = order_flow.get("delivery_address", "")
+
+            product_name = state.get("interested_product") or "পণ্য"
+            product_id   = None
+            price        = state.get("negotiated_price")
+            quantity     = 1
+
+            if cart:
+                first        = cart[0]
+                product_name = first.get("product_name", product_name)
+                product_id   = first.get("product_id")
+                price        = first.get("price") or price
+                quantity     = int(first.get("quantity") or 1)
+
+            order_data = {
+                "product_name":     product_name,
+                "product_id":       product_id,
+                "quantity":         quantity,
+                "agreed_price":     float(price) if price else None,
+                "customer_name":    customer_name,
+                "customer_phone":   customer_phone,
+                "delivery_address": delivery_address,
+                "notes":            None,
+            }
+            discount_summary = save_order(tenant_id, conversation_id, sender_id, order_data)
+            order_ref        = _gen_order_ref()
+
+            _set_conv_state(conversation_id, {k: v for k, v in state.items() if k != "order_flow"})
+
+            confirm_text = (
+                f"✅ অর্ডার সফলভাবে নেওয়া হয়েছে!\n\n"
+                f"🔖 রেফারেন্স: {order_ref}\n"
+                f"📦 পণ্য: {product_name}\n"
+                f"📞 ফোন: {customer_phone}\n\n"
+                f"আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏"
+            )
+            if discount_summary:
+                confirm_text += discount_summary
+            save_message(conversation_id, tenant_id, "bot", confirm_text)
+            send_reply(sender_id, confirm_text, plain_token)
+            return True
+
+        # Neither confirm nor cancel — re-prompt
+        re_prompt = "অর্ডার নিশ্চিত করতে ✅ বা বাতিল করতে ❌ বোতাম চাপুন।"
+        save_message(conversation_id, tenant_id, "bot", re_prompt)
+        send_quick_reply(sender_id, re_prompt, _CONFIRM_QR_BUTTONS, plain_token)
+        return True
+
+    return False
 
 
 def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data: dict) -> Optional[str]:
@@ -907,6 +1284,7 @@ async def process_message(
     platform: str,
     access_token: str,
     image_urls: Optional[list[str]] = None,
+    quick_reply_payload: Optional[str] = None,
 ) -> None:
     """Full message pipeline."""
 
@@ -928,6 +1306,24 @@ async def process_message(
     state       = conv.get("conversation_state") or {}
     otp_flow    = state.get("otp_flow")
     return_flow = state.get("return_flow")
+    order_flow  = state.get("order_flow")
+
+    # ── 0. Abandoned order check ──────────────────────────────────────────────
+    if order_flow:
+        timeout_str = order_flow.get("order_timeout")
+        if timeout_str:
+            try:
+                timeout_dt = datetime.fromisoformat(timeout_str.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) > timeout_dt:
+                    state      = {k: v for k, v in state.items() if k != "order_flow"}
+                    order_flow = None
+                    _set_conv_state(conversation_id, state)
+                    reply = "⏰ আপনার অর্ডারের সময় শেষ হয়ে গেছে। নতুন অর্ডার করতে 'অর্ডার করতে চাই' লিখুন।"
+                    save_message(conversation_id, tenant_id, "bot", reply)
+                    send_reply(sender_id, reply, plain_token)
+                    return
+            except Exception:
+                pass
 
     # ── 1. OTP Flow ───────────────────────────────────────────────────────────
     if otp_flow and message_text:
@@ -945,6 +1341,15 @@ async def process_message(
         if reply is not None:
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
+            return
+
+    # ── 2.5 Active Order Flow ─────────────────────────────────────────────────
+    if order_flow and (message_text or quick_reply_payload):
+        handled = await _handle_order_flow(
+            tenant_id, conversation_id, sender_id, message_text,
+            quick_reply_payload, state, order_flow, ai_config, plain_token,
+        )
+        if handled:
             return
 
     # ── 3. Customer sent an image ─────────────────────────────────────────────
@@ -976,6 +1381,31 @@ async def process_message(
         reply = "আপনার ফোন নম্বরটি দিন (01XXXXXXXXX)"
         save_message(conversation_id, tenant_id, "bot", reply)
         send_reply(sender_id, reply, plain_token)
+        return
+
+    # ── 5.5 Order trigger (start new flow) ───────────────────────────────────
+    if message_text and _is_order_trigger(message_text) and not order_flow:
+        int_product = state.get("interested_product")
+        neg_price   = state.get("negotiated_price")
+        cart: list[dict] = []
+        if int_product:
+            cart = [{
+                "product_name": int_product,
+                "product_id":   None,
+                "quantity":     1,
+                "price":        float(neg_price) if neg_price else None,
+            }]
+        order_timeout = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        _set_conv_state(conversation_id, {**state, "order_flow": {
+            "state":         "triggered",
+            "cart":          cart,
+            "order_timeout": order_timeout,
+            "misses":        0,
+        }})
+        product_label = f"{int_product}" if int_product else "আপনার পছন্দের পণ্য"
+        qr_text = f"চমৎকার! {product_label} অর্ডার করতে চান? 🛍️"
+        save_message(conversation_id, tenant_id, "bot", qr_text)
+        send_quick_reply(sender_id, qr_text, _ORDER_QR_BUTTONS, plain_token)
         return
 
     # ── 6. OTP order-tracking start ───────────────────────────────────────────
