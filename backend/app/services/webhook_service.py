@@ -1,4 +1,4 @@
-"""
+﻿"""
 OmniBot SaaS — Webhook Processing Service
 Handles incoming Meta (Facebook / Instagram) webhook events:
   1. HMAC-SHA256 signature verification
@@ -643,8 +643,11 @@ def _generate_discount_code() -> str:
 
 def _gen_order_ref() -> str:
     import random
-    today = datetime.now().strftime("%Y%m%d")
-    return f"ORD-{today}-{random.randint(0, 9999):04d}"
+    import string
+    today  = datetime.now().strftime("%Y%m%d")
+    chars  = string.ascii_uppercase + string.digits
+    suffix = "".join(random.choices(chars, k=4))
+    return f"ORD-{today}-{suffix}"
 
 
 _CONFIRM_QR_BUTTONS = [
@@ -652,9 +655,15 @@ _CONFIRM_QR_BUTTONS = [
     {"content_type": "text", "title": "❌ বাতিল",        "payload": "ORDER_CANCEL"},
 ]
 
-_ORDER_FLOW_KEYS  = ("order_flow", "cart", "customer_name", "customer_phone", "delivery_address")
-_INTERRUPT_KEYS   = ("order_flow_interrupted", "interrupted_question", "order_flow_paused")
-_ALL_FLOW_KEYS    = _ORDER_FLOW_KEYS + _INTERRUPT_KEYS
+_ORDER_FLOW_KEYS = (
+    "order_flow", "cart", "customer_name", "customer_phone",
+    "delivery_address", "order_timeout",
+)
+_INTERRUPT_KEYS = (
+    "order_flow_interrupted", "interrupted_question",
+    "order_flow_paused", "paused_flow", "interruption_pending",
+)
+_ALL_FLOW_KEYS = _ORDER_FLOW_KEYS + _INTERRUPT_KEYS
 
 _INTERRUPT_QR_BUTTONS = [
     {"content_type": "text", "title": "বের হই",           "payload": "EXIT_FLOW_ANSWER"},
@@ -664,15 +673,17 @@ _INTERRUPT_QR_BUTTONS = [
 
 def _get_step_question(step: str) -> str:
     return {
-        "collecting_name":    "আপনার নাম কী?",
-        "collecting_phone":   "📞 আপনার ফোন নম্বর দিন (01XXXXXXXXX):",
-        "collecting_address": "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):",
-        "confirming":         "অর্ডার নিশ্চিত করতে 'হ্যাঁ' লিখুন অথবা বাতিল করতে 'বাতিল' লিখুন।",
+        "collecting_name":      "আপনার নাম কী?",
+        "collecting_phone":     "📞 আপনার ফোন নম্বর দিন (01XXXXXXXXX):",
+        "collecting_address":   "📍 ডেলিভারি ঠিকানা দিন (এলাকা ও জেলা সহ):",
+        "adding_more_products": "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ/না)",
+        "idle_with_cart":       "কোন পণ্য যোগ করতে চান?",
+        "confirming":           "অর্ডার নিশ্চিত করতে 'হ্যাঁ' লিখুন অথবা বাতিল করতে 'না' লিখুন।",
     }.get(step, "অর্ডার চালিয়ে যান।")
 
 
 def _is_expected_answer(step: str, msg: str, payload: str) -> bool:
-    """True if msg is a plausible direct answer for the current order step (not a side question)."""
+    """True when msg is a plausible direct answer for the current order step."""
     if payload in ("ORDER_CONFIRM", "ORDER_CANCEL", "EXIT_FLOW_ANSWER", "CONTINUE_ORDER"):
         return True
     if not msg:
@@ -680,19 +691,71 @@ def _is_expected_answer(step: str, msg: str, payload: str) -> bool:
     if "?" in msg or "？" in msg:
         return False
     msg_lower = msg.lower()
+    yes_no = ["হ্যাঁ", "হা", "yes", "ha", "hae", "না", "no", "na"]
     if step == "collecting_name":
-        return 2 <= len(msg) <= 60
+        digits_only = all(c.isdigit() or c.isspace() for c in msg)
+        return 2 <= len(msg) <= 60 and not digits_only
     if step == "collecting_phone":
         digits = "".join(c for c in msg if c.isdigit())
         return len(digits) >= 8
     if step == "collecting_address":
         question_kws = ["কত", "কেন", "কীভাবে", "কিভাবে", "কখন", "কবে", "পাঠাবেন", "চার্জ"]
-        return len(msg) >= 5 and not any(k in msg_lower for k in question_kws)
+        return len(msg) >= 10 and not any(k in msg_lower for k in question_kws)
+    if step in ("adding_more_products",):
+        return any(w in msg_lower for w in yes_no)
+    if step in ("idle_with_cart", "abandoned", "interruption_pending", "paused"):
+        return True
     if step == "confirming":
         words = ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে", "হ্যা",
-                 "না", "no", "বাতিল", "cancel"]
+                 "না", "no", "বাতিল", "cancel", "ha", "hae", "na"]
         return any(w in msg_lower for w in words)
     return True
+
+
+def _build_order_summary(state: dict) -> tuple[str, float]:
+    """Returns (formatted summary text, total amount)."""
+    cart             = state.get("cart") or []
+    customer_name    = state.get("customer_name", "")
+    customer_phone   = state.get("customer_phone", "")
+    delivery_address = state.get("delivery_address", "")
+
+    cart_lines: list[str] = []
+    total = 0.0
+    for item in cart:
+        price      = float(item.get("price") or 0)
+        qty        = int(item.get("qty") or item.get("quantity") or 1)
+        line_total = price * qty
+        total     += line_total
+        name       = item.get("name") or item.get("product_name", "পণ্য")
+        line       = f"🛒 {name} × {qty}"
+        if price > 0:
+            line += f" — ৳{line_total:.0f}"
+        cart_lines.append(line)
+
+    if not cart_lines:
+        int_product = state.get("interested_product")
+        neg_price   = state.get("negotiated_price")
+        if int_product:
+            cart_lines.append(f"🛒 {int_product} × 1")
+            if neg_price:
+                cart_lines.append(f"💰 মূল্য: ৳{int(neg_price)}")
+                total = float(neg_price)
+    if not cart_lines:
+        cart_lines = ["🛒 পণ্য (কথোপকথন অনুযায়ী)"]
+
+    total_text = f"৳{total:.0f}" if total > 0 else "আলোচনা অনুযায়ী"
+    summary = (
+        "📦 অর্ডার কনফার্ম করুন:\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n".join(cart_lines) + "\n"
+        + f"💰 মোট: {total_text}\n"
+        + f"👤 {customer_name}\n"
+        + f"📱 {customer_phone}\n"
+        + f"📍 {delivery_address}\n"
+        + "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        + "নিশ্চিত করতে 'হ্যাঁ' লিখুন অথবা বাতিল করতে 'না' লিখুন"
+    )
+    return summary, total
 
 
 def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -> dict:
@@ -769,10 +832,9 @@ async def _handle_strict_order_flow(
 ) -> bool:
     """
     Strict order collection state machine.
-    conversation_state.order_flow is a plain string:
-      collecting_name → collecting_phone → collecting_address → confirming
-    Returns True when the message is consumed (caller must return immediately).
-    Returns False only for an unrecognised step (state is cleared; caller may fall through).
+    Steps: collecting_name → collecting_phone → collecting_address
+           → adding_more_products → (idle_with_cart) → confirming
+    Returns True when the message is consumed; False to fall through to AI.
     """
     step      = state.get("order_flow", "")
     msg       = (message_text or "").strip()
@@ -785,36 +847,64 @@ async def _handle_strict_order_flow(
         save_message(conversation_id, tenant_id, "bot", reason)
         send_reply(sender_id, reason, plain_token)
 
-    # ── Universal cancel ──────────────────────────────────────────────────────
+    # ── 1. ABANDONED TIMEOUT ─────────────────────────────────────────────────
+    order_timeout = state.get("order_timeout")
+    if order_timeout and step not in ("", "abandoned"):
+        try:
+            deadline = datetime.fromisoformat(order_timeout)
+            if datetime.now() > deadline:
+                _cancel("⏰ অর্ডার সময়সীমা পেরিয়ে গেছে। নতুন অর্ডার দিতে আবার পণ্যের নাম লিখুন।")
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # ── 2. ABANDONED STEP ────────────────────────────────────────────────────
+    if step == "abandoned":
+        resume_kws = ["অর্ডার", "order", "কিনতে", "buy", "নিতে চাই", "দিন"]
+        if any(k in msg_lower for k in resume_kws) or payload:
+            clean = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+            _set_conv_state(conversation_id, clean)
+            return False
+        reminder = (
+            "📌 আপনার আগের অর্ডার বাতিল হয়ে গেছে। "
+            "নতুন অর্ডার দিতে পণ্যের নাম লিখুন।"
+        )
+        save_message(conversation_id, tenant_id, "bot", reminder)
+        send_reply(sender_id, reminder, plain_token)
+        return True
+
+    # ── 3. UNIVERSAL CANCEL ──────────────────────────────────────────────────
     if payload == "ORDER_CANCEL" or any(w in msg_lower for w in ["বাতিল", "cancel"]):
         _cancel()
         return True
 
-    # ── INTERRUPT: customer chose EXIT_FLOW_ANSWER (leave flow, get AI answer) ─
-    if payload == "EXIT_FLOW_ANSWER" or state.get("order_flow_interrupted"):
+    # ── 4. INTERRUPTION_PENDING ──────────────────────────────────────────────
+    if state.get("interruption_pending") or step == "interruption_pending":
         if payload == "CONTINUE_ORDER":
-            # Customer changed mind — stay in flow
             new_state = {**state}
-            new_state.pop("order_flow_interrupted", None)
+            new_state.pop("interruption_pending", None)
             new_state.pop("interrupted_question", None)
+            actual_step = new_state.get("order_flow") or "collecting_name"
+            if actual_step == "interruption_pending":
+                actual_step = "collecting_name"
+            new_state["order_flow"] = actual_step
             _set_conv_state(conversation_id, new_state)
-            re_ask = _get_step_question(step)
+            re_ask = _get_step_question(actual_step)
             save_message(conversation_id, tenant_id, "bot", re_ask)
             send_reply(sender_id, re_ask, plain_token)
             return True
 
         if payload == "EXIT_FLOW_ANSWER":
-            # Customer wants to exit temporarily — answer their saved question via AI
             interrupted_q = state.get("interrupted_question") or msg
-            new_state = {**state, "order_flow_paused": True}
-            new_state.pop("order_flow_interrupted", None)
+            actual_step = state.get("order_flow") or "collecting_name"
+            new_state = {**state, "paused_flow": actual_step, "order_flow": "paused"}
+            new_state.pop("interruption_pending", None)
             new_state.pop("interrupted_question", None)
             _set_conv_state(conversation_id, new_state)
 
             ai_answer = ""
             try:
-                from app.services.ai_service import generate_reply
-                ai_answer = await generate_reply(
+                ai_answer = await ai_service.generate_reply(
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                     user_message=interrupted_q,
@@ -823,29 +913,27 @@ async def _handle_strict_order_flow(
             except Exception:
                 ai_answer = "দুঃখিত, এই মুহূর্তে উত্তর দিতে পারছি না।"
 
-            reminder = "\n\n📌 আপনার অর্ডার সংরক্ষিত আছে। চালিয়ে যেতে 'অর্ডার চালু করুন' বলুন।"
+            reminder = "\n\n📌 আপনার অর্ডার সংরক্ষিত আছে। চালিয়ে যেতে 'অর্ডার চালু করুন' লিখুন।"
             full_reply = (ai_answer or "") + reminder
             save_message(conversation_id, tenant_id, "bot", full_reply)
             send_reply(sender_id, full_reply, plain_token)
             return True
 
-        # Still in interrupted state waiting for button press — re-show buttons
-        prompt = (
-            "আপনি এখন অর্ডার প্রক্রিয়ার মধ্যে আছেন।\n"
-            "কী করতে চান?"
-        )
+        # Still waiting for button — re-show
+        prompt = "আপনি এখন অর্ডার প্রক্রিয়ার মধ্যে আছেন। কী করতে চান?"
         save_message(conversation_id, tenant_id, "bot", prompt)
         send_quick_reply(sender_id, prompt, _INTERRUPT_QR_BUTTONS, plain_token)
         return True
 
-    # ── PAUSED: customer exited flow earlier, waiting for resume keyword ───────
-    if state.get("order_flow_paused"):
-        resume_kws = ["অর্ডার চালু করুন", "order চালু", "চালিয়ে যাই", "resume", "অর্ডার"]
-        if any(k in msg_lower for k in resume_kws):
-            new_state = {**state}
-            new_state.pop("order_flow_paused", None)
+    # ── 5. PAUSED FLOW ───────────────────────────────────────────────────────
+    if step == "paused" or state.get("paused_flow"):
+        resume_kws = ["অর্ডার চালু করুন", "order চালু", "চালিয়ে যাই", "resume", "অর্ডার চালু"]
+        if any(k in msg_lower for k in resume_kws) or payload == "CONTINUE_ORDER":
+            actual_step = state.get("paused_flow") or "collecting_name"
+            new_state = {**state, "order_flow": actual_step}
+            new_state.pop("paused_flow", None)
             _set_conv_state(conversation_id, new_state)
-            re_ask = _get_step_question(step)
+            re_ask = _get_step_question(actual_step)
             reply = f"স্বাগতম! আপনার অর্ডার চালিয়ে যাচ্ছি।\n\n{re_ask}"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
@@ -858,23 +946,27 @@ async def _handle_strict_order_flow(
             send_reply(sender_id, reminder, plain_token)
         return True
 
-    # ── INTERRUPT GUARD: unexpected answer for current step ───────────────────
+    # ── 6. INTERRUPT GUARD ───────────────────────────────────────────────────
     if not _is_expected_answer(step, msg, payload):
-        new_state = {**state, "order_flow_interrupted": True, "interrupted_question": msg}
+        new_state = {
+            **state,
+            "interruption_pending": True,
+            "interrupted_question": msg,
+        }
         _set_conv_state(conversation_id, new_state)
         prompt = (
             "আপনি এখন অর্ডার প্রক্রিয়ার মধ্যে আছেন। "
-            "প্রথমে প্রশ্নের উত্তর নিতে চাইলে অর্ডার থেকে বের হতে পারেন, "
+            "প্রশ্নের উত্তর নিতে চাইলে বের হতে পারেন, "
             "অথবা সরাসরি অর্ডার চালিয়ে যেতে পারেন।"
         )
         save_message(conversation_id, tenant_id, "bot", prompt)
         send_quick_reply(sender_id, prompt, _INTERRUPT_QR_BUTTONS, plain_token)
         return True
 
-    # ── STEP 1: Collect name (RULE 2) ─────────────────────────────────────────
+    # ── 7. COLLECTING NAME ───────────────────────────────────────────────────
     if step == "collecting_name":
         if len(msg) < 2:
-            reply = "আপনার নাম কী?"
+            reply = "আপনার পূর্ণ নাম লিখুন:"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
@@ -885,11 +977,11 @@ async def _handle_strict_order_flow(
         send_reply(sender_id, reply, plain_token)
         return True
 
-    # ── STEP 2: Collect phone (RULE 3) ────────────────────────────────────────
+    # ── 8. COLLECTING PHONE ──────────────────────────────────────────────────
     if step == "collecting_phone":
         phone = normalize_bd_phone(msg)
         if not phone:
-            reply = "সঠিক ফোন নম্বর দিন (01XXXXXXXXX)"
+            reply = "সঠিক বাংলাদেশি ফোন নম্বর দিন (01XXXXXXXXX):"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
@@ -900,58 +992,67 @@ async def _handle_strict_order_flow(
         send_reply(sender_id, reply, plain_token)
         return True
 
-    # ── STEP 3: Collect address (RULE 4) ──────────────────────────────────────
+    # ── 9. COLLECTING ADDRESS ────────────────────────────────────────────────
     if step == "collecting_address":
         if len(msg) < 5:
             reply = "সম্পূর্ণ ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
-
-        customer_name  = state.get("customer_name", "")
-        customer_phone = state.get("customer_phone", "")
-        cart           = state.get("cart") or []
-
-        new_state = {**state, "order_flow": "confirming", "delivery_address": msg}
+        new_state = {**state, "order_flow": "adding_more_products", "delivery_address": msg}
         _set_conv_state(conversation_id, new_state)
-
-        cart_lines: list[str] = []
-        total = 0.0
-        for item in cart:
-            price = float(item.get("price") or 0)
-            qty   = int(item.get("qty") or 1)
-            total += price * qty
-            cart_lines.append(f"🛒 {item['name']} × {qty}")
-            if price > 0:
-                cart_lines.append(f"💰 মূল্য: ৳{price:.0f}")
-        if not cart_lines:
-            int_product = state.get("interested_product")
-            neg_price   = state.get("negotiated_price")
-            if int_product:
-                cart_lines.append(f"🛒 {int_product} × 1")
-                if neg_price:
-                    cart_lines.append(f"💰 মূল্য: ৳{int(neg_price)}")
-                    total = float(neg_price)
-        if not cart_lines:
-            cart_lines = ["🛒 পণ্য (কথোপকথন অনুযায়ী)"]
-
-        total_text = f"৳{total:.0f}" if total > 0 else "আলোচনা অনুযায়ী"
-        summary = (
-            "📦 অর্ডার কনফার্ম করুন:\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            + "\n".join(cart_lines) + "\n"
-            + f"💰 মোট: {total_text}\n"
-            + f"👤 {customer_name}\n"
-            + f"📱 {customer_phone}\n"
-            + f"📍 {msg}\n"
-            + "━━━━━━━━━━━━━━━━━━━\n"
-            + "নিশ্চিত করতে হ্যাঁ লিখুন"
-        )
-        save_message(conversation_id, tenant_id, "bot", summary)
-        send_quick_reply(sender_id, summary, _CONFIRM_QR_BUTTONS, plain_token)
+        reply = "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
         return True
 
-    # ── STEP 4: Confirm (RULE 5) ──────────────────────────────────────────────
+    # ── 10. ADDING MORE PRODUCTS ─────────────────────────────────────────────
+    if step == "adding_more_products":
+        yes_kws = ["হ্যাঁ", "হা", "yes", "ha", "hae", "আরো", "আর", "যোগ"]
+        no_kws  = ["না", "no", "na", "নাহ", "নেই", "হবে না"]
+        if any(w in msg_lower for w in yes_kws):
+            new_state = {**state, "order_flow": "idle_with_cart"}
+            _set_conv_state(conversation_id, new_state)
+            reply = "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+        if any(w in msg_lower for w in no_kws):
+            new_state = {**state, "order_flow": "confirming"}
+            _set_conv_state(conversation_id, new_state)
+            summary, _ = _build_order_summary(new_state)
+            save_message(conversation_id, tenant_id, "bot", summary)
+            send_quick_reply(sender_id, summary, _CONFIRM_QR_BUTTONS, plain_token)
+            return True
+        reply = "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
+
+    # ── 11. IDLE WITH CART ───────────────────────────────────────────────────
+    if step == "idle_with_cart":
+        product_info = _extract_product_for_order(tenant_id, msg, state)
+        if product_info:
+            cart = list(state.get("cart") or [])
+            cart.append({
+                "name":       product_info.get("name", msg),
+                "product_id": product_info.get("product_id"),
+                "price":      product_info.get("price"),
+                "qty":        1,
+            })
+            new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
+            _set_conv_state(conversation_id, new_state)
+            pname = cart[-1]["name"]
+            reply = f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+        else:
+            reply = "পণ্যটি খুঁজে পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+        return True
+
+    # ── 12. CONFIRMING ───────────────────────────────────────────────────────
     if step == "confirming":
         if any(w in msg_lower for w in ["না", "no", "বাতিল", "cancel"]) or payload == "ORDER_CANCEL":
             _cancel()
@@ -959,7 +1060,7 @@ async def _handle_strict_order_flow(
 
         confirmed = (
             payload == "ORDER_CONFIRM"
-            or any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে", "হ্যা"])
+            or any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে", "হ্যা", "ha", "hae"])
         )
         if confirmed:
             cart             = state.get("cart") or []
@@ -979,6 +1080,7 @@ async def _handle_strict_order_flow(
                 price        = first.get("price") or price
                 quantity     = int(first.get("qty") or 1)
 
+            order_ref  = _gen_order_ref()
             order_data = {
                 "product_name":     product_name,
                 "product_id":       product_id,
@@ -987,28 +1089,27 @@ async def _handle_strict_order_flow(
                 "customer_name":    customer_name,
                 "customer_phone":   customer_phone,
                 "delivery_address": delivery_address,
+                "order_ref":        order_ref,
                 "notes":            None,
             }
             discount_summary = save_order(tenant_id, conversation_id, sender_id, order_data)
-            order_ref        = _gen_order_ref()
 
             clean = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
             _set_conv_state(conversation_id, clean)
 
             confirm_text = (
                 f"✅ অর্ডার নেওয়া হয়েছে!\n"
-                f"🔖 ID: #{order_ref}\n"
+                f"🔖 ID: {order_ref}\n"
                 f"📦 পণ্য: {product_name}\n"
                 f"📞 ফোন: {customer_phone}\n\n"
                 f"আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏"
             )
             if discount_summary:
-                confirm_text += discount_summary
+                confirm_text += f"\n\n{discount_summary}"
             save_message(conversation_id, tenant_id, "bot", confirm_text)
             send_reply(sender_id, confirm_text, plain_token)
             return True
 
-        # Ambiguous — re-prompt without AI
         re_prompt = "অর্ডার নিশ্চিত করতে 'হ্যাঁ' লিখুন অথবা বাতিল করতে 'বাতিল' লিখুন।"
         save_message(conversation_id, tenant_id, "bot", re_prompt)
         send_quick_reply(sender_id, re_prompt, _CONFIRM_QR_BUTTONS, plain_token)
@@ -1406,7 +1507,12 @@ async def process_message(
         _set_conv_state(conversation_id, state)
 
     # ── 0.5. Abuse detection ──────────────────────────────────────────────────
-    if message_text and _detect_abuse(message_text):
+    escalation_keywords = ai_config.get("escalation_keywords") or []
+    is_abusive = _detect_abuse(message_text or "") if message_text else False
+    is_escalation = message_text and any(
+        kw.lower() in message_text.lower() for kw in escalation_keywords if kw
+    )
+    if is_abusive or is_escalation:
         abusive_count = state.get("abusive_count", 0) + 1
         state = {**state, "abusive_count": abusive_count}
         if abusive_count >= 3:
@@ -1414,18 +1520,24 @@ async def process_message(
                 "is_ai_active": False,
                 "conversation_state": state,
             }).eq("conversation_id", conversation_id).execute()
-            escalation = (
+            escalation_msg = (
                 "আমি আপনার সমস্যা সমাধানে অক্ষম।\n"
                 "আমাদের টিম শীঘ্রই যোগাযোগ করবে।"
             )
-            save_message(conversation_id, tenant_id, "bot", escalation)
-            send_reply(sender_id, escalation, plain_token)
+            save_message(conversation_id, tenant_id, "bot", escalation_msg)
+            send_reply(sender_id, escalation_msg, plain_token)
             return
         _set_conv_state(conversation_id, state)
-        calm_reply = (
-            "আমি আপনাকে সাহায্য করতে এখানে আছি।\n"
-            "আপনার কি কোনো পণ্য দরকার বা অন্য কিছু জানতে চান?"
-        )
+        if abusive_count == 1:
+            calm_reply = (
+                "আমি আপনাকে সাহায্য করতে এখানে আছি।\n"
+                "আপনার কি কোনো পণ্য দরকার বা অন্য কিছু জানতে চান?"
+            )
+        else:
+            calm_reply = (
+                "⚠️ অনুগ্রহ করে ভদ্রভাবে কথা বলুন।\n"
+                "আরও সমস্যা হলে আমাদের টিম সরাসরি সাহায্য করবে।"
+            )
         save_message(conversation_id, tenant_id, "bot", calm_reply)
         send_reply(sender_id, calm_reply, plain_token)
         return
@@ -1491,9 +1603,15 @@ async def process_message(
 
     # ── 5.5 Order trigger — RULE 1: extract product, start flow immediately ─────
     if message_text and _is_order_trigger(message_text) and not state.get("order_flow"):
-        cart_item = _extract_product_for_order(tenant_id, message_text, state)
-        cart      = [cart_item] if cart_item else []
-        _set_conv_state(conversation_id, {**state, "order_flow": "collecting_name", "cart": cart})
+        cart_item    = _extract_product_for_order(tenant_id, message_text, state)
+        cart         = [cart_item] if cart_item else []
+        timeout_dt   = (datetime.now() + timedelta(hours=2)).isoformat()
+        _set_conv_state(conversation_id, {
+            **state,
+            "order_flow":    "collecting_name",
+            "cart":          cart,
+            "order_timeout": timeout_dt,
+        })
         reply = "আপনার নাম কী?"
         save_message(conversation_id, tenant_id, "bot", reply)
         send_reply(sender_id, reply, plain_token)
