@@ -9,7 +9,7 @@ GET  /api/payment/plans     — List available plans
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from fastapi.responses import RedirectResponse
-from app.auth.dependencies import get_current_tenant
+from app.auth.dependencies import get_current_tenant, get_current_tenant_auth_only
 from app.database import supabase
 from app.models.schemas import PaymentInitRequest
 from app.services.payment_service import PaymentService, PLANS
@@ -36,7 +36,7 @@ async def list_plans():
 @router.post("/initiate")
 async def initiate_payment(
     body: PaymentInitRequest,
-    tenant: dict = Depends(get_current_tenant),
+    tenant: dict = Depends(get_current_tenant_auth_only),
 ):
     result = payment.initiate_payment(
         tenant_id=tenant["tenant_id"],
@@ -104,7 +104,7 @@ async def payment_ipn(request: Request):
 
 
 @router.get("/history")
-async def payment_history(tenant: dict = Depends(get_current_tenant)):
+async def payment_history(tenant: dict = Depends(get_current_tenant_auth_only)):
     result = (
         supabase.table("transactions")
         .select("*")
@@ -116,7 +116,7 @@ async def payment_history(tenant: dict = Depends(get_current_tenant)):
 
 
 @router.get("/ai-config")
-async def get_ai_config(tenant: dict = Depends(get_current_tenant)):
+async def get_ai_config(tenant: dict = Depends(get_current_tenant_auth_only)):
     result = (
         supabase.table("ai_config")
         .select("*")
@@ -131,7 +131,7 @@ async def get_ai_config(tenant: dict = Depends(get_current_tenant)):
 @router.patch("/ai-config")
 async def update_ai_config(
     body: dict,
-    tenant: dict = Depends(get_current_tenant),
+    tenant: dict = Depends(get_current_tenant_auth_only),
 ):
     allowed = {
         # Bot identity

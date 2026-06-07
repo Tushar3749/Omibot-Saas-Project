@@ -18,7 +18,7 @@ Run once in Supabase SQL editor to create the table:
 """
 import logging
 from fastapi import APIRouter, Depends
-from app.auth.dependencies import get_current_tenant
+from app.auth.dependencies import get_current_tenant_auth_only as get_current_tenant
 from app.database import supabase
 
 logger = logging.getLogger(__name__)
