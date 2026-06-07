@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 _client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-SUMMARY_THRESHOLD = 20
-KEEP_RECENT       = 5
+SUMMARY_THRESHOLD = 30
+KEEP_RECENT       = 15
 
 
 class MemoryService:

@@ -479,6 +479,59 @@ _ORDER_TRACKING_TRIGGERS = [
     "আমার প্রোডাক্ট", "ডেলিভারি কবে", "পণ্য কোথায়",
 ]
 
+# Order history query keywords (direct DB lookup — no OTP required)
+_ORDER_HISTORY_TRIGGERS = [
+    "আমার অর্ডার", "আগের অর্ডার", "পুরোনো অর্ডার", "অর্ডার দেখতে চাই",
+    "অর্ডার ইতিহাস", "অর্ডার লিস্ট", "কী অর্ডার করেছিলাম", "আমি কী কিনেছিলাম",
+    "order history", "my orders", "previous orders", "order list",
+    "আমার কি অর্ডার আছে", "অর্ডার কখন আসবে", "ডেলিভারি কবে",
+]
+
+
+def _is_order_history_query(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in _ORDER_HISTORY_TRIGGERS)
+
+
+def _get_order_history_reply(tenant_id: str, phone: str) -> str:
+    """Query orders table and return formatted last-3-orders reply."""
+    STATUS_MAP = {
+        "pending":   "⏳ অপেক্ষারত",
+        "confirmed": "✅ নিশ্চিত",
+        "shipped":   "🚚 শিপড",
+        "delivered": "📦 ডেলিভারি হয়েছে",
+        "cancelled": "❌ বাতিল",
+    }
+    try:
+        res = (
+            supabase.table("orders")
+            .select("product_name, quantity, agreed_price, status, created_at, tracking_number")
+            .eq("tenant_id", tenant_id)
+            .eq("customer_phone", phone)
+            .order("created_at", desc=True)
+            .limit(3)
+            .execute()
+        )
+        orders = res.data or []
+        if not orders:
+            return "আপনার কোনো পূর্ববর্তী অর্ডার পাওয়া যায়নি।"
+
+        lines = ["📋 আপনার সাম্প্রতিক অর্ডার:\n"]
+        for i, o in enumerate(orders, 1):
+            status = STATUS_MAP.get(o.get("status", ""), o.get("status", ""))
+            date   = (o.get("created_at") or "")[:10]
+            lines.append(f"{i}. {o.get('product_name', 'পণ্য')} × {o.get('quantity', 1)}")
+            if o.get("agreed_price"):
+                lines.append(f"   💰 ৳{float(o['agreed_price']):,.0f}")
+            lines.append(f"   {status} | 📅 {date}")
+            if o.get("tracking_number"):
+                lines.append(f"   🔍 Tracking: {o['tracking_number']}")
+        lines.append("\nআর কোনো সাহায্য লাগবে?")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning(f"Order history query failed: {exc}")
+        return "অর্ডার তথ্য লোড করতে সমস্যা হয়েছে। একটু পরে চেষ্টা করুন।"
+
 
 # ── Signature Verification ────────────────────────────────────────────────────
 
@@ -1582,6 +1635,39 @@ async def process_message(
         if handled:
             return
 
+    # ── 2.7 Order history — direct DB lookup, no Gemini needed ─────────────────
+    if message_text and _is_order_history_query(message_text):
+        phone = state.get("customer_phone")
+        if phone:
+            reply = _get_order_history_reply(tenant_id, phone)
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
+        else:
+            # Phone not in state — ask for it, store intent
+            _set_conv_state(conversation_id, {**state, "pending_action": "order_history"})
+            reply = "অর্ডার দেখতে আপনার ফোন নম্বর দিন (01XXXXXXXXX):"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
+
+    # ── 2.8 Pending action: order_history — customer just gave their phone ──────
+    if message_text and state.get("pending_action") == "order_history":
+        phone = normalize_bd_phone(message_text)
+        if phone:
+            new_state = {k: v for k, v in state.items() if k != "pending_action"}
+            new_state["customer_phone"] = phone
+            _set_conv_state(conversation_id, new_state)
+            reply = _get_order_history_reply(tenant_id, phone)
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
+        else:
+            reply = "সঠিক ফোন নম্বর দিন (01XXXXXXXXX):"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
+
     # ── 3. Customer sent an image ─────────────────────────────────────────────
     if image_urls:
         handled = await _handle_customer_image(
@@ -1629,8 +1715,17 @@ async def process_message(
         send_reply(sender_id, reply, plain_token)
         return
 
-    # ── 5.6 Gemini intent detection — catches natural expressions not in keyword list
-    if message_text and not state.get("order_flow"):
+    # ── 5.6 Gemini intent detection — only when buying context exists ────────────
+    # Guard: only fire when customer previously showed interest in a product OR
+    # message contains a quick buying-adjacent word. Avoids extra API call for
+    # every general chat message.
+    _BUYING_ADJACENT = ["nibo", "nebo", "dao", "den", "pathao", "jog", "add", "chai", "hae", "ha", "ok", "hm"]
+    _has_buying_context = (
+        bool(state.get("interested_product"))
+        or bool(state.get("negotiated_price"))
+        or any(w in (message_text or "").lower() for w in _BUYING_ADJACENT)
+    )
+    if message_text and not state.get("order_flow") and _has_buying_context:
         intent = await ai_service.detect_order_intent(message_text, messages, state)
         if intent["is_order_intent"] and intent["confidence"] in ("high", "medium"):
             product_name = intent.get("product_name") or state.get("interested_product") or ""

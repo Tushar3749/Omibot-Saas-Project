@@ -194,7 +194,9 @@ class AIService:
             "সাধারণ নিয়ম:\n"
             "- সবসময় বিনয়ী ও helpful থাকো।\n"
             "- Customer নাম/ফোন/ঠিকানা দিলে update_conversation_state call করো।\n"
-            "- কোনো ভুল তথ্য দেবে না।"
+            "- কোনো ভুল তথ্য দেবে না।\n"
+            "- তুমি এই কথোপকথনের সব বার্তা দেখতে পারো — কখনো বলবে না যে পূর্ববর্তী কথোপকথন দেখতে পারছ না।\n"
+            "- Customer-এর অর্ডার ইতিহাস আমাদের সিস্টেম সরাসরি দেখাবে — তুমি নিজে থেকে বলবে না যে access নেই।"
         )
 
     # ── Exponential Back-off ──────────────────────────────────────────────────
@@ -241,19 +243,25 @@ class AIService:
         # 2. RAG context
         rag_context = await self.rag.get_relevant_context(tenant_id, customer_message)
 
-        # 3. Memory context
-        context_msgs = self.memory.get_context_messages(
-            conversation_id, raw_messages, conversation_summary
-        )
-
-        # 4. System prompt
+        # 3. System prompt
         system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint)
 
-        # 5. Build contents list for Gemini (history + current message)
+        # 4. Build contents — ALL raw_messages (up to 20) passed directly so Gemini
+        #    always has full context. Summary prepended as a synthetic exchange when
+        #    available (for conversations longer than the fetch window).
         contents: list[genai_types.Content] = []
-        for msg in context_msgs:
-            if msg["role"] == "system":
-                continue   # system context is in the system_instruction
+        if conversation_summary:
+            contents.append(genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=f"[আগের কথোপকথনের সারসংক্ষেপ]\n{conversation_summary}")],
+            ))
+            contents.append(genai_types.Content(
+                role="model",
+                parts=[genai_types.Part(text="বুঝলাম, আগের কথোপকথন মনে আছে।")],
+            ))
+        for msg in raw_messages:
+            if msg.get("role") == "system":
+                continue
             role = "user" if msg["role"] == "customer" else "model"
             contents.append(
                 genai_types.Content(role=role, parts=[genai_types.Part(text=msg["content"])])
