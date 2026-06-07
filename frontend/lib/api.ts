@@ -312,6 +312,9 @@ export const testBotAPI = {
     discount_context?: Record<string, unknown> | null
   }> =>
     api.post('/api/test-bot/chat', { message, customer_phone, quick_reply_payload }).then(r => r.data),
+
+  reset: (): Promise<{ ok: boolean; conversation_id: string }> =>
+    api.post('/api/test-bot/reset').then(r => r.data),
 }
 
 // ── Product Image Upload ──────────────────────────────────────────────────────

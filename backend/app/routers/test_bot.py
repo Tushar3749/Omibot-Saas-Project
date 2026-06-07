@@ -251,3 +251,26 @@ async def test_bot_chat(
         "order_flow":      final_state.get("order_flow"),
         "state":           final_state,
     }
+
+
+@router.post("/reset")
+async def test_bot_reset(tenant: dict = Depends(get_current_tenant)):
+    """
+    Clear conversation_state and message history for this tenant's test conversation.
+    Called on page load and when user clicks the reset button.
+    """
+    tid = tenant["tenant_id"]
+    conv = get_or_create_conversation(tid, f"test_{tid}", "test")
+    conversation_id = conv["conversation_id"]
+
+    # Wipe state
+    _set_conv_state(conversation_id, {})
+
+    # Delete all messages for this test conversation
+    try:
+        supabase.table("messages").delete().eq("conversation_id", str(conversation_id)).execute()
+    except Exception as e:
+        logger.warning(f"test_bot_reset: failed to delete messages: {e}")
+
+    logger.info(f"TEST_BOT reset for tenant={tid} conv={conversation_id}")
+    return {"ok": True, "conversation_id": conversation_id}

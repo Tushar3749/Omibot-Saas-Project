@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { testBotAPI } from '@/lib/api'
-import { FlaskConical, Send, Bot, User, Loader2, RotateCcw, ChevronDown, ChevronRight, Percent, ShoppingCart } from 'lucide-react'
+import { FlaskConical, Send, Bot, User, Loader2, ChevronDown, ChevronRight, Percent, ShoppingCart, Plus } from 'lucide-react'
 
 interface ChatMessage {
   role: 'user' | 'bot'
@@ -206,16 +206,22 @@ function DiscountPanel({ ctx }: { ctx: DiscountCtx }) {
 }
 
 export default function TestBotPage() {
-  const [messages, setMessages]         = useState<ChatMessage[]>([])
-  const [input, setInput]               = useState('')
-  const [typing, setTyping]             = useState(false)
+  const [messages, setMessages]           = useState<ChatMessage[]>([])
+  const [input, setInput]                 = useState('')
+  const [typing, setTyping]               = useState(false)
+  const [resetting, setResetting]         = useState(false)
   const [customerPhone, setCustomerPhone] = useState('')
-  const [discountCtx, setDiscountCtx]   = useState<DiscountCtx | null>(null)
-  const [orderFlow, setOrderFlow]       = useState<string | null>(null)
+  const [discountCtx, setDiscountCtx]     = useState<DiscountCtx | null>(null)
+  const [orderFlow, setOrderFlow]         = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef  = useRef<HTMLInputElement>(null)
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, typing])
+
+  // Clear backend state on every page load so each session starts fresh
+  useEffect(() => {
+    testBotAPI.reset().catch(() => {/* ignore — server may not be reachable yet */})
+  }, [])
 
   const inOrderFlow = orderFlow !== null && orderFlow !== 'idle'
 
@@ -253,12 +259,21 @@ export default function TestBotPage() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
   }
 
-  function clearChat() {
-    if (messages.length === 0) return
-    if (!confirm('পুরো কথোপকথন মুছে ফেলবেন?')) return
-    setMessages([])
-    setDiscountCtx(null)
-    setOrderFlow(null)
+  async function newConversation() {
+    if (resetting) return
+    setResetting(true)
+    try {
+      await testBotAPI.reset()
+      setMessages([])
+      setDiscountCtx(null)
+      setOrderFlow(null)
+      setInput('')
+      setTimeout(() => inputRef.current?.focus(), 50)
+    } catch {
+      toast.error('রিসেট ব্যর্থ হয়েছে')
+    } finally {
+      setResetting(false)
+    }
   }
 
   return (
@@ -274,8 +289,17 @@ export default function TestBotPage() {
             </h1>
             <p className="page-subtitle">আপনার বটের সাথে কথা বলুন এবং পরীক্ষা করুন</p>
           </div>
-          <button onClick={clearChat} disabled={messages.length === 0} className="btn-secondary gap-1.5 text-sm">
-            <RotateCcw size={13} /> রিসেট
+          <button
+            onClick={newConversation}
+            disabled={resetting}
+            className="btn-secondary gap-1.5 text-sm"
+            title="State clear করে নতুন কথোপকথন শুরু করুন"
+          >
+            {resetting
+              ? <Loader2 size={13} className="animate-spin" />
+              : <Plus size={13} />
+            }
+            নতুন কথোপকথন
           </button>
         </div>
 
