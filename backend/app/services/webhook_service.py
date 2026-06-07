@@ -912,12 +912,16 @@ async def _handle_strict_order_flow(
 
             ai_answer = ""
             try:
-                ai_answer = await ai_service.generate_reply(
+                recent_msgs = get_recent_messages(conversation_id, limit=10)
+                ai_result   = await ai_service.generate_reply(
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
-                    user_message=interrupted_q,
+                    customer_message=interrupted_q,
                     ai_config=ai_config,
+                    raw_messages=recent_msgs,
+                    conversation_state=state,
                 )
+                ai_answer = ai_result.get("reply", "")
             except Exception:
                 ai_answer = "দুঃখিত, এই মুহূর্তে উত্তর দিতে পারছি না।"
 
