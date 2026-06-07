@@ -20,6 +20,7 @@ from app.services.webhook_service import (
     _SOFT_NO,
     _STRONG_CANCEL,
     _build_order_summary,
+    _cart_add_item,
     _extract_product_for_order,
     _set_conv_state,
     get_ai_config,
@@ -116,16 +117,10 @@ def _run_order_flow(
     if step == "idle_with_cart":
         product_info = _extract_product_for_order(tenant_id, msg, state)
         if product_info:
-            cart = list(state.get("cart") or [])
-            cart.append({
-                "name":       product_info.get("name", msg),
-                "product_id": product_info.get("product_id"),
-                "price":      product_info.get("price"),
-                "qty":        1,
-            })
+            cart      = _cart_add_item(state.get("cart") or [], product_info)
             new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
             _set_conv_state(conversation_id, new_state)
-            pname = cart[-1]["name"]
+            pname = product_info.get("product_name") or product_info.get("name") or msg
             return f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
         return "পণ্যটি খুঁজে পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
 
@@ -208,12 +203,13 @@ async def test_bot_chat(
                 cart_item = _epfo(tid, product_name, state) if product_name else {}
                 if not cart_item and product_name:
                     cart_item = {
-                        "name":       product_name,
-                        "product_id": None,
-                        "price":      order_data.get("agreed_price"),
-                        "qty":        int(order_data.get("quantity") or 1),
+                        "product_id":   None,
+                        "product_name": product_name,
+                        "sku":          "",
+                        "price":        order_data.get("agreed_price"),
+                        "quantity":     int(order_data.get("quantity") or 1),
                     }
-                cart = [cart_item] if cart_item else []
+                cart = _cart_add_item([], cart_item) if cart_item else []
                 timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
                 new_state = {
                     **state,

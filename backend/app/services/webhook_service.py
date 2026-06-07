@@ -806,10 +806,10 @@ def _build_order_summary(state: dict) -> tuple[str, float]:
     total = 0.0
     for item in cart:
         price      = float(item.get("price") or 0)
-        qty        = int(item.get("qty") or item.get("quantity") or 1)
+        qty        = int(item.get("quantity") or item.get("qty") or 1)
         line_total = price * qty
         total     += line_total
-        name       = item.get("name") or item.get("product_name", "পণ্য")
+        name       = item.get("product_name") or item.get("name") or "পণ্য"
         line       = f"🛒 {name} × {qty}"
         if price > 0:
             line += f" — ৳{line_total:.0f}"
@@ -860,7 +860,7 @@ def _fuzzy_product_search(tenant_id: str, term: str, neg_price) -> dict:
             safe = word.replace("%", "").replace("_", "")
             res = (
                 supabase.table("products")
-                .select("product_id, name, mrp")
+                .select("product_id, name, sku, mrp")
                 .eq("tenant_id", tenant_id)
                 .eq("is_active", True)
                 .or_(f"name.ilike.%{safe}%,sku.ilike.%{safe}%,category.ilike.%{safe}%")
@@ -870,10 +870,11 @@ def _fuzzy_product_search(tenant_id: str, term: str, neg_price) -> dict:
             if res and res.data:
                 p = res.data[0]
                 return {
-                    "product_id": p["product_id"],
-                    "name":       p["name"],
-                    "price":      float(neg_price or p.get("mrp") or 0),
-                    "qty":        1,
+                    "product_id":   p["product_id"],
+                    "product_name": p["name"],
+                    "sku":          p.get("sku") or "",
+                    "price":        float(neg_price or p.get("mrp") or 0),
+                    "quantity":     1,
                 }
         except Exception:
             continue
@@ -895,13 +896,72 @@ def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -
             return hit
         # Product not in DB but we know what they want — keep as free-text
         return {
-            "product_id": None,
-            "name":       interested,
-            "price":      float(neg_price or 0),
-            "qty":        1,
+            "product_id":   None,
+            "product_name": interested,
+            "sku":          "",
+            "price":        float(neg_price or 0),
+            "quantity":     1,
         }
 
     return _fuzzy_product_search(tenant_id, message_text, neg_price)
+
+
+def _cart_add_item(cart: list, item: dict) -> list:
+    """
+    Add item to cart. If same product already exists (matched by product_id
+    or product_name), increment quantity instead of adding a duplicate row.
+    Always normalises existing entries to the standard schema on first touch.
+    """
+    if not item:
+        return list(cart)
+
+    pid  = item.get("product_id")
+    name = item.get("product_name") or item.get("name", "")
+    new_cart: list[dict] = []
+
+    for existing in cart:
+        e_pid  = existing.get("product_id")
+        e_name = existing.get("product_name") or existing.get("name", "")
+        same = (pid and e_pid and pid == e_pid) or (name and name == e_name)
+        if same:
+            # normalise + merge
+            merged = {
+                "product_id":   e_pid or pid,
+                "product_name": e_name or name,
+                "sku":          existing.get("sku") or item.get("sku") or "",
+                "price":        existing.get("price") or item.get("price"),
+                "quantity":     int(existing.get("quantity") or existing.get("qty") or 1)
+                                + int(item.get("quantity") or item.get("qty") or 1),
+            }
+            new_cart.append(merged)
+            new_cart.extend(
+                {
+                    "product_id":   e.get("product_id"),
+                    "product_name": e.get("product_name") or e.get("name", ""),
+                    "sku":          e.get("sku", ""),
+                    "price":        e.get("price"),
+                    "quantity":     int(e.get("quantity") or e.get("qty") or 1),
+                }
+                for e in cart[cart.index(existing) + 1:]
+            )
+            return new_cart
+        new_cart.append({
+            "product_id":   e_pid,
+            "product_name": e_name,
+            "sku":          existing.get("sku", ""),
+            "price":        existing.get("price"),
+            "quantity":     int(existing.get("quantity") or existing.get("qty") or 1),
+        })
+
+    # No match — append new item normalised
+    new_cart.append({
+        "product_id":   pid,
+        "product_name": name,
+        "sku":          item.get("sku", ""),
+        "price":        item.get("price"),
+        "quantity":     int(item.get("quantity") or item.get("qty") or 1),
+    })
+    return new_cart
 
 
 async def _handle_strict_order_flow(
@@ -1128,16 +1188,10 @@ async def _handle_strict_order_flow(
     if step == "idle_with_cart":
         product_info = _extract_product_for_order(tenant_id, msg, state)
         if product_info:
-            cart = list(state.get("cart") or [])
-            cart.append({
-                "name":       product_info.get("name", msg),
-                "product_id": product_info.get("product_id"),
-                "price":      product_info.get("price"),
-                "qty":        1,
-            })
+            cart     = _cart_add_item(state.get("cart") or [], product_info)
             new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
             _set_conv_state(conversation_id, new_state)
-            pname = cart[-1]["name"]
+            pname = product_info.get("product_name") or product_info.get("name") or msg
             reply = f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
@@ -1172,10 +1226,10 @@ async def _handle_strict_order_flow(
 
             if cart:
                 first        = cart[0]
-                product_name = first.get("name", product_name)
+                product_name = first.get("product_name") or first.get("name") or product_name
                 product_id   = first.get("product_id")
                 price        = first.get("price") or price
-                quantity     = int(first.get("qty") or 1)
+                quantity     = int(first.get("quantity") or first.get("qty") or 1)
 
             order_ref  = _gen_order_ref()
             order_data = {
@@ -1755,7 +1809,7 @@ async def process_message(
     # ── 5.5 Order trigger — keyword fast path (no extra API call) ───────────────
     if message_text and _is_order_trigger(message_text) and not state.get("order_flow"):
         cart_item    = _extract_product_for_order(tenant_id, message_text, state)
-        cart         = [cart_item] if cart_item else []
+        cart         = _cart_add_item([], cart_item) if cart_item else []
         timeout_dt   = (datetime.now() + timedelta(hours=2)).isoformat()
         _set_conv_state(conversation_id, {
             **state,
@@ -1785,12 +1839,13 @@ async def process_message(
             cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
             if not cart_item and product_name:
                 cart_item = {
-                    "name":       product_name,
-                    "product_id": None,
-                    "price":      state.get("negotiated_price"),
-                    "qty":        intent.get("quantity", 1),
+                    "product_id":   None,
+                    "product_name": product_name,
+                    "sku":          "",
+                    "price":        state.get("negotiated_price"),
+                    "quantity":     intent.get("quantity", 1),
                 }
-            cart       = [cart_item] if cart_item else []
+            cart       = _cart_add_item([], cart_item) if cart_item else []
             timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
             _set_conv_state(conversation_id, {
                 **state,
@@ -1844,12 +1899,13 @@ async def process_message(
         cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
         if not cart_item and product_name:
             cart_item = {
-                "name":       product_name,
-                "product_id": None,
-                "price":      order_data.get("agreed_price"),
-                "qty":        int(order_data.get("quantity") or 1),
+                "product_id":   None,
+                "product_name": product_name,
+                "sku":          "",
+                "price":        order_data.get("agreed_price"),
+                "quantity":     int(order_data.get("quantity") or 1),
             }
-        cart       = [cart_item] if cart_item else []
+        cart       = _cart_add_item([], cart_item) if cart_item else []
         timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
         new_state  = {**state, "order_flow": "collecting_name", "cart": cart, "order_timeout": timeout_dt}
         if state_update:
