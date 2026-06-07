@@ -1372,9 +1372,19 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
 
 
 def _set_conv_state(conversation_id: str, state: dict) -> None:
-    supabase.table("conversations").update({
-        "conversation_state": state
-    }).eq("conversation_id", conversation_id).execute()
+    try:
+        result = supabase.table("conversations").update({
+            "conversation_state": state,
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("conversation_id", str(conversation_id)).execute()
+        print(f"SAVE RESULT conv={conversation_id}: {result.data}")
+        logger.info(f"SAVE RESULT conv={conversation_id}: {result.data}")
+        if not result.data:
+            print(f"ERROR: Save returned no data! conv={conversation_id} state={state}")
+            logger.error(f"ERROR: conversation_state save returned no data for conv={conversation_id}. State was: {state}")
+    except Exception as e:
+        print(f"SAVE EXCEPTION conv={conversation_id}: {e}")
+        logger.error(f"SAVE EXCEPTION conv={conversation_id}: {e}", exc_info=True)
 
 
 # ── OTP Order Tracking Flow ───────────────────────────────────────────────────
