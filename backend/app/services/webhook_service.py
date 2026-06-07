@@ -1613,7 +1613,7 @@ async def process_message(
         send_reply(sender_id, reply, plain_token)
         return
 
-    # ── 5.5 Order trigger — RULE 1: extract product, start flow immediately ─────
+    # ── 5.5 Order trigger — keyword fast path (no extra API call) ───────────────
     if message_text and _is_order_trigger(message_text) and not state.get("order_flow"):
         cart_item    = _extract_product_for_order(tenant_id, message_text, state)
         cart         = [cart_item] if cart_item else []
@@ -1628,6 +1628,32 @@ async def process_message(
         save_message(conversation_id, tenant_id, "bot", reply)
         send_reply(sender_id, reply, plain_token)
         return
+
+    # ── 5.6 Gemini intent detection — catches natural expressions not in keyword list
+    if message_text and not state.get("order_flow"):
+        intent = await ai_service.detect_order_intent(message_text, messages, state)
+        if intent["is_order_intent"] and intent["confidence"] in ("high", "medium"):
+            product_name = intent.get("product_name") or state.get("interested_product") or ""
+            cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
+            if not cart_item and product_name:
+                cart_item = {
+                    "name":       product_name,
+                    "product_id": None,
+                    "price":      state.get("negotiated_price"),
+                    "qty":        intent.get("quantity", 1),
+                }
+            cart       = [cart_item] if cart_item else []
+            timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
+            _set_conv_state(conversation_id, {
+                **state,
+                "order_flow":    "collecting_name",
+                "cart":          cart,
+                "order_timeout": timeout_dt,
+            })
+            reply = "আপনার নাম কী?"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
 
     # ── 6. OTP order-tracking start ───────────────────────────────────────────
     if _should_start_tracking(message_text) and ai_config.get("sms_enabled"):

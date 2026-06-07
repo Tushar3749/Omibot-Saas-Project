@@ -357,3 +357,60 @@ class AIService:
         except Exception as e:
             logger.error(f"AI generate_reply error (tenant={tenant_id}): {e}", exc_info=True)
             return {"reply": FALLBACK_REPLY, "order_data": None, "state_update": None}
+
+    async def detect_order_intent(
+        self,
+        message_text: str,
+        recent_messages: list[dict],
+        state: dict,
+    ) -> dict:
+        """
+        Calls Gemini with a lightweight JSON prompt to decide if the customer
+        wants to place an order. Returns:
+          {"is_order_intent": bool, "product_name": str|None,
+           "quantity": int, "confidence": "high"|"medium"|"low"}
+        Falls back to {"is_order_intent": False, ...} on any error.
+        """
+        last_3       = recent_messages[-3:] if recent_messages else []
+        history_text = "\n".join(
+            f"{m['role'].upper()}: {m['content']}" for m in last_3
+        )
+        interested = state.get("interested_product", "")
+        state_hint = f"\n(Customer was previously looking at: {interested})" if interested else ""
+
+        prompt = (
+            "You are a buying-intent classifier for a Bangladeshi e-commerce chatbot.\n"
+            f"Recent conversation:\n{history_text}{state_hint}\n"
+            f"New customer message: {message_text}\n\n"
+            "Reply with ONLY valid JSON, no markdown:\n"
+            '{"is_order_intent": true, "product_name": "name or null", "quantity": 1, "confidence": "high"}\n\n'
+            "Rules:\n"
+            "- is_order_intent = true if the customer wants to BUY, ORDER, or ADD a product.\n"
+            "- Treat these as order intent: নেব, কিনব, অর্ডার, buy, order, jog korte chai, "
+            "jog koro, add korbo, diye den, pathao, dao, niye jan, nibo, "
+            "hae/ha/yes/ok IF the previous bot message was about buying or adding to cart.\n"
+            "- confidence = high if very clear, medium if likely, low if uncertain.\n"
+            "- product_name: extract from message or recent context, or null."
+        )
+
+        try:
+            response = _client.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents=[genai_types.Content(
+                    role="user", parts=[genai_types.Part(text=prompt)]
+                )],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+            raw = (response.text or "").strip()
+            result = json.loads(raw)
+            return {
+                "is_order_intent": bool(result.get("is_order_intent", False)),
+                "product_name":    result.get("product_name") or None,
+                "quantity":        int(result.get("quantity") or 1),
+                "confidence":      str(result.get("confidence", "low")),
+            }
+        except Exception as exc:
+            logger.warning(f"detect_order_intent failed: {exc}")
+            return {"is_order_intent": False, "product_name": None, "quantity": 1, "confidence": "low"}
