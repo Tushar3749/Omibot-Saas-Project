@@ -24,10 +24,11 @@ ENV/
 .env
 .env.*
 !.env.example
-!frontend/.env.local
 backend/.env
 backend/.env.*
 !backend/.env.example
+frontend/.env.local
+frontend/.env*.local
 
 # ── Node / Frontend ───────────────────────────────────────────────────────────
 node_modules/
