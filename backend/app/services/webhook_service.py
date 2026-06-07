@@ -35,10 +35,18 @@ memory_service = MemoryService()
 # ── Order flow trigger keywords ───────────────────────────────────────────────
 
 _ORDER_TRIGGERS = [
+    # Bangla — explicit buy/order intent
     "অর্ডার করতে চাই", "অর্ডার করব", "অর্ডার দিতে চাই", "অর্ডার করি",
-    "কিনতে চাই", "কিনব", "নিতে চাই", "নেব", "নিয়ে যাব",
-    "বুক করব", "বুকিং দিতে চাই", "অর্ডার করতে চাইছি",
-    "order korte chai", "order debo", "buy korbo", "nite chai",
+    "অর্ডার করতে চাইছি", "অর্ডার দেব", "অর্ডার দিন", "অর্ডার নিন",
+    "কিনতে চাই", "কিনব", "কিনতে চাইছি", "কিনতে পারি",
+    "নিতে চাই", "নেব", "নিতে চাইছি", "নিতে পারি",
+    "নিয়ে যাব", "নিয়ে নেব",
+    "বুক করব", "বুকিং দিতে চাই", "বুক করতে চাই",
+    "দিয়ে দেন", "দিয়ে দিন", "পাঠিয়ে দিন", "পাঠিয়ে দেন",
+    "অর্ডার", "purchase", "buy",
+    # Romanized Bangla
+    "order korte chai", "order debo", "order dite chai", "order korbo",
+    "kinbo", "nite chai", "nebo", "buy korbo", "book korbo",
 ]
 
 
@@ -1652,15 +1660,27 @@ async def process_message(
     order_data   = result.get("order_data")
     state_update = result.get("state_update")
 
-    if order_data:
-        discount_summary = save_order(tenant_id, conversation_id, sender_id, order_data)
-        if discount_summary:
-            reply_text = reply_text + discount_summary
-        # Auto-send product image if enabled and product has an image
-        if ai_config.get("product_image_auto_send") and order_data.get("product_id"):
-            img_url = img_svc.get_primary_image(tenant_id, order_data["product_id"])
-            if img_url:
-                send_image_attachment(sender_id, img_url, plain_token)
+    if order_data and not state.get("order_flow"):
+        # Gemini detected buying intent via extract_order — hand off to Python state machine
+        product_name = order_data.get("product_name") or ""
+        cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
+        if not cart_item and product_name:
+            cart_item = {
+                "name":       product_name,
+                "product_id": None,
+                "price":      order_data.get("agreed_price"),
+                "qty":        int(order_data.get("quantity") or 1),
+            }
+        cart       = [cart_item] if cart_item else []
+        timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
+        new_state  = {**state, "order_flow": "collecting_name", "cart": cart, "order_timeout": timeout_dt}
+        if state_update:
+            new_state.update(state_update)
+        _set_conv_state(conversation_id, new_state)
+        flow_reply = "আপনার নাম কী?"
+        save_message(conversation_id, tenant_id, "bot", flow_reply)
+        send_reply(sender_id, flow_reply, plain_token)
+        return
 
     if state_update:
         memory_service.update_state(conversation_id, state_update)

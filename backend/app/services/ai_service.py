@@ -174,16 +174,25 @@ class AIService:
         elif sentiment_hint == "frustrated":
             sentiment_block += "[⚠️ বর্তমান বার্তায় হতাশার চিহ্ন শনাক্ত হয়েছে — সরাসরি ও স্পষ্ট উত্তর দাও।]\n"
 
+        order_rules = (
+            "\n[অর্ডার নেওয়ার নিয়ম — অবশ্যই মানতে হবে]\n"
+            "• Customer যখনই কিনতে চাওয়ার ইচ্ছা প্রকাশ করবে (যেমন: 'নিতে চাই', 'কিনব', 'দিয়ে দেন', 'অর্ডার করব') "
+            "— সঙ্গে সঙ্গে extract_order function call করো। পণ্যের নাম জানা থাকলে দাও, না থাকলে যা আলোচনা হয়েছে তা দাও।\n"
+            "• কখনো 'কোন পণ্য নিতে চান?' বা 'কোন পণ্য অর্ডার করবেন?' জিজ্ঞেস করবে না। "
+            "সেটা আমাদের order system করবে।\n"
+            "• শুধু পণ্যের বিষয়ে তথ্য ও দাম নিয়ে কথা বলো — নাম/ফোন/ঠিকানা চাওয়া order system-এর কাজ।\n"
+        )
+
         return (
             f"{protection}\n\n"
             f"তোমার নাম: {bot_name}\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
             f"{forbidden_instr}{state_instr}{discount_block}{sentiment_block}"
-            f"{rag_block}\n\n"
-            "গুরুত্বপূর্ণ নিয়ম:\n"
+            f"{rag_block}\n"
+            f"{order_rules}\n"
+            "সাধারণ নিয়ম:\n"
             "- সবসময় বিনয়ী ও helpful থাকো।\n"
-            "- Customer অর্ডার দিলে extract_order function call করো।\n"
             "- Customer নাম/ফোন/ঠিকানা দিলে update_conversation_state call করো।\n"
             "- কোনো ভুল তথ্য দেবে না।"
         )
