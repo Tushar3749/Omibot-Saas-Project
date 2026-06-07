@@ -727,6 +727,25 @@ _INTERRUPT_KEYS = (
 )
 _ALL_FLOW_KEYS = _ORDER_FLOW_KEYS + _INTERRUPT_KEYS
 
+# Words that cancel the entire order (checked before product search in adding_more_products)
+_STRONG_CANCEL = ["cancel", "বাতিল", "করব না", "order korbo na", "cancel koro", "বাদ দাও"]
+# Words meaning "no more products" → advance to confirming
+_SOFT_NO       = ["না", "na", "no", "নাহ", "নেই", "হবে না"]
+
+# English common grocery words → Bangla (for fuzzy product search)
+_EN_TO_BN: dict[str, str] = {
+    "mustard": "সরিষা",
+    "oil":     "তেল",
+    "rice":    "চাল",
+    "dal":     "ডাল",
+    "lentil":  "ডাল",
+    "salt":    "লবণ",
+    "sugar":   "চিনি",
+    "flour":   "আটা",
+    "honey":   "মধু",
+    "ghee":    "ঘি",
+}
+
 _INTERRUPT_QR_BUTTONS = [
     {"content_type": "text", "title": "বের হই",           "payload": "EXIT_FLOW_ANSWER"},
     {"content_type": "text", "title": "অর্ডার চালিয়ে যাই", "payload": "CONTINUE_ORDER"},
@@ -763,7 +782,10 @@ def _is_expected_answer(step: str, msg: str, payload: str) -> bool:
     if step == "collecting_address":
         return len(msg) >= 10
     if step in ("adding_more_products",):
-        return any(w in msg_lower for w in yes_no)
+        return (
+            any(w in msg_lower for w in yes_no)
+            or any(w in msg_lower for w in _STRONG_CANCEL)
+        )
     if step in ("idle_with_cart", "abandoned", "interruption_pending", "paused"):
         return True
     if step == "confirming":
@@ -819,22 +841,30 @@ def _build_order_summary(state: dict) -> tuple[str, float]:
     return summary, total
 
 
-def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -> dict:
-    """
-    Returns {product_id, name, price, qty} or {} if nothing found.
-    Checks conversation_state.interested_product first, then keyword-searches products table.
-    """
-    interested = state.get("interested_product")
-    neg_price  = state.get("negotiated_price")
+def _translate_for_search(text: str) -> str:
+    """Map English grocery words to Bangla so fuzzy search works cross-language."""
+    words = text.lower().split()
+    return " ".join(_EN_TO_BN.get(w, w) for w in words)
 
-    if interested:
+
+def _fuzzy_product_search(tenant_id: str, term: str, neg_price) -> dict:
+    """
+    LIKE search on name, sku, category for each word in term.
+    Returns first match as {product_id, name, price, qty} or {}.
+    """
+    translated = _translate_for_search(term)
+    for word in translated.split():
+        if len(word) < 2:
+            continue
         try:
+            safe = word.replace("%", "").replace("_", "")
             res = (
                 supabase.table("products")
                 .select("product_id, name, mrp")
                 .eq("tenant_id", tenant_id)
-                .ilike("name", f"%{interested}%")
-                .limit(1)
+                .eq("is_active", True)
+                .or_(f"name.ilike.%{safe}%,sku.ilike.%{safe}%,category.ilike.%{safe}%")
+                .limit(5)
                 .execute()
             )
             if res and res.data:
@@ -846,7 +876,24 @@ def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -
                     "qty":        1,
                 }
         except Exception:
-            pass
+            continue
+    return {}
+
+
+def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -> dict:
+    """
+    Returns {product_id, name, price, qty} or {} if nothing found.
+    1. Checks conversation_state.interested_product first (fuzzy).
+    2. Falls back to fuzzy search on the message text itself.
+    """
+    interested = state.get("interested_product")
+    neg_price  = state.get("negotiated_price")
+
+    if interested:
+        hit = _fuzzy_product_search(tenant_id, interested, neg_price)
+        if hit:
+            return hit
+        # Product not in DB but we know what they want — keep as free-text
         return {
             "product_id": None,
             "name":       interested,
@@ -854,31 +901,7 @@ def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -
             "qty":        1,
         }
 
-    # Fallback: keyword match against active products
-    try:
-        all_prods = (
-            supabase.table("products")
-            .select("product_id, name, mrp")
-            .eq("tenant_id", tenant_id)
-            .eq("is_active", True)
-            .limit(80)
-            .execute()
-        ).data or []
-        msg_lower = message_text.lower()
-        for p in all_prods:
-            name_lower = (p.get("name") or "").lower()
-            words = [w for w in name_lower.split() if len(w) > 2]
-            if words and any(w in msg_lower for w in words):
-                return {
-                    "product_id": p["product_id"],
-                    "name":       p["name"],
-                    "price":      float(neg_price or p.get("mrp") or 0),
-                    "qty":        1,
-                }
-    except Exception:
-        pass
-
-    return {}
+    return _fuzzy_product_search(tenant_id, message_text, neg_price)
 
 
 async def _handle_strict_order_flow(
@@ -1076,20 +1099,25 @@ async def _handle_strict_order_flow(
     # ── 10. ADDING MORE PRODUCTS ─────────────────────────────────────────────
     if step == "adding_more_products":
         yes_kws = ["হ্যাঁ", "হা", "yes", "ha", "hae", "আরো", "আর", "যোগ"]
-        no_kws  = ["না", "no", "na", "নাহ", "নেই", "হবে না"]
+        # Strong cancel → wipe entire order
+        if any(w in msg_lower for w in _STRONG_CANCEL) or payload == "ORDER_CANCEL":
+            _cancel()
+            return True
+        # Soft "no more products" → advance to confirming
+        if any(w in msg_lower for w in _SOFT_NO):
+            new_state = {**state, "order_flow": "confirming"}
+            _set_conv_state(conversation_id, new_state)
+            summary, _ = _build_order_summary(new_state)
+            save_message(conversation_id, tenant_id, "bot", summary)
+            send_quick_reply(sender_id, summary, _CONFIRM_QR_BUTTONS, plain_token)
+            return True
+        # Yes → ask for product name
         if any(w in msg_lower for w in yes_kws):
             new_state = {**state, "order_flow": "idle_with_cart"}
             _set_conv_state(conversation_id, new_state)
             reply = "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
-            return True
-        if any(w in msg_lower for w in no_kws):
-            new_state = {**state, "order_flow": "confirming"}
-            _set_conv_state(conversation_id, new_state)
-            summary, _ = _build_order_summary(new_state)
-            save_message(conversation_id, tenant_id, "bot", summary)
-            send_quick_reply(sender_id, summary, _CONFIRM_QR_BUTTONS, plain_token)
             return True
         reply = "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
         save_message(conversation_id, tenant_id, "bot", reply)

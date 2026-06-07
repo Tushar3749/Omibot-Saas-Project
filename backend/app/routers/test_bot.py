@@ -17,6 +17,8 @@ from app.database import supabase
 from app.services.ai_service import AIService
 from app.services.webhook_service import (
     _ALL_FLOW_KEYS,
+    _SOFT_NO,
+    _STRONG_CANCEL,
     _build_order_summary,
     _extract_product_for_order,
     _set_conv_state,
@@ -94,16 +96,20 @@ def _run_order_flow(
     # ── adding_more_products ───────────────────────────────────────────────────
     if step == "adding_more_products":
         yes_kws = ["হ্যাঁ", "হা", "yes", "ha", "hae", "আরো", "আর", "যোগ"]
-        no_kws  = ["না", "no", "na", "নাহ", "নেই", "হবে না"]
-        if any(w in msg_lower for w in yes_kws):
-            new_state = {**state, "order_flow": "idle_with_cart"}
-            _set_conv_state(conversation_id, new_state)
-            return "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
-        if any(w in msg_lower for w in no_kws):
+        # Strong cancel → wipe entire order
+        if any(w in msg_lower for w in _STRONG_CANCEL) or payload == "ORDER_CANCEL":
+            return _clear_flow()
+        # Soft "no more products" → advance to confirming
+        if any(w in msg_lower for w in _SOFT_NO):
             new_state = {**state, "order_flow": "confirming"}
             _set_conv_state(conversation_id, new_state)
             summary, _ = _build_order_summary(new_state)
             return summary
+        # Yes → ask for product name
+        if any(w in msg_lower for w in yes_kws):
+            new_state = {**state, "order_flow": "idle_with_cart"}
+            _set_conv_state(conversation_id, new_state)
+            return "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
         return "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
 
     # ── idle_with_cart ─────────────────────────────────────────────────────────
