@@ -42,7 +42,9 @@ api.interceptors.response.use(
     if (typeof window === 'undefined') return Promise.reject(err)
 
     if (err.response?.status === 402) {
-      window.location.href = '/dashboard/subscription?expired=true'
+      if (!window.location.pathname.startsWith('/dashboard/subscription')) {
+        window.location.href = '/dashboard/subscription?expired=true'
+      }
       return Promise.reject(err)
     }
 
