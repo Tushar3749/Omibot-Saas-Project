@@ -38,10 +38,10 @@ async def connect_page(
     Connect a Facebook / Instagram page.
     The access_token is AES-256 encrypted before storage.
     """
-    # Plan limit: Starter = 1 page (Messenger only)
+    # Plan limit: Starter = Facebook only
     if tenant["plan"] == "starter" and body.platform != "facebook":
         raise HTTPException(
-            status_code=402,
+            status_code=403,
             detail="Instagram requires Pro plan or higher",
         )
 

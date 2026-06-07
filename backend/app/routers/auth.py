@@ -59,8 +59,6 @@ async def register(body: RegisterRequest):
 
     tenant_id     = str(uuid.uuid4())
     password_hash = _hash_password(body.password)
-    # Starter plan — 14-day free trial
-    trial_expires = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
 
     tenant_row = {
         "tenant_id":      tenant_id,
@@ -68,7 +66,7 @@ async def register(body: RegisterRequest):
         "password_hash":  password_hash,
         "business_name":  body.business_name,
         "plan":           "starter",
-        "plan_expires_at": trial_expires,
+        "plan_expires_at": None,  # null = valid forever; expiry only set after paid plan lapses
         "is_active":      True,
     }
     result = supabase.table("tenants").insert(tenant_row).execute()

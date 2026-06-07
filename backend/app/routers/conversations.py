@@ -82,7 +82,7 @@ async def toggle_takeover(
     """Enable / disable AI for a conversation (manual takeover)."""
     # Pro / Enterprise only
     if tenant["plan"] == "starter":
-        raise HTTPException(status_code=402, detail="Manual takeover requires Pro plan or higher")
+        raise HTTPException(status_code=403, detail="Manual takeover requires Pro plan or higher")
 
     result = (
         supabase.table("conversations")

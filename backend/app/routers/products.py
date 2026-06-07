@@ -126,7 +126,7 @@ async def create_product(
             .execute()
         )
         if (count_res.count or 0) >= 500:
-            raise HTTPException(status_code=402, detail="Starter plan limit: 500 products")
+            raise HTTPException(status_code=403, detail="Starter plan limit: 500 products")
 
     existing = (
         supabase.table("products")
