@@ -2,12 +2,13 @@
 import { useState, useRef, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { testBotAPI } from '@/lib/api'
-import { FlaskConical, Send, Bot, User, Loader2, RotateCcw, ChevronDown, ChevronRight, Percent } from 'lucide-react'
+import { FlaskConical, Send, Bot, User, Loader2, RotateCcw, ChevronDown, ChevronRight, Percent, ShoppingCart } from 'lucide-react'
 
 interface ChatMessage {
   role: 'user' | 'bot'
   text: string
   ts: Date
+  isOrderFlow?: boolean
 }
 
 interface DiscountCtx {
@@ -27,37 +28,90 @@ interface DiscountCtx {
   resolution: string
 }
 
+// Keywords that identify order-flow bot messages
+const ORDER_FLOW_PHRASES = [
+  'আপনার নাম কী',
+  'ফোন নম্বর দিন',
+  'ঠিকানা দিন',
+  'আর কোনো পণ্য',
+  'অর্ডার কনফার্ম',
+  'অর্ডার নিশ্চিত',
+  'টেস্ট অর্ডার',
+  '📦', '📞', '📍', '🛒', '✅',
+]
+
+function isOrderFlowMessage(text: string): boolean {
+  return ORDER_FLOW_PHRASES.some(phrase => text.includes(phrase))
+}
+
 function Bubble({ msg }: { msg: ChatMessage }) {
-  const isUser = msg.role === 'user'
+  const isUser    = msg.role === 'user'
+  const isOrder   = !isUser && msg.isOrderFlow
+
+  const botBg     = isOrder ? '#2563eb' : '#fff'
+  const botColor  = isOrder ? '#fff'    : '#282A35'
+  const botBorder = isOrder ? 'none'    : '1px solid #E0E0E0'
+  const iconBg    = isOrder ? '#1d4ed8' : '#282A35'
+
   return (
     <div className={`flex gap-2.5 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
-      <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
-        style={{ backgroundColor: isUser ? '#04AA6D' : '#282A35' }}>
-        {isUser ? <User size={13} className="text-white" /> : <Bot size={13} className="text-white" />}
+      <div
+        className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
+        style={{ backgroundColor: isUser ? '#04AA6D' : iconBg }}
+      >
+        {isUser
+          ? <User size={13} className="text-white" />
+          : <Bot  size={13} className="text-white" />
+        }
       </div>
-      <div className="max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
+      <div
+        className="max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
         style={isUser
           ? { backgroundColor: '#04AA6D', color: '#fff', borderBottomRightRadius: 4 }
-          : { backgroundColor: '#fff', color: '#282A35', border: '1px solid #E0E0E0', borderBottomLeftRadius: 4 }}>
+          : { backgroundColor: botBg, color: botColor, border: botBorder, borderBottomLeftRadius: 4 }
+        }
+      >
         {msg.text}
       </div>
     </div>
   )
 }
 
-function TypingIndicator() {
+function TypingIndicator({ inOrderFlow }: { inOrderFlow: boolean }) {
   return (
     <div className="flex gap-2.5">
-      <div className="w-7 h-7 rounded-full flex items-center justify-center" style={{ backgroundColor: '#282A35' }}>
+      <div
+        className="w-7 h-7 rounded-full flex items-center justify-center"
+        style={{ backgroundColor: inOrderFlow ? '#1d4ed8' : '#282A35' }}
+      >
         <Bot size={13} className="text-white" />
       </div>
-      <div className="px-4 py-3 rounded-2xl bg-white border border-gray-200" style={{ borderBottomLeftRadius: 4 }}>
+      <div
+        className="px-4 py-3 rounded-2xl border"
+        style={{
+          backgroundColor: inOrderFlow ? '#2563eb' : '#fff',
+          borderColor: inOrderFlow ? '#2563eb' : '#e5e7eb',
+          borderBottomLeftRadius: 4,
+        }}
+      >
         <div className="flex gap-1 items-center">
-          <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-          <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-          <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+          <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${inOrderFlow ? 'bg-blue-200' : 'bg-gray-400'}`} style={{ animationDelay: '0ms' }} />
+          <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${inOrderFlow ? 'bg-blue-200' : 'bg-gray-400'}`} style={{ animationDelay: '150ms' }} />
+          <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${inOrderFlow ? 'bg-blue-200' : 'bg-gray-400'}`} style={{ animationDelay: '300ms' }} />
         </div>
       </div>
+    </div>
+  )
+}
+
+function OrderFlowBanner() {
+  return (
+    <div
+      className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium"
+      style={{ backgroundColor: '#2563eb', color: '#fff' }}
+    >
+      <ShoppingCart size={15} />
+      <span>🛒 অর্ডার প্রক্রিয়া চলছে...</span>
     </div>
   )
 }
@@ -152,15 +206,18 @@ function DiscountPanel({ ctx }: { ctx: DiscountCtx }) {
 }
 
 export default function TestBotPage() {
-  const [messages, setMessages]       = useState<ChatMessage[]>([])
-  const [input, setInput]             = useState('')
-  const [typing, setTyping]           = useState(false)
+  const [messages, setMessages]         = useState<ChatMessage[]>([])
+  const [input, setInput]               = useState('')
+  const [typing, setTyping]             = useState(false)
   const [customerPhone, setCustomerPhone] = useState('')
-  const [discountCtx, setDiscountCtx] = useState<DiscountCtx | null>(null)
+  const [discountCtx, setDiscountCtx]   = useState<DiscountCtx | null>(null)
+  const [orderFlow, setOrderFlow]       = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef  = useRef<HTMLInputElement>(null)
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, typing])
+
+  const inOrderFlow = orderFlow !== null && orderFlow !== 'idle'
 
   async function send() {
     const text = input.trim()
@@ -171,7 +228,11 @@ export default function TestBotPage() {
 
     try {
       const res = await testBotAPI.chat(text, customerPhone || undefined)
-      setMessages(prev => [...prev, { role: 'bot', text: res.reply, ts: new Date() }])
+      const newFlow = res.order_flow ?? null
+      setOrderFlow(newFlow)
+
+      const isOrderMsg = isOrderFlowMessage(res.reply) || (newFlow !== null && newFlow !== 'idle')
+      setMessages(prev => [...prev, { role: 'bot', text: res.reply, ts: new Date(), isOrderFlow: isOrderMsg }])
       if (res.discount_context) setDiscountCtx(res.discount_context as unknown as DiscountCtx)
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -179,6 +240,7 @@ export default function TestBotPage() {
         role: 'bot',
         text: detail || 'দুঃখিত, AI সার্ভিস সাময়িকভাবে অনুপলব্ধ। একটু পরে আবার চেষ্টা করুন।',
         ts: new Date(),
+        isOrderFlow: false,
       }])
       toast.error('AI response ব্যর্থ হয়েছে')
     } finally {
@@ -196,6 +258,7 @@ export default function TestBotPage() {
     if (!confirm('পুরো কথোপকথন মুছে ফেলবেন?')) return
     setMessages([])
     setDiscountCtx(null)
+    setOrderFlow(null)
   }
 
   return (
@@ -216,6 +279,9 @@ export default function TestBotPage() {
           </button>
         </div>
 
+        {/* Order flow banner */}
+        {inOrderFlow && <div className="mb-3"><OrderFlowBanner /></div>}
+
         {/* Customer phone (optional) */}
         <div className="flex items-center gap-2 mb-3">
           <input
@@ -235,7 +301,7 @@ export default function TestBotPage() {
 
         {/* Chat window */}
         <div className="flex-1 rounded-xl overflow-y-auto p-4 space-y-4"
-          style={{ backgroundColor: '#F4F6F8', border: '1px solid #E0E0E0' }}>
+          style={{ backgroundColor: '#F4F6F8', border: `1px solid ${inOrderFlow ? '#2563eb' : '#E0E0E0'}`, transition: 'border-color 0.3s' }}>
           {messages.length === 0 && !typing && (
             <div className="h-full flex flex-col items-center justify-center text-center py-10 gap-3">
               <div className="w-16 h-16 rounded-full flex items-center justify-center" style={{ backgroundColor: '#282A35' }}>
@@ -259,7 +325,7 @@ export default function TestBotPage() {
             </div>
           )}
           {messages.map((msg, i) => <Bubble key={i} msg={msg} />)}
-          {typing && <TypingIndicator />}
+          {typing && <TypingIndicator inOrderFlow={inOrderFlow} />}
           <div ref={bottomRef} />
         </div>
 
@@ -268,12 +334,15 @@ export default function TestBotPage() {
           <input ref={inputRef} type="text"
             className="flex-1 px-3 py-2 text-sm outline-none bg-transparent"
             style={{ color: '#282A35' }}
-            placeholder="বার্তা লিখুন... (Enter পাঠাতে)"
+            placeholder={inOrderFlow ? 'অর্ডার তথ্য লিখুন...' : 'বার্তা লিখুন... (Enter পাঠাতে)'}
             value={input} onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown} disabled={typing} autoFocus />
           <button onClick={send} disabled={!input.trim() || typing}
             className="w-9 h-9 rounded-lg flex items-center justify-center transition-all flex-shrink-0"
-            style={{ backgroundColor: !input.trim() || typing ? '#E0E0E0' : '#04AA6D', color: !input.trim() || typing ? '#9E9E9E' : '#fff' }}>
+            style={{
+              backgroundColor: !input.trim() || typing ? '#E0E0E0' : inOrderFlow ? '#2563eb' : '#04AA6D',
+              color: !input.trim() || typing ? '#9E9E9E' : '#fff',
+            }}>
             {typing ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
           </button>
         </div>
