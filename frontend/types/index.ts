@@ -332,3 +332,14 @@ export interface BulkDiscountRule {
   is_active: boolean
   created_at: string
 }
+
+export interface AppNotification {
+  id: string
+  tenant_id: string
+  type: string
+  title: string
+  body: string
+  ref_id: string | null
+  is_read: boolean
+  created_at: string
+}

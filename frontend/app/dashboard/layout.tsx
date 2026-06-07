@@ -10,8 +10,10 @@ import {
   LogOut, Bot, Megaphone, BookOpen, FlaskConical,
   ChevronLeft, ChevronRight, Sun, Moon,
   RotateCcw, Layers, AlertTriangle, MoreHorizontal,
-  RefreshCw, Percent, Receipt,
+  RefreshCw, Percent, Receipt, Bell, X,
 } from 'lucide-react'
+import { notificationsAPI } from '@/lib/api'
+import type { AppNotification } from '@/types'
 
 // ─── Nav configuration ────────────────────────────────────────────────────────
 
@@ -192,6 +194,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [mobileOpen, setMobileOpen] = useState(false)
   const [collapsed, setCollapsed]   = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [notifCount, setNotifCount] = useState(0)
+  const [notifOpen, setNotifOpen]   = useState(false)
+  const [notifs, setNotifs]         = useState<AppNotification[]>([])
+  const notifRef = useRef<HTMLDivElement>(null)
 
   const openMobile  = useCallback(() => setMobileOpen(true),  [])
   const closeMobile = useCallback(() => setMobileOpen(false), [])
@@ -215,6 +221,48 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [router])
 
   useEffect(() => { setMobileOpen(false) }, [pathname])
+
+  // Poll notification count every 20 seconds
+  useEffect(() => {
+    let mounted = true
+    const poll = async () => {
+      try {
+        const { count } = await notificationsAPI.count()
+        if (mounted) setNotifCount(count)
+      } catch { /* silent */ }
+    }
+    poll()
+    const id = setInterval(poll, 20_000)
+    return () => { mounted = false; clearInterval(id) }
+  }, [])
+
+  // Close notification panel on outside click
+  useEffect(() => {
+    if (!notifOpen) return
+    const handler = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setNotifOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [notifOpen])
+
+  const openNotifPanel = useCallback(async () => {
+    setNotifOpen(o => !o)
+    if (!notifOpen) {
+      try {
+        const list = await notificationsAPI.list(20)
+        setNotifs(list)
+      } catch { /* silent */ }
+    }
+  }, [notifOpen])
+
+  const handleMarkAllRead = useCallback(async () => {
+    await notificationsAPI.markAllRead()
+    setNotifCount(0)
+    setNotifs(prev => prev.map(n => ({ ...n, is_read: true })))
+  }, [])
 
   // Lock body scroll when mobile sidebar is open
   useEffect(() => {
@@ -481,6 +529,109 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           >
             <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
           </button>
+
+          {/* Notification bell */}
+          <div ref={notifRef} className="relative flex-shrink-0">
+            <button
+              onClick={openNotifPanel}
+              className="relative flex items-center justify-center w-8 h-8 rounded-lg transition-colors"
+              style={{ color: notifCount > 0 ? '#FFB300' : '#78909C' }}
+              title="Notifications"
+              onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.08)')}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+            >
+              <Bell size={14} />
+              {notifCount > 0 && (
+                <span
+                  className="absolute -top-0.5 -right-0.5 flex items-center justify-center rounded-full text-white font-bold"
+                  style={{ backgroundColor: '#E53935', fontSize: 9, minWidth: 16, height: 16, padding: '0 3px', lineHeight: 1 }}
+                >
+                  {notifCount > 99 ? '99+' : notifCount}
+                </span>
+              )}
+            </button>
+
+            {/* Notification dropdown */}
+            {notifOpen && (
+              <div
+                className="absolute right-0 mt-2 w-80 rounded-xl shadow-2xl overflow-hidden z-50"
+                style={{ top: '100%', backgroundColor: 'var(--c-card)', border: '1px solid var(--c-border)' }}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between px-4 py-3"
+                     style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'var(--c-surface)' }}>
+                  <div className="flex items-center gap-2">
+                    <Bell size={13} style={{ color: '#04AA6D' }} />
+                    <span className="text-sm font-semibold" style={{ color: 'var(--c-text)' }}>Notifications</span>
+                    {notifCount > 0 && (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full font-medium"
+                            style={{ backgroundColor: '#FFEBEE', color: '#E53935' }}>
+                        {notifCount} নতুন
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {notifCount > 0 && (
+                      <button onClick={handleMarkAllRead}
+                              className="text-xs"
+                              style={{ color: '#04AA6D' }}>
+                        সব পড়া
+                      </button>
+                    )}
+                    <button onClick={() => setNotifOpen(false)} style={{ color: 'var(--c-muted)' }}>
+                      <X size={13} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* List */}
+                <div className="overflow-y-auto" style={{ maxHeight: 340 }}>
+                  {notifs.length === 0 ? (
+                    <div className="flex flex-col items-center py-10 gap-2">
+                      <Bell size={22} style={{ color: 'var(--c-muted)', opacity: 0.4 }} />
+                      <p className="text-xs" style={{ color: 'var(--c-muted)' }}>কোনো notification নেই</p>
+                    </div>
+                  ) : (
+                    notifs.map(n => (
+                      <div key={n.id}
+                           className="flex items-start gap-3 px-4 py-3 transition-colors"
+                           style={{
+                             borderBottom: '1px solid var(--c-border)',
+                             backgroundColor: n.is_read ? 'transparent' : 'rgba(4,170,109,0.05)',
+                           }}>
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5"
+                             style={{ backgroundColor: n.is_read ? 'var(--c-surface)' : 'rgba(4,170,109,0.12)' }}>
+                          <ShoppingBag size={13} style={{ color: n.is_read ? 'var(--c-muted)' : '#04AA6D' }} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold truncate" style={{ color: 'var(--c-text)' }}>{n.title}</p>
+                          <p className="text-xs mt-0.5 truncate" style={{ color: 'var(--c-text-2)' }}>{n.body}</p>
+                          <p className="text-2xs mt-1" style={{ color: 'var(--c-muted)', fontSize: 10 }}>
+                            {new Date(n.created_at).toLocaleString('bn-BD', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        </div>
+                        {!n.is_read && (
+                          <span className="w-2 h-2 rounded-full flex-shrink-0 mt-1.5"
+                                style={{ backgroundColor: '#04AA6D' }} />
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Footer */}
+                <div className="px-4 py-2.5 text-center"
+                     style={{ borderTop: '1px solid var(--c-border)', backgroundColor: 'var(--c-surface)' }}>
+                  <Link href="/dashboard/orders"
+                        onClick={() => setNotifOpen(false)}
+                        className="text-xs font-medium"
+                        style={{ color: '#04AA6D' }}>
+                    সব order দেখুন →
+                  </Link>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Dark mode toggle */}
           <button

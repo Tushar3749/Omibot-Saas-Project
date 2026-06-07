@@ -426,4 +426,12 @@ export const negotiationAPI = {
   delete: (id: string) => api.delete(`/api/negotiation/${id}`).then(r => r.data),
 }
 
+// ── Notifications ─────────────────────────────────────────────────────────────
+export const notificationsAPI = {
+  count:      () => api.get('/api/notifications/count').then(r => r.data as { count: number }),
+  list:       (limit = 30) => api.get('/api/notifications/', { params: { limit } }).then(r => r.data),
+  markRead:   (id: string) => api.patch(`/api/notifications/${id}/read`).then(r => r.data),
+  markAllRead: () => api.post('/api/notifications/read-all').then(r => r.data),
+}
+
 export default api

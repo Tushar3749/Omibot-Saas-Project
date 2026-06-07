@@ -1098,6 +1098,8 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         logger.warning(f"Discount engine error in save_order: {_de}")
 
     # ── Insert order ───────────────────────────────────────────────────────────
+    customer_name_val = order_data.get("customer_name") or ""
+    customer_phone    = order_data.get("customer_phone") or ""
     supabase.table("orders").insert({
         "order_id":             order_id,
         "tenant_id":            tenant_id,
@@ -1107,7 +1109,8 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         "product_id":           product_id,
         "quantity":             quantity,
         "agreed_price":         agreed_price,
-        "customer_phone":       order_data.get("customer_phone"),
+        "customer_name":        customer_name_val,
+        "customer_phone":       customer_phone,
         "delivery_address":     order_data.get("delivery_address"),
         "notes":                order_data.get("notes"),
         "status":               "pending",
@@ -1115,6 +1118,24 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
         "original_amount":      agreed_price,
         "net_amount":           net_amount,
     }).execute()
+
+    # ── Push notification to owner dashboard ──────────────────────────────────
+    try:
+        body_parts = [order_data.get("product_name") or "পণ্য"]
+        if customer_name_val:
+            body_parts.append(customer_name_val)
+        if customer_phone:
+            body_parts.append(customer_phone)
+        supabase.table("notifications").insert({
+            "tenant_id": tenant_id,
+            "type":      "new_order",
+            "title":     "📦 নতুন অর্ডার",
+            "body":      " | ".join(body_parts),
+            "ref_id":    order_id,
+            "is_read":   False,
+        }).execute()
+    except Exception as _ne:
+        logger.warning(f"Notification insert failed: {_ne}")
 
     # ── Insert order_discounts rows (one per applied discount) ───────────────
     if discount_code and applied_discounts:

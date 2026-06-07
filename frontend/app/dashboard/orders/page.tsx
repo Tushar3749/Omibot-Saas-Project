@@ -6,7 +6,7 @@ import type { Order, DiscountBreakdown } from '@/types'
 import { formatBDT, formatDateTime } from '@/lib/utils'
 import {
   ShoppingBag, Phone, MapPin, TrendingUp, Tag, X,
-  ChevronDown, ChevronUp, Gift,
+  ChevronDown, ChevronUp, Gift, User,
 } from 'lucide-react'
 
 const STATUSES = ['all', 'pending', 'confirmed', 'shipped', 'delivered', 'cancelled']
@@ -338,14 +338,23 @@ export default function OrdersPage() {
                           </div>
                         )}
 
-                        {order.customer_phone && (
+                        {/* Customer info: name + phone stacked */}
+                        {(order.customer_name || order.customer_phone) && (
                           <div className="p-2.5 rounded" style={{ backgroundColor: '#F9F9F9' }}>
                             <p className="text-xs mb-0.5 flex items-center gap-1" style={{ color: '#9E9E9E' }}>
-                              <Phone size={10} /> Phone
+                              <User size={10} /> কাস্টমার
                             </p>
-                            <p className="text-sm font-medium" style={{ color: '#424242' }}>{order.customer_phone}</p>
+                            {order.customer_name && (
+                              <p className="text-sm font-semibold" style={{ color: '#282A35' }}>{order.customer_name}</p>
+                            )}
+                            {order.customer_phone && (
+                              <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: '#616161' }}>
+                                <Phone size={9} />{order.customer_phone}
+                              </p>
+                            )}
                           </div>
                         )}
+
                         {order.delivery_address && (
                           <div className="p-2.5 rounded" style={{ backgroundColor: '#F9F9F9' }}>
                             <p className="text-xs mb-0.5 flex items-center gap-1" style={{ color: '#9E9E9E' }}>
