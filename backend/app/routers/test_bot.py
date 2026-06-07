@@ -1,229 +1,247 @@
 """
 OmniBot SaaS — Test Bot Router
-Lets the tenant owner chat with their own configured bot from the dashboard.
-
-POST /api/test-bot/chat  — send a message, receive the bot's reply
+Uses the real order-flow state machine + AIService.
+Conversation state persists in Supabase (platform="test").
+Each tenant gets ONE stable test conversation so state carries across messages.
 """
 import logging
+import re
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from google import genai
-from google.genai import types as genai_types
-
 from app.auth.dependencies import get_current_tenant
-from app.config import settings
 from app.database import supabase
-from app.services.rag_service import RAGService
+from app.services.ai_service import AIService
+from app.services.webhook_service import (
+    _ALL_FLOW_KEYS,
+    _build_order_summary,
+    _extract_product_for_order,
+    _set_conv_state,
+    get_ai_config,
+    get_or_create_conversation,
+    get_recent_messages,
+    save_message,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+ai_service = AIService()
 
 
 class TestBotRequest(BaseModel):
     message: str
-    customer_phone: Optional[str] = None
     quick_reply_payload: Optional[str] = None
-    order_state: Optional[dict] = None
-
-logger = logging.getLogger(__name__)
-router = APIRouter()
-rag    = RAGService()
-
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
-def _build_system_prompt(ai_cfg: dict, products: list[dict]) -> str:
-    """Build a rich system prompt from the tenant's AI config + top products."""
-    bot_name   = ai_cfg.get("bot_name") or "OmniBot"
-    language   = ai_cfg.get("language") or "bangla"
-    sys_prompt = ai_cfg.get("system_prompt") or ""
-    esc_kws    = ai_cfg.get("escalation_keywords") or []
-    forbidden  = ai_cfg.get("forbidden_topics") or []
+# ── Inline order-flow state machine (no Meta API calls) ───────────────────────
 
-    # Language instruction
-    lang_map = {
-        "bangla":   "সব সময় বাংলায় উত্তর দাও।",
-        "english":  "Always respond in English.",
-        "banglish": "Respond in Banglish (Bengali written in English letters).",
-    }
-    lang_instr = lang_map.get(language, lang_map["bangla"])
+def _run_order_flow(
+    msg: str,
+    msg_lower: str,
+    payload: str,
+    state: dict,
+    conversation_id: str,
+    tenant_id: str,
+) -> Optional[str]:
+    """
+    Mirrors _handle_strict_order_flow but returns the reply string directly
+    instead of calling send_reply / send_quick_reply.
+    Returns None when there is no active order_flow (caller should use Gemini).
+    """
+    step = state.get("order_flow")
+    if not step:
+        return None
 
-    lines = [
-        f"তুমি {bot_name}, একটি বাংলাদেশী ই-কমার্স চ্যাটবট।",
-        lang_instr,
-    ]
+    def _clear_flow() -> str:
+        new_state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+        _set_conv_state(conversation_id, new_state)
+        return "অর্ডার বাতিল হয়েছে। আর কোনো সাহায্য করতে পারি?"
 
-    if sys_prompt:
-        lines.append(sys_prompt)
+    # Hard cancel via quick-reply
+    if payload == "ORDER_CANCEL":
+        return _clear_flow()
 
-    # Products summary (first 20)
-    if products:
-        lines.append("\n## পণ্য তালিকা (প্রথম ২০টি):")
-        for p in products[:20]:
-            lines.append(f"- {p['name']} (SKU: {p.get('sku','')}) — ৳{p['mrp']}")
+    # ── collecting_name ────────────────────────────────────────────────────────
+    if step == "collecting_name":
+        digits_only = all(c.isdigit() or c.isspace() for c in msg)
+        if len(msg) < 2 or digits_only:
+            return "আপনার পূর্ণ নাম লিখুন (শুধু নম্বর নয়):"
+        new_state = {**state, "order_flow": "collecting_phone", "customer_name": msg}
+        _set_conv_state(conversation_id, new_state)
+        return "📞 আপনার ফোন নম্বর দিন (01XXXXXXXXX):"
 
-    if esc_kws:
-        lines.append(f"\nযদি কেউ এই কথা বলে: {', '.join(esc_kws[:10])} — মানব সহায়তায় রেফার করো।")
+    # ── collecting_phone ───────────────────────────────────────────────────────
+    if step == "collecting_phone":
+        digits = "".join(c for c in msg if c.isdigit())
+        phone = digits if re.match(r"^01[3-9]\d{8}$", digits) else None
+        if not phone:
+            return "সঠিক বাংলাদেশি ফোন নম্বর দিন (01XXXXXXXXX):"
+        new_state = {**state, "order_flow": "collecting_address", "customer_phone": phone}
+        _set_conv_state(conversation_id, new_state)
+        return "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):"
 
-    if forbidden:
-        lines.append(f"\nএই বিষয়গুলো নিয়ে কথা বলবে না: {', '.join(forbidden[:10])}")
+    # ── collecting_address ─────────────────────────────────────────────────────
+    if step == "collecting_address":
+        if len(msg) < 10:
+            return "সম্পূর্ণ ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা — কমপক্ষে ১০ অক্ষর):"
+        new_state = {**state, "order_flow": "adding_more_products", "delivery_address": msg}
+        _set_conv_state(conversation_id, new_state)
+        return "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
 
-    lines.append("\n(এটি একটি পরীক্ষামূলক চ্যাট — ড্যাশবোর্ড থেকে বট পরীক্ষা করা হচ্ছে।)")
+    # ── adding_more_products ───────────────────────────────────────────────────
+    if step == "adding_more_products":
+        yes_kws = ["হ্যাঁ", "হা", "yes", "ha", "hae", "আরো", "আর", "যোগ"]
+        no_kws  = ["না", "no", "na", "নাহ", "নেই", "হবে না"]
+        if any(w in msg_lower for w in yes_kws):
+            new_state = {**state, "order_flow": "idle_with_cart"}
+            _set_conv_state(conversation_id, new_state)
+            return "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
+        if any(w in msg_lower for w in no_kws):
+            new_state = {**state, "order_flow": "confirming"}
+            _set_conv_state(conversation_id, new_state)
+            summary, _ = _build_order_summary(new_state)
+            return summary
+        return "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
 
-    return "\n".join(lines)
+    # ── idle_with_cart ─────────────────────────────────────────────────────────
+    if step == "idle_with_cart":
+        product_info = _extract_product_for_order(tenant_id, msg, state)
+        if product_info:
+            cart = list(state.get("cart") or [])
+            cart.append({
+                "name":       product_info.get("name", msg),
+                "product_id": product_info.get("product_id"),
+                "price":      product_info.get("price"),
+                "qty":        1,
+            })
+            new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
+            _set_conv_state(conversation_id, new_state)
+            pname = cart[-1]["name"]
+            return f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+        return "পণ্যটি খুঁজে পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
 
+    # ── confirming ─────────────────────────────────────────────────────────────
+    if step == "confirming":
+        _CANCEL_KWS  = ["না", "na", "no", "cancel", "বাতিল", "na chai"]
+        _CONFIRM_KWS = ["হ্যাঁ", "হা", "ha", "hae", "yes", "ok", "okay", "confirm",
+                        "ঠিক আছে", "ji", "জি", "নিশ্চিত", "হ্যা"]
+        if any(w in msg_lower for w in _CANCEL_KWS):
+            return _clear_flow()
+        if payload == "ORDER_CONFIRM" or any(w in msg_lower for w in _CONFIRM_KWS):
+            summary, _ = _build_order_summary(state)
+            new_state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+            _set_conv_state(conversation_id, new_state)
+            return (
+                f"✅ টেস্ট অর্ডার সিমুলেশন সম্পন্ন!\n\n{summary}\n\n"
+                "(টেস্ট মোডে অর্ডার ডেটাবেজে সেভ হয়নি — লাইভ বটে আসল অর্ডার হবে।)"
+            )
+        summary, _ = _build_order_summary(state)
+        return f"{summary}\n\nনিশ্চিত করতে 'হ্যাঁ' বা বাতিল করতে 'না' লিখুন।"
+
+    # Unknown step — clear it and fall through to Gemini
+    new_state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+    _set_conv_state(conversation_id, new_state)
+    return None
+
+
+# ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/chat")
 async def test_bot_chat(
-    body:   TestBotRequest,
+    body: TestBotRequest,
     tenant: dict = Depends(get_current_tenant),
 ):
-    """
-    Send a message and receive the bot's reply.
-    Uses the tenant's full AI config + their product list to build the context.
-    """
     tid = tenant["tenant_id"]
 
-    # ── Load AI config ────────────────────────────────────────────────────────
-    cfg_res = (
-        supabase.table("ai_config")
-        .select("*")
-        .eq("tenant_id", tid)
-        .maybe_single()
-        .execute()
-    )
-    ai_cfg: dict = {}
-    if cfg_res is not None and cfg_res.data:
-        ai_cfg = cfg_res.data
+    # Stable test conversation — same conversation_id for ALL messages from this tenant
+    conv = get_or_create_conversation(tid, f"test_{tid}", "test")
+    conversation_id = conv["conversation_id"]
 
-    # ── Load products (names, prices, stock) ──────────────────────────────────
-    prod_res = (
-        supabase.table("products")
-        .select("name, sku, mrp, category")
-        .eq("tenant_id", tid)
-        .eq("is_active", True)
-        .limit(20)
-        .execute()
-    )
-    products = prod_res.data or []
+    # Load state BEFORE saving customer message (prevents duplication in history)
+    state   = conv.get("conversation_state") or {}
+    summary = conv.get("conversation_summary")
+    messages = get_recent_messages(conversation_id, limit=20)
 
-    # ── RAG context retrieval ─────────────────────────────────────────────────
-    try:
-        rag_ctx = await rag.get_relevant_context(tid, body.message, match_count=4)
-    except Exception:
-        rag_ctx = ""
+    print(f"TEST_BOT conv={conversation_id} step={state.get('order_flow')} payload={body.quick_reply_payload}")
+    logger.info(f"TEST_BOT conv={conversation_id} state={state}")
 
-    # ── Discount context (if customer_phone provided) ─────────────────────────
-    discount_ctx: dict = {}
-    if body.customer_phone:
+    # Save customer message
+    msg = (body.message or "").strip()
+    save_message(conversation_id, tid, "customer", msg)
+
+    msg_lower = msg.lower()
+    payload   = body.quick_reply_payload or ""
+
+    # 1. Try order flow state machine first
+    reply = _run_order_flow(msg, msg_lower, payload, state, conversation_id, tid)
+
+    # 2. If no active order flow, call real AI service
+    if reply is None:
+        ai_cfg = get_ai_config(tid)
         try:
-            from app.services.discount_engine import get_discount_context as _gdc
-            discount_ctx = _gdc(tenant_id=tid, customer_phone=body.customer_phone)
-        except Exception as _de:
-            logger.warning(f"Test bot discount engine error: {_de}")
+            ai_result = await ai_service.generate_reply(
+                tenant_id=tid,
+                conversation_id=conversation_id,
+                customer_message=msg,
+                ai_config=ai_cfg,
+                raw_messages=messages,
+                conversation_state=state,
+                conversation_summary=summary,
+            )
+            reply = ai_result.get("reply") or "দুঃখিত, উত্তর দিতে পারছি না।"
 
-    # ── Order flow simulation hint ────────────────────────────────────────────
-    order_flow_note: Optional[dict] = None
-    effective_message = body.message
+            # If Gemini detected order intent, start the flow
+            order_data   = ai_result.get("order_data")
+            state_update = ai_result.get("state_update") or {}
+            if order_data and not state.get("order_flow"):
+                from app.services.webhook_service import _extract_product_for_order as _epfo
+                product_name = order_data.get("product_name") or ""
+                cart_item = _epfo(tid, product_name, state) if product_name else {}
+                if not cart_item and product_name:
+                    cart_item = {
+                        "name":       product_name,
+                        "product_id": None,
+                        "price":      order_data.get("agreed_price"),
+                        "qty":        int(order_data.get("quantity") or 1),
+                    }
+                cart = [cart_item] if cart_item else []
+                timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
+                new_state = {
+                    **state,
+                    **state_update,
+                    "order_flow":    "collecting_name",
+                    "cart":          cart,
+                    "order_timeout": timeout_dt,
+                }
+                _set_conv_state(conversation_id, new_state)
+                reply = "আপনার নাম কী?"
+            elif state_update:
+                _set_conv_state(conversation_id, {**state, **state_update})
 
-    if body.quick_reply_payload:
-        payload_labels = {
-            "ORDER_START":   "অর্ডার শুরু করুন",
-            "ORDER_INFO":    "আরো তথ্য",
-            "ORDER_CONFIRM": "অর্ডার নিশ্চিত",
-            "ORDER_CANCEL":  "অর্ডার বাতিল",
-        }
-        label = payload_labels.get(body.quick_reply_payload, body.quick_reply_payload)
-        order_flow_note = {
-            "payload":      body.quick_reply_payload,
-            "label":        label,
-            "description":  f"Quick Reply tapped: [{label}] (payload: {body.quick_reply_payload})",
-        }
-        effective_message = f"[Quick Reply: {label}] {body.message}".strip()
+        except Exception as exc:
+            logger.error(f"test_bot AI error: {exc}", exc_info=True)
+            raise HTTPException(status_code=502, detail=f"AI সার্ভিস সমস্যা: {exc}")
 
-    if body.order_state:
-        step = body.order_state.get("state", "")
-        step_hints = {
-            "triggered":      "Bot showed order QR buttons. Waiting for ORDER_START or ORDER_INFO.",
-            "asking_name":    "Bot asked for customer name.",
-            "asking_phone":   "Bot asked for phone number (01XXXXXXXXX format).",
-            "asking_address": "Bot asked for delivery address.",
-            "confirming":     "Bot showed order summary. Waiting for ORDER_CONFIRM or ORDER_CANCEL.",
-        }
-        hint = step_hints.get(step, f"Order flow step: {step}")
-        if order_flow_note:
-            order_flow_note["order_step"] = hint
-        else:
-            order_flow_note = {"order_step": hint}
+    # Save bot reply
+    save_message(conversation_id, tid, "bot", reply)
 
-    # ── Build system prompt ───────────────────────────────────────────────────
-    system_prompt = _build_system_prompt(ai_cfg, products)
-    if rag_ctx:
-        system_prompt += f"\n\n## জ্ঞানভাণ্ডার থেকে প্রাসঙ্গিক তথ্য:\n{rag_ctx}"
-
-    if order_flow_note:
-        system_prompt += (
-            "\n\n## অর্ডার ফ্লো সিমুলেশন\n"
-            "এটি একটি অর্ডার ফ্লো টেস্ট। "
-            "অর্ডার নেওয়ার সময় নাম, ফোন, ঠিকানা সংগ্রহ করো এবং "
-            "Quick Reply বোতাম সম্পর্কে সচেতন থাকো।"
-        )
-    pct_d  = discount_ctx.get("final_discount_pct", 0)
-    flat_d = discount_ctx.get("final_discount_flat", 0)
-    msg_d  = discount_ctx.get("discount_message", "")
-    bonus_d = discount_ctx.get("bonus_items") or []
-    if pct_d > 0 or flat_d > 0 or msg_d or bonus_d:
-        if not msg_d:
-            if pct_d > 0:
-                msg_d = f"Customer qualifies for {pct_d:.0f}% discount."
-            elif flat_d > 0:
-                msg_d = f"Customer qualifies for ৳{flat_d:.0f} flat discount."
-            elif bonus_d:
-                bonus_names = ", ".join(b.get("name", "") for b in bonus_d[:3])
-                msg_d = f"Customer qualifies for bonus items: {bonus_names}"
-        system_prompt += (
-            f"\n\n[DISCOUNT ENGINE — Active]\n"
-            f"{msg_d}\n"
-            f"Mention this discount naturally when confirming the order."
-        )
-
-    # ── Call Gemini ───────────────────────────────────────────────────────────
-    try:
-        response = _client.models.generate_content(
-            model    = settings.GEMINI_MODEL,
-            contents = effective_message,
-            config   = genai_types.GenerateContentConfig(
-                system_instruction = system_prompt,
-                max_output_tokens  = 1024,
-                temperature        = 0.4,
-            ),
-        )
-        reply = response.text or "দুঃখিত, আমি এখন উত্তর দিতে পারছি না।"
-    except Exception as exc:
-        logger.error("test_bot Gemini error: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"AI সার্ভিস সাময়িকভাবে অনুপলব্ধ: {exc}"
-        )
-
-    # Suggest what QR buttons the real bot would show next
-    quick_replies_hint: Optional[list] = None
-    if "অর্ডার করতে চান" in reply or "অর্ডার করবেন" in reply:
-        quick_replies_hint = [
-            {"title": "✅ অর্ডার করি",  "payload": "ORDER_START"},
-            {"title": "❓ আরো জানি",    "payload": "ORDER_INFO"},
-        ]
-    elif "নিশ্চিত করবেন" in reply or "অর্ডার সামারি" in reply:
-        quick_replies_hint = [
-            {"title": "✅ নিশ্চিত করুন", "payload": "ORDER_CONFIRM"},
-            {"title": "❌ বাতিল",        "payload": "ORDER_CANCEL"},
-        ]
+    # Re-read final state from DB for response
+    conv_now = (
+        supabase.table("conversations")
+        .select("conversation_state")
+        .eq("conversation_id", str(conversation_id))
+        .single()
+        .execute()
+    )
+    final_state = (conv_now.data or {}).get("conversation_state") or {}
+    print(f"TEST_BOT FINAL STATE: {final_state}")
 
     return {
-        "message":           body.message,
-        "reply":             reply,
-        "model":             settings.GEMINI_MODEL,
-        "discount_context":  discount_ctx or None,
-        "order_flow":        order_flow_note,
-        "quick_replies_hint": quick_replies_hint,
+        "reply":           reply,
+        "conversation_id": conversation_id,
+        "order_flow":      final_state.get("order_flow"),
+        "state":           final_state,
     }

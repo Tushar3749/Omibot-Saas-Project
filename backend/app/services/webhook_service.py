@@ -1382,6 +1382,17 @@ def _set_conv_state(conversation_id: str, state: dict) -> None:
         if not result.data:
             print(f"ERROR: Save returned no data! conv={conversation_id} state={state}")
             logger.error(f"ERROR: conversation_state save returned no data for conv={conversation_id}. State was: {state}")
+            return
+        # Verify the write actually landed
+        verify = (
+            supabase.table("conversations")
+            .select("conversation_state")
+            .eq("conversation_id", str(conversation_id))
+            .single()
+            .execute()
+        )
+        print(f"VERIFY STATE IN DB: {verify.data}")
+        logger.info(f"VERIFY STATE IN DB conv={conversation_id}: {verify.data}")
     except Exception as e:
         print(f"SAVE EXCEPTION conv={conversation_id}: {e}")
         logger.error(f"SAVE EXCEPTION conv={conversation_id}: {e}", exc_info=True)
