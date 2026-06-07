@@ -652,7 +652,47 @@ _CONFIRM_QR_BUTTONS = [
     {"content_type": "text", "title": "❌ বাতিল",        "payload": "ORDER_CANCEL"},
 ]
 
-_ORDER_FLOW_KEYS = ("order_flow", "cart", "customer_name", "customer_phone", "delivery_address")
+_ORDER_FLOW_KEYS  = ("order_flow", "cart", "customer_name", "customer_phone", "delivery_address")
+_INTERRUPT_KEYS   = ("order_flow_interrupted", "interrupted_question", "order_flow_paused")
+_ALL_FLOW_KEYS    = _ORDER_FLOW_KEYS + _INTERRUPT_KEYS
+
+_INTERRUPT_QR_BUTTONS = [
+    {"content_type": "text", "title": "বের হই",           "payload": "EXIT_FLOW_ANSWER"},
+    {"content_type": "text", "title": "অর্ডার চালিয়ে যাই", "payload": "CONTINUE_ORDER"},
+]
+
+
+def _get_step_question(step: str) -> str:
+    return {
+        "collecting_name":    "আপনার নাম কী?",
+        "collecting_phone":   "📞 আপনার ফোন নম্বর দিন (01XXXXXXXXX):",
+        "collecting_address": "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):",
+        "confirming":         "অর্ডার নিশ্চিত করতে 'হ্যাঁ' লিখুন অথবা বাতিল করতে 'বাতিল' লিখুন।",
+    }.get(step, "অর্ডার চালিয়ে যান।")
+
+
+def _is_expected_answer(step: str, msg: str, payload: str) -> bool:
+    """True if msg is a plausible direct answer for the current order step (not a side question)."""
+    if payload in ("ORDER_CONFIRM", "ORDER_CANCEL", "EXIT_FLOW_ANSWER", "CONTINUE_ORDER"):
+        return True
+    if not msg:
+        return False
+    if "?" in msg or "？" in msg:
+        return False
+    msg_lower = msg.lower()
+    if step == "collecting_name":
+        return 2 <= len(msg) <= 60
+    if step == "collecting_phone":
+        digits = "".join(c for c in msg if c.isdigit())
+        return len(digits) >= 8
+    if step == "collecting_address":
+        question_kws = ["কত", "কেন", "কীভাবে", "কিভাবে", "কখন", "কবে", "পাঠাবেন", "চার্জ"]
+        return len(msg) >= 5 and not any(k in msg_lower for k in question_kws)
+    if step == "confirming":
+        words = ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে", "হ্যা",
+                 "না", "no", "বাতিল", "cancel"]
+        return any(w in msg_lower for w in words)
+    return True
 
 
 def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -> dict:
@@ -717,7 +757,7 @@ def _extract_product_for_order(tenant_id: str, message_text: str, state: dict) -
     return {}
 
 
-def _handle_strict_order_flow(
+async def _handle_strict_order_flow(
     tenant_id: str,
     conversation_id: str,
     sender_id: str,
@@ -725,9 +765,10 @@ def _handle_strict_order_flow(
     quick_reply_payload: Optional[str],
     state: dict,
     plain_token: str,
+    ai_config: dict,
 ) -> bool:
     """
-    Strict order collection state machine — zero AI involvement.
+    Strict order collection state machine.
     conversation_state.order_flow is a plain string:
       collecting_name → collecting_phone → collecting_address → confirming
     Returns True when the message is consumed (caller must return immediately).
@@ -739,14 +780,95 @@ def _handle_strict_order_flow(
     payload   = quick_reply_payload or ""
 
     def _cancel(reason: str = "❌ অর্ডার বাতিল করা হয়েছে।"):
-        clean = {k: v for k, v in state.items() if k not in _ORDER_FLOW_KEYS}
+        clean = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
         _set_conv_state(conversation_id, clean)
         save_message(conversation_id, tenant_id, "bot", reason)
         send_reply(sender_id, reason, plain_token)
 
-    # Universal cancel
+    # ── Universal cancel ──────────────────────────────────────────────────────
     if payload == "ORDER_CANCEL" or any(w in msg_lower for w in ["বাতিল", "cancel"]):
         _cancel()
+        return True
+
+    # ── INTERRUPT: customer chose EXIT_FLOW_ANSWER (leave flow, get AI answer) ─
+    if payload == "EXIT_FLOW_ANSWER" or state.get("order_flow_interrupted"):
+        if payload == "CONTINUE_ORDER":
+            # Customer changed mind — stay in flow
+            new_state = {**state}
+            new_state.pop("order_flow_interrupted", None)
+            new_state.pop("interrupted_question", None)
+            _set_conv_state(conversation_id, new_state)
+            re_ask = _get_step_question(step)
+            save_message(conversation_id, tenant_id, "bot", re_ask)
+            send_reply(sender_id, re_ask, plain_token)
+            return True
+
+        if payload == "EXIT_FLOW_ANSWER":
+            # Customer wants to exit temporarily — answer their saved question via AI
+            interrupted_q = state.get("interrupted_question") or msg
+            new_state = {**state, "order_flow_paused": True}
+            new_state.pop("order_flow_interrupted", None)
+            new_state.pop("interrupted_question", None)
+            _set_conv_state(conversation_id, new_state)
+
+            ai_answer = ""
+            try:
+                from app.services.ai_service import generate_reply
+                ai_answer = await generate_reply(
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    user_message=interrupted_q,
+                    ai_config=ai_config,
+                )
+            except Exception:
+                ai_answer = "দুঃখিত, এই মুহূর্তে উত্তর দিতে পারছি না।"
+
+            reminder = "\n\n📌 আপনার অর্ডার সংরক্ষিত আছে। চালিয়ে যেতে 'অর্ডার চালু করুন' বলুন।"
+            full_reply = (ai_answer or "") + reminder
+            save_message(conversation_id, tenant_id, "bot", full_reply)
+            send_reply(sender_id, full_reply, plain_token)
+            return True
+
+        # Still in interrupted state waiting for button press — re-show buttons
+        prompt = (
+            "আপনি এখন অর্ডার প্রক্রিয়ার মধ্যে আছেন।\n"
+            "কী করতে চান?"
+        )
+        save_message(conversation_id, tenant_id, "bot", prompt)
+        send_quick_reply(sender_id, prompt, _INTERRUPT_QR_BUTTONS, plain_token)
+        return True
+
+    # ── PAUSED: customer exited flow earlier, waiting for resume keyword ───────
+    if state.get("order_flow_paused"):
+        resume_kws = ["অর্ডার চালু করুন", "order চালু", "চালিয়ে যাই", "resume", "অর্ডার"]
+        if any(k in msg_lower for k in resume_kws):
+            new_state = {**state}
+            new_state.pop("order_flow_paused", None)
+            _set_conv_state(conversation_id, new_state)
+            re_ask = _get_step_question(step)
+            reply = f"স্বাগতম! আপনার অর্ডার চালিয়ে যাচ্ছি।\n\n{re_ask}"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+        else:
+            reminder = (
+                "📌 আপনার অর্ডার অপেক্ষায় আছে। "
+                "চালিয়ে যেতে 'অর্ডার চালু করুন' লিখুন।"
+            )
+            save_message(conversation_id, tenant_id, "bot", reminder)
+            send_reply(sender_id, reminder, plain_token)
+        return True
+
+    # ── INTERRUPT GUARD: unexpected answer for current step ───────────────────
+    if not _is_expected_answer(step, msg, payload):
+        new_state = {**state, "order_flow_interrupted": True, "interrupted_question": msg}
+        _set_conv_state(conversation_id, new_state)
+        prompt = (
+            "আপনি এখন অর্ডার প্রক্রিয়ার মধ্যে আছেন। "
+            "প্রথমে প্রশ্নের উত্তর নিতে চাইলে অর্ডার থেকে বের হতে পারেন, "
+            "অথবা সরাসরি অর্ডার চালিয়ে যেতে পারেন।"
+        )
+        save_message(conversation_id, tenant_id, "bot", prompt)
+        send_quick_reply(sender_id, prompt, _INTERRUPT_QR_BUTTONS, plain_token)
         return True
 
     # ── STEP 1: Collect name (RULE 2) ─────────────────────────────────────────
@@ -870,7 +992,7 @@ def _handle_strict_order_flow(
             discount_summary = save_order(tenant_id, conversation_id, sender_id, order_data)
             order_ref        = _gen_order_ref()
 
-            clean = {k: v for k, v in state.items() if k not in _ORDER_FLOW_KEYS}
+            clean = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
             _set_conv_state(conversation_id, clean)
 
             confirm_text = (
@@ -893,7 +1015,7 @@ def _handle_strict_order_flow(
         return True
 
     # Unknown step — clear stale state, fall through to AI
-    clean = {k: v for k, v in state.items() if k not in _ORDER_FLOW_KEYS}
+    clean = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
     _set_conv_state(conversation_id, clean)
     return False
 
@@ -1259,7 +1381,7 @@ async def process_message(
     return_flow = state.get("return_flow")
     # ── 0. Migrate legacy dict-format order_flow ─────────────────────────────
     if isinstance(state.get("order_flow"), dict):
-        state = {k: v for k, v in state.items() if k not in _ORDER_FLOW_KEYS}
+        state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
         _set_conv_state(conversation_id, state)
 
     # ── 0.5. Abuse detection ──────────────────────────────────────────────────
@@ -1308,9 +1430,9 @@ async def process_message(
     # ── 2.5 Active Order Flow — strict state machine, NEVER falls through to AI
     order_flow_step = state.get("order_flow")
     if order_flow_step and isinstance(order_flow_step, str) and (message_text or quick_reply_payload):
-        handled = _handle_strict_order_flow(
+        handled = await _handle_strict_order_flow(
             tenant_id, conversation_id, sender_id, message_text,
-            quick_reply_payload, state, plain_token,
+            quick_reply_payload, state, plain_token, ai_config,
         )
         if handled:
             return
