@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -758,17 +759,16 @@ def _is_expected_answer(step: str, msg: str, payload: str) -> bool:
         return 2 <= len(msg) <= 60 and not digits_only
     if step == "collecting_phone":
         digits = "".join(c for c in msg if c.isdigit())
-        return len(digits) >= 8
+        return bool(re.match(r"^01[3-9]\d{8}$", digits))
     if step == "collecting_address":
-        question_kws = ["কত", "কেন", "কীভাবে", "কিভাবে", "কখন", "কবে", "পাঠাবেন", "চার্জ"]
-        return len(msg) >= 10 and not any(k in msg_lower for k in question_kws)
+        return len(msg) >= 10
     if step in ("adding_more_products",):
         return any(w in msg_lower for w in yes_no)
     if step in ("idle_with_cart", "abandoned", "interruption_pending", "paused"):
         return True
     if step == "confirming":
-        words = ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে", "হ্যা",
-                 "না", "no", "বাতিল", "cancel", "ha", "hae", "na"]
+        words = ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "okay", "ঠিক আছে", "হ্যা",
+                 "না", "no", "বাতিল", "cancel", "ha", "hae", "na", "ji", "জি", "na chai"]
         return any(w in msg_lower for w in words)
     return True
 
@@ -1030,8 +1030,9 @@ async def _handle_strict_order_flow(
 
     # ── 7. COLLECTING NAME ───────────────────────────────────────────────────
     if step == "collecting_name":
-        if len(msg) < 2:
-            reply = "আপনার পূর্ণ নাম লিখুন:"
+        digits_only = all(c.isdigit() or c.isspace() for c in msg)
+        if len(msg) < 2 or digits_only:
+            reply = "আপনার পূর্ণ নাম লিখুন (শুধু নম্বর নয়):"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
@@ -1044,7 +1045,8 @@ async def _handle_strict_order_flow(
 
     # ── 8. COLLECTING PHONE ──────────────────────────────────────────────────
     if step == "collecting_phone":
-        phone = normalize_bd_phone(msg)
+        digits = "".join(c for c in msg if c.isdigit())
+        phone = digits if re.match(r"^01[3-9]\d{8}$", digits) else None
         if not phone:
             reply = "সঠিক বাংলাদেশি ফোন নম্বর দিন (01XXXXXXXXX):"
             save_message(conversation_id, tenant_id, "bot", reply)
@@ -1059,8 +1061,8 @@ async def _handle_strict_order_flow(
 
     # ── 9. COLLECTING ADDRESS ────────────────────────────────────────────────
     if step == "collecting_address":
-        if len(msg) < 5:
-            reply = "সম্পূর্ণ ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):"
+        if len(msg) < 10:
+            reply = "সম্পূর্ণ ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা — কমপক্ষে ১০ অক্ষর):"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
@@ -1119,13 +1121,15 @@ async def _handle_strict_order_flow(
 
     # ── 12. CONFIRMING ───────────────────────────────────────────────────────
     if step == "confirming":
-        if any(w in msg_lower for w in ["না", "no", "বাতিল", "cancel"]) or payload == "ORDER_CANCEL":
+        _CANCEL_KWS  = ["না", "na", "no", "cancel", "বাতিল", "na chai"]
+        _CONFIRM_KWS = ["হ্যাঁ", "হা", "ha", "hae", "yes", "ok", "okay", "confirm", "ঠিক আছে", "ji", "জি", "নিশ্চিত", "হ্যা"]
+        if any(w in msg_lower for w in _CANCEL_KWS) or payload == "ORDER_CANCEL":
             _cancel()
             return True
 
         confirmed = (
             payload == "ORDER_CONFIRM"
-            or any(w in msg_lower for w in ["হ্যাঁ", "হা", "yes", "নিশ্চিত", "confirm", "ok", "ঠিক আছে", "হ্যা", "ha", "hae"])
+            or any(w in msg_lower for w in _CONFIRM_KWS)
         )
         if confirmed:
             cart             = state.get("cart") or []
