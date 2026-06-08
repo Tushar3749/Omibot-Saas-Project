@@ -13,12 +13,15 @@ from pydantic import BaseModel
 from app.auth.dependencies import get_current_tenant
 from app.database import supabase
 from app.services.ai_service import AIService
+import json
+
 from app.services.webhook_service import (
     _ALL_FLOW_KEYS,
     _apply_extracted_to_state,
     _build_order_summary_v2,
     _cart_add_item,
     _extract_product_for_order,
+    _gen_order_ref,
     _gemini_order_intent,
     _next_missing_step,
     _set_conv_state,
@@ -27,6 +30,7 @@ from app.services.webhook_service import (
     get_or_create_conversation,
     get_recent_messages,
     save_message,
+    save_order,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,13 +200,48 @@ def _run_order_flow(
         if missing != "confirming":
             _set_conv_state(conversation_id, new_state)
             return f"অর্ডার করতে আরও তথ্য দরকার। {_step_question_v2(missing)}"
-        # Test mode — simulate confirmation without saving to DB
-        summary = _build_order_summary_v2(new_state)
-        clean   = {k: v for k, v in new_state.items() if k not in _ALL_FLOW_KEYS}
+
+        cart             = new_state.get("cart") or []
+        customer_name    = new_state.get("customer_name", "")
+        customer_phone   = new_state.get("customer_phone", "")
+        delivery_address = new_state.get("delivery_address", "")
+        first_item       = cart[0] if cart else {}
+        product_name     = first_item.get("product_name") or first_item.get("name") or "পণ্য"
+        product_id       = first_item.get("product_id")
+        price            = first_item.get("price")
+        quantity         = int(first_item.get("quantity") or 1)
+        order_ref        = _gen_order_ref()
+
+        order_data = {
+            "product_name":     product_name,
+            "product_id":       product_id,
+            "quantity":         quantity,
+            "agreed_price":     float(price) if price else None,
+            "customer_name":    customer_name,
+            "customer_phone":   customer_phone,
+            "delivery_address": delivery_address,
+            "order_ref":        order_ref,
+            "notes":            json.dumps({"cart": cart}) if len(cart) > 1 else None,
+        }
+        save_order(tenant_id, conversation_id, f"test_{tenant_id}", order_data)
+
+        clean = {k: v for k, v in new_state.items() if k not in _ALL_FLOW_KEYS}
         _set_conv_state(conversation_id, clean)
+
+        total     = sum(float(i.get("price") or 0) * int(i.get("quantity") or 1) for i in cart)
+        items_str = "\n".join(
+            f"  - {i.get('product_name') or 'পণ্য'} × {i.get('quantity') or 1}"
+            for i in cart
+        )
         return (
-            f"✅ টেস্ট অর্ডার সিমুলেশন সম্পন্ন!\n\n{summary}\n\n"
-            "(টেস্ট মোডে অর্ডার ডেটাবেজে সেভ হয়নি — লাইভ বটে আসল অর্ডার হবে।)"
+            f"✅ অর্ডার নেওয়া হয়েছে!\n"
+            f"🔖 ID: {order_ref}\n"
+            f"🛒 পণ্য:\n{items_str}\n"
+            f"💰 মোট: ৳{total:.0f}\n"
+            f"👤 {customer_name}\n"
+            f"📞 {customer_phone}\n"
+            f"📍 {delivery_address}\n\n"
+            f"আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏"
         )
 
     # ── ask_question / frustrated / other ─────────────────────────────────────
