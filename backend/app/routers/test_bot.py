@@ -24,6 +24,11 @@ from app.services.webhook_service import (
     _gen_order_ref,
     _gemini_order_intent,
     _next_missing_step,
+    _query_active_discounts,
+    _query_delivery_charge,
+    _query_price,
+    _query_product_list,
+    _query_stock,
     _set_conv_state,
     _step_question_v2,
     get_ai_config,
@@ -32,6 +37,7 @@ from app.services.webhook_service import (
     save_message,
     save_order,
 )
+from app.services.discount_engine import get_discount_context as _get_discount_ctx
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -243,6 +249,114 @@ def _run_order_flow(
             f"📍 {delivery_address}\n\n"
             f"আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏"
         )
+
+    # ── ask_stock ─────────────────────────────────────────────────────────────
+    if intent == "ask_stock":
+        pname  = (extracted.get("product_name") or "").strip()
+        result = _query_stock(tenant_id, pname) if pname else None
+        if result:
+            if result["current_stock"] > 0:
+                reply = f"হ্যাঁ, {result['name']} স্টকে আছে ({result['current_stock']}টি)।"
+            else:
+                reply = f"দুঃখিত, {result['name']} এই মুহূর্তে স্টকে নেই।"
+        else:
+            reply = "পণ্যটি খুঁজে পাওয়া যায়নি। নাম একটু নির্দিষ্ট করে বলুন।"
+        current_step = new_state.get("order_flow") or step
+        _set_conv_state(conversation_id, new_state)
+        return reply + f"\n\n📌 {_step_question_v2(current_step)}"
+
+    # ── ask_price ─────────────────────────────────────────────────────────────
+    if intent == "ask_price":
+        pname  = (extracted.get("product_name") or "").strip()
+        result = _query_price(tenant_id, pname) if pname else None
+        if result:
+            reply = f"{result['name']} — ৳{result['mrp']}"
+        else:
+            reply = "পণ্যটি খুঁজে পাওয়া যায়নি। নাম একটু নির্দিষ্ট করে বলুন।"
+        current_step = new_state.get("order_flow") or step
+        _set_conv_state(conversation_id, new_state)
+        return reply + f"\n\n📌 {_step_question_v2(current_step)}"
+
+    # ── ask_discount ──────────────────────────────────────────────────────────
+    if intent == "ask_discount":
+        cart = new_state.get("cart") or []
+        if cart:
+            total = sum(float(i.get("price") or 0) * int(i.get("quantity") or 1) for i in cart)
+            first = cart[0]
+            try:
+                dctx = _get_discount_ctx(
+                    tenant_id=tenant_id,
+                    customer_platform_id=f"test_{tenant_id}",
+                    customer_phone=new_state.get("customer_phone"),
+                    cart_context={
+                        "cart_amount": total,
+                        "product_skus": [first.get("sku")] if first.get("sku") else [],
+                        "quantity": int(first.get("quantity") or 1),
+                    },
+                )
+                disc_amt = float(dctx.get("discount_amount") or 0)
+                if disc_amt > 0:
+                    reply = f"আপনার কার্টে ছাড় প্রযোজ্য: ৳{disc_amt:.0f} বাদ (নেট: ৳{max(0, total - disc_amt):.0f})"
+                elif dctx.get("bonus_items"):
+                    bonus = ", ".join(b.get("name", "") for b in dctx["bonus_items"][:2])
+                    reply = f"আপনার কার্টে বোনাস পণ্য প্রযোজ্য: {bonus}"
+                else:
+                    reply = "আপনার বর্তমান কার্টে কোনো ছাড় প্রযোজ্য নয়।"
+            except Exception:
+                reply = "ছাড়ের তথ্য এখন পাওয়া যাচ্ছে না।"
+        else:
+            discounts = _query_active_discounts(tenant_id)
+            if discounts:
+                names = ", ".join(d.get("discount_name", "") for d in discounts[:3])
+                reply = f"হ্যাঁ! এখন চলছে: {names}"
+            else:
+                reply = "বর্তমানে কোনো ছাড় নেই।"
+        current_step = new_state.get("order_flow") or step
+        _set_conv_state(conversation_id, new_state)
+        return reply + f"\n\n📌 {_step_question_v2(current_step)}"
+
+    # ── ask_products ──────────────────────────────────────────────────────────
+    if intent == "ask_products":
+        category = (extracted.get("category") or "").strip() or None
+        products = _query_product_list(tenant_id, category)
+        if not products:
+            reply = "কোনো পণ্য পাওয়া যায়নি।"
+        else:
+            grouped: dict = {}
+            for p in products:
+                cat = p.get("category") or "অন্যান্য"
+                grouped.setdefault(cat, []).append(p)
+            lines = ["📋 আমাদের পণ্য তালিকা:\n"]
+            for cat, items in grouped.items():
+                lines.append(f"📦 {cat}:")
+                for p in items:
+                    lines.append(f"  - {p['name']} — ৳{p.get('mrp') or '?'}")
+            lines.append("\nকোনটি নেবেন?")
+            reply = "\n".join(lines)
+        _set_conv_state(conversation_id, new_state)
+        return reply
+
+    # ── ask_delivery ──────────────────────────────────────────────────────────
+    if intent == "ask_delivery":
+        district = (extracted.get("district") or "").strip() or None
+        if not district:
+            addr = new_state.get("delivery_address") or ""
+            district = addr.split(",")[-1].strip() if addr else None
+        charge_row = _query_delivery_charge(tenant_id, district)
+        if charge_row:
+            reply = f"{charge_row['district']}য় ডেলিভারি চার্জ ৳{charge_row['charge']}"
+        else:
+            reply = "ডেলিভারি চার্জের তথ্য পাওয়া যায়নি। আমাদের সাথে যোগাযোগ করুন।"
+        current_step = new_state.get("order_flow") or step
+        _set_conv_state(conversation_id, new_state)
+        return reply + f"\n\n📌 {_step_question_v2(current_step)}"
+
+    # ── ask_payment ───────────────────────────────────────────────────────────
+    if intent == "ask_payment":
+        reply = "আমরা ক্যাশ অন ডেলিভারি (COD) গ্রহণ করি। এছাড়া bKash/Nagad-এও পেমেন্ট করতে পারবেন।"
+        current_step = new_state.get("order_flow") or step
+        _set_conv_state(conversation_id, new_state)
+        return reply + f"\n\n📌 {_step_question_v2(current_step)}"
 
     # ── ask_question / frustrated / other ─────────────────────────────────────
     current_step = new_state.get("order_flow") or step

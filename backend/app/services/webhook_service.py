@@ -785,6 +785,133 @@ def _format_cart_for_prompt(cart: list) -> str:
     return ", ".join(parts)
 
 
+def _query_stock(tenant_id: str, product_name: str) -> Optional[dict]:
+    """Returns {name, current_stock} for the closest matching product, or None."""
+    try:
+        prods = (
+            supabase.table("products")
+            .select("product_id, name")
+            .eq("tenant_id", tenant_id)
+            .ilike("name", f"%{product_name}%")
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        if not prods:
+            return None
+        p = prods[0]
+        stock_row = (
+            supabase.table("stock")
+            .select("current_stock")
+            .eq("tenant_id", tenant_id)
+            .eq("product_id", p["product_id"])
+            .maybe_single()
+            .execute()
+        )
+        stock = (stock_row.data or {}).get("current_stock", 0) if stock_row else 0
+        return {"name": p["name"], "current_stock": int(stock or 0)}
+    except Exception as e:
+        logger.warning(f"_query_stock error: {e}")
+        return None
+
+
+def _query_price(tenant_id: str, product_name: str) -> Optional[dict]:
+    """Returns {name, mrp} for the closest matching product, or None."""
+    try:
+        prods = (
+            supabase.table("products")
+            .select("name, mrp")
+            .eq("tenant_id", tenant_id)
+            .ilike("name", f"%{product_name}%")
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        return prods[0] if prods else None
+    except Exception as e:
+        logger.warning(f"_query_price error: {e}")
+        return None
+
+
+def _query_active_discounts(tenant_id: str) -> list[dict]:
+    """Returns currently active discounts with name and basic reward info."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = (
+            supabase.table("discounts")
+            .select("discount_name, discount_code, rule_ids, effective_to, is_lifetime")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .lte("effective_from", now)
+            .execute()
+            .data or []
+        )
+        active = []
+        for d in rows:
+            eff_to = d.get("effective_to")
+            if not eff_to or d.get("is_lifetime"):
+                active.append(d)
+            else:
+                try:
+                    if datetime.fromisoformat(eff_to.replace("Z", "+00:00")) >= datetime.now(timezone.utc):
+                        active.append(d)
+                except Exception:
+                    active.append(d)
+        return active
+    except Exception as e:
+        logger.warning(f"_query_active_discounts error: {e}")
+        return []
+
+
+def _query_product_list(tenant_id: str, category: Optional[str] = None) -> list[dict]:
+    """Returns active products, optionally filtered by category."""
+    try:
+        q = (
+            supabase.table("products")
+            .select("name, mrp, category")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .order("category")
+            .limit(40)
+        )
+        if category:
+            q = q.ilike("category", f"%{category}%")
+        return q.execute().data or []
+    except Exception as e:
+        logger.warning(f"_query_product_list error: {e}")
+        return []
+
+
+def _query_delivery_charge(tenant_id: str, district: Optional[str] = None) -> Optional[dict]:
+    """Returns {district, charge} for the given district, or the default/first entry."""
+    try:
+        if district:
+            row = (
+                supabase.table("delivery_charges")
+                .select("district, charge")
+                .eq("tenant_id", tenant_id)
+                .ilike("district", f"%{district}%")
+                .maybe_single()
+                .execute()
+            )
+            if row and row.data:
+                return row.data
+        rows = (
+            supabase.table("delivery_charges")
+            .select("district, charge")
+            .eq("tenant_id", tenant_id)
+            .limit(3)
+            .execute()
+            .data or []
+        )
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.warning(f"_query_delivery_charge error: {e}")
+        return None
+
+
 def _gemini_order_intent(msg: str, state: dict, tenant_id: str) -> dict:
     """
     Master Gemini call for every message in the active order flow.
@@ -807,17 +934,26 @@ def _gemini_order_intent(msg: str, state: dict, tenant_id: str) -> dict:
         f"Customer just said: '{msg}'\n\n"
         "Analyze and return JSON only:\n"
         '{\n'
-        '  "intent": "provide_product" | "done_adding" | "provide_name" | "provide_phone" | "provide_address" | "confirm_order" | "cancel_order" | "modify_name" | "modify_phone" | "modify_address" | "modify_product" | "remove_product" | "ask_question" | "frustrated" | "other",\n'
+        '  "intent": "provide_product" | "done_adding" | "provide_name" | "provide_phone" | "provide_address" | "confirm_order" | "cancel_order" | "modify_name" | "modify_phone" | "modify_address" | "modify_product" | "remove_product" | "ask_stock" | "ask_price" | "ask_discount" | "ask_products" | "ask_delivery" | "ask_payment" | "ask_question" | "frustrated" | "other",\n'
         '  "extracted_data": {\n'
         '    "product_name": "string or null",\n'
         '    "product_quantity": "number or null",\n'
         '    "customer_name": "string or null",\n'
         '    "phone": "string or null",\n'
         '    "address": "string or null",\n'
+        '    "category": "string or null",\n'
+        '    "district": "string or null",\n'
         '    "question": "string or null"\n'
         '  },\n'
         '  "suggested_reply": "string in Bangla"\n'
         "}\n\n"
+        "INTENT GUIDE:\n"
+        "- ask_stock: customer asks if a product is available or in stock\n"
+        "- ask_price: customer asks how much a product costs\n"
+        "- ask_discount: customer asks about discounts, offers, or how much discount they will get on current cart\n"
+        "- ask_products: customer asks to see available products or a category list\n"
+        "- ask_delivery: customer asks about delivery charge or delivery time\n"
+        "- ask_payment: customer asks how to pay or what payment methods are accepted\n"
         "RULES:\n"
         "- If customer provides multiple fields at once (name+phone+address), extract ALL\n"
         "- If customer provides product + personal info together, extract both\n"
@@ -1473,6 +1609,126 @@ async def _handle_strict_order_flow(
                 confirm_text += f"\n\n{discount_summary}"
             save_message(conversation_id, tenant_id, "bot", confirm_text)
             send_reply(sender_id, confirm_text, plain_token)
+            return True
+
+        # ── ask_stock ──────────────────────────────────────────────────────
+        if intent == "ask_stock":
+            pname  = (extracted.get("product_name") or "").strip()
+            result = _query_stock(tenant_id, pname) if pname else None
+            if result:
+                if result["current_stock"] > 0:
+                    reply = f"হ্যাঁ, {result['name']} স্টকে আছে ({result['current_stock']}টি)।"
+                else:
+                    reply = f"দুঃখিত, {result['name']} এই মুহূর্তে স্টকে নেই।"
+            else:
+                reply = "পণ্যটি খুঁজে পাওয়া যায়নি। নাম একটু নির্দিষ্ট করে বলুন।"
+            reminder = f"\n\n📌 {_step_question_v2(new_state.get('order_flow') or step)}"
+            _set_conv_state(conversation_id, new_state)
+            save_message(conversation_id, tenant_id, "bot", reply + reminder)
+            send_reply(sender_id, reply + reminder, plain_token)
+            return True
+
+        # ── ask_price ──────────────────────────────────────────────────────
+        if intent == "ask_price":
+            pname  = (extracted.get("product_name") or "").strip()
+            result = _query_price(tenant_id, pname) if pname else None
+            if result:
+                reply = f"{result['name']} — ৳{result['mrp']}"
+            else:
+                reply = "পণ্যটি খুঁজে পাওয়া যায়নি। নাম একটু নির্দিষ্ট করে বলুন।"
+            reminder = f"\n\n📌 {_step_question_v2(new_state.get('order_flow') or step)}"
+            _set_conv_state(conversation_id, new_state)
+            save_message(conversation_id, tenant_id, "bot", reply + reminder)
+            send_reply(sender_id, reply + reminder, plain_token)
+            return True
+
+        # ── ask_discount ───────────────────────────────────────────────────
+        if intent == "ask_discount":
+            cart = new_state.get("cart") or []
+            if cart:
+                total = sum(float(i.get("price") or 0) * int(i.get("quantity") or 1) for i in cart)
+                first = cart[0]
+                try:
+                    dctx = get_discount_ctx(
+                        tenant_id=tenant_id,
+                        customer_platform_id=sender_id,
+                        customer_phone=new_state.get("customer_phone"),
+                        cart_context={
+                            "cart_amount": total,
+                            "product_skus": [first.get("sku")] if first.get("sku") else [],
+                            "quantity": int(first.get("quantity") or 1),
+                        },
+                    )
+                    disc_amt = float(dctx.get("discount_amount") or 0)
+                    if disc_amt > 0:
+                        reply = f"আপনার কার্টে ছাড় প্রযোজ্য: ৳{disc_amt:.0f} বাদ (নেট: ৳{max(0, total - disc_amt):.0f})"
+                    elif dctx.get("bonus_items"):
+                        bonus = ", ".join(b.get("name","") for b in dctx["bonus_items"][:2])
+                        reply = f"আপনার কার্টে বোনাস পণ্য প্রযোজ্য: {bonus}"
+                    else:
+                        reply = "আপনার বর্তমান কার্টে কোনো ছাড় প্রযোজ্য নয়।"
+                except Exception:
+                    reply = "ছাড়ের তথ্য এখন পাওয়া যাচ্ছে না।"
+            else:
+                discounts = _query_active_discounts(tenant_id)
+                if discounts:
+                    names = ", ".join(d.get("discount_name","") for d in discounts[:3])
+                    reply = f"হ্যাঁ! এখন চলছে: {names}"
+                else:
+                    reply = "বর্তমানে কোনো ছাড় নেই।"
+            reminder = f"\n\n📌 {_step_question_v2(new_state.get('order_flow') or step)}"
+            _set_conv_state(conversation_id, new_state)
+            save_message(conversation_id, tenant_id, "bot", reply + reminder)
+            send_reply(sender_id, reply + reminder, plain_token)
+            return True
+
+        # ── ask_products ───────────────────────────────────────────────────
+        if intent == "ask_products":
+            category = (extracted.get("category") or "").strip() or None
+            products = _query_product_list(tenant_id, category)
+            if not products:
+                reply = "কোনো পণ্য পাওয়া যায়নি।"
+            else:
+                grouped: dict = {}
+                for p in products:
+                    cat = p.get("category") or "অন্যান্য"
+                    grouped.setdefault(cat, []).append(p)
+                lines = ["📋 আমাদের পণ্য তালিকা:\n"]
+                for cat, items in grouped.items():
+                    lines.append(f"📦 {cat}:")
+                    for p in items:
+                        lines.append(f"  - {p['name']} — ৳{p.get('mrp') or '?'}")
+                lines.append("\nকোনটি নেবেন?")
+                reply = "\n".join(lines)
+            _set_conv_state(conversation_id, new_state)
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+
+        # ── ask_delivery ───────────────────────────────────────────────────
+        if intent == "ask_delivery":
+            district = (extracted.get("district") or "").strip() or None
+            if not district:
+                addr = new_state.get("delivery_address") or ""
+                district = addr.split(",")[-1].strip() if addr else None
+            charge_row = _query_delivery_charge(tenant_id, district)
+            if charge_row:
+                reply = f"{charge_row['district']}য় ডেলিভারি চার্জ ৳{charge_row['charge']}"
+            else:
+                reply = "ডেলিভারি চার্জের তথ্য পাওয়া যায়নি। আমাদের সাথে যোগাযোগ করুন।"
+            reminder = f"\n\n📌 {_step_question_v2(new_state.get('order_flow') or step)}"
+            _set_conv_state(conversation_id, new_state)
+            save_message(conversation_id, tenant_id, "bot", reply + reminder)
+            send_reply(sender_id, reply + reminder, plain_token)
+            return True
+
+        # ── ask_payment ────────────────────────────────────────────────────
+        if intent == "ask_payment":
+            reply = "আমরা ক্যাশ অন ডেলিভারি (COD) গ্রহণ করি। এছাড়া bKash/Nagad-এও পেমেন্ট করতে পারবেন।"
+            reminder = f"\n\n📌 {_step_question_v2(new_state.get('order_flow') or step)}"
+            _set_conv_state(conversation_id, new_state)
+            save_message(conversation_id, tenant_id, "bot", reply + reminder)
+            send_reply(sender_id, reply + reminder, plain_token)
             return True
 
         # ── ask_question / frustrated / other ─────────────────────────────
