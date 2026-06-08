@@ -721,7 +721,7 @@ _ORDER_STATE_KEYS = (
     "order_flow", "current_step", "cart",
     "customer_name", "customer_phone", "delivery_address",
     "completed_states", "last_searched_product",
-    "order_timeout", "last_bot_message",
+    "order_timeout", "last_bot_message", "discount_preview",
     # legacy keys
     "order_flow_interrupted", "interrupted_question",
     "order_flow_paused", "paused_flow", "interruption_pending",
@@ -985,31 +985,81 @@ def _build_cart_text(cart: list) -> str:
     return "\n".join(rows)
 
 
-def _build_order_summary_v2(state: dict) -> str:
+async def _build_order_summary_v2(
+    state: dict,
+    tenant_id: str = "",
+    sender_id: str = "",
+    conversation_id: str = "",
+) -> str:
     cart  = state.get("cart") or []
     total = 0.0
     rows  = []
     for item in cart:
-        name  = item.get("product_name") or "পণ্য"
-        qty   = int(item.get("quantity") or 1)
-        price = float(item.get("price") or 0)
+        iname  = item.get("product_name") or "পণ্য"
+        qty    = int(item.get("quantity") or 1)
+        price  = float(item.get("price") or 0)
         total += qty * price
-        rows.append(f"🛒 {name} × {qty} — ৳{price * qty:.0f}")
+        rows.append(f"🛒 {iname} × {qty} — ৳{price * qty:.0f}")
     items_str = "\n".join(rows) if rows else "কোনো পণ্য নেই"
-    return (
-        "📦 অর্ডার কনফার্ম করুন:\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{items_str}\n"
-        f"💰 মোট: ৳{total:.0f}\n"
-        f"👤 {state.get('customer_name') or '—'}\n"
-        f"📱 {state.get('customer_phone') or '—'}\n"
-        f"📍 {state.get('delivery_address') or '—'}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✏️ পরিবর্তন করতে চাইলে বলুন\n"
-        "✅ 'হ্যাঁ' — নিশ্চিত করুন\n"
-        "❌ 'না' — বাতিল করুন"
-    )
 
+    # Run discount engine so customer sees discount BEFORE confirming
+    disc_code   = ""
+    disc_name   = ""
+    disc_amount = 0.0
+    net_amount  = total
+    if tenant_id and total > 0:
+        try:
+            product_ids = [it.get("product_id") for it in cart if it.get("product_id")]
+            skus: list = []
+            cats: list = []
+            if product_ids:
+                pr = supabase.table("products").select("sku, category").in_("product_id", product_ids).execute()
+                for p in (pr.data or []):
+                    if p.get("sku"):      skus.append(p["sku"])
+                    if p.get("category"): cats.append(p["category"])
+            total_qty = sum(int(it.get("quantity") or 1) for it in cart)
+            dctx = get_discount_ctx(
+                tenant_id=tenant_id,
+                customer_platform_id=sender_id or None,
+                customer_phone=state.get("customer_phone") or None,
+                cart_context={
+                    "cart_amount":   total,
+                    "product_skus":  skus,
+                    "categories":    cats,
+                    "quantity":      total_qty,
+                    "district":      state.get("delivery_address") or "",
+                },
+            )
+            disc_amount = float(dctx.get("discount_amount") or 0)
+            disc_code   = dctx.get("discount_code") or ""
+            disc_name   = dctx.get("discount_name") or ""
+            if disc_code and disc_amount > 0:
+                net_amount = round(max(0.0, total - disc_amount), 2)
+            # Persist discount preview so _execute_create_order can read it on confirm
+            if conversation_id:
+                _set_conv_state(conversation_id, {**state, "discount_preview": dctx})
+        except Exception as _de:
+            logger.warning(f"Discount engine in summary: {_de}")
+
+    summary_parts = [
+        "📦 অর্ডার কনফার্ম করুন:",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        items_str,
+        f"💰 মূল মূল্য: ৳{total:.0f}",
+    ]
+    if disc_code and disc_amount > 0:
+        summary_parts.append(f"🏷️ ছাড় ({disc_name or disc_code}): -৳{disc_amount:.0f}")
+        summary_parts.append(f"💰 নেট মূল্য: ৳{net_amount:.0f}")
+    summary_parts += [
+        f"👤 {state.get('customer_name') or '—'}",
+        f"📱 {state.get('customer_phone') or '—'}",
+        f"📍 {state.get('delivery_address') or '—'}",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "✏️ পরিবর্তন করতে চাইলে বলুন",
+        "✅ 'হ্যাঁ' — নিশ্চিত করুন",
+        "❌ 'না' — বাতিল করুন",
+    ]
+    return "\n".join(summary_parts)
 
 def _get_step_question(step: str) -> str:
     return {
@@ -1433,7 +1483,7 @@ async def _step_ask_name(
                 new_state = {**state, "customer_name": name, "customer_phone": phone,
                              "delivery_address": address, "completed_states": cs, "current_step": "show_summary"}
                 _set_conv_state(conversation_id, new_state)
-                return _build_order_summary_v2(new_state)
+                return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
             new_state = {**state, "customer_name": name, "customer_phone": phone,
                          "completed_states": cs, "current_step": "ask_address"}
             _set_conv_state(conversation_id, new_state)
@@ -1471,7 +1521,7 @@ async def _step_ask_phone(
             new_state = {**state, "customer_phone": phone, "delivery_address": address,
                          "completed_states": cs, "current_step": "show_summary"}
             _set_conv_state(conversation_id, new_state)
-            return _build_order_summary_v2(new_state)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
         new_state = {**state, "customer_phone": phone, "completed_states": cs, "current_step": "ask_address"}
         _set_conv_state(conversation_id, new_state)
         return "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/এলাকা/জেলা):"
@@ -1501,7 +1551,7 @@ async def _step_ask_address(
         cs["address"] = True
         new_state = {**state, "delivery_address": address, "completed_states": cs, "current_step": "show_summary"}
         _set_conv_state(conversation_id, new_state)
-        return _build_order_summary_v2(new_state)
+        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
 
     return "📍 ডেলিভারি ঠিকানা দিন (বাড়ি নম্বর/এলাকা/জেলা — কমপক্ষে ৫ অক্ষর):"
 
@@ -1528,15 +1578,15 @@ async def _step_show_summary(
         if field == "name" and value:
             new_state = {**state, "customer_name": value}
             _set_conv_state(conversation_id, new_state)
-            return _build_order_summary_v2(new_state)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
         if field == "phone" and value:
             new_state = {**state, "customer_phone": value}
             _set_conv_state(conversation_id, new_state)
-            return _build_order_summary_v2(new_state)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
         if field == "address" and value:
             new_state = {**state, "delivery_address": value}
             _set_conv_state(conversation_id, new_state)
-            return _build_order_summary_v2(new_state)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
         return "কী পরিবর্তন করতে চান? নাম, ফোন, নাকি ঠিকানা?"
 
     if intent == "confirm_order":
@@ -1551,7 +1601,7 @@ async def _step_show_summary(
         _clear_order_state(conversation_id, state)
         return "❌ অর্ডার বাতিল করা হয়েছে।"
 
-    return _build_order_summary_v2(state)
+    return await _build_order_summary_v2(state, tenant_id, sender_id, conversation_id)
 
 
 async def _execute_create_order(
@@ -1567,7 +1617,7 @@ async def _execute_create_order(
         _clear_order_state(conversation_id, state)
         return "কার্টে কোনো পণ্য নেই। আবার শুরু করুন।"
 
-    # Build items JSONB — one entry per cart line
+    # Build items JSONB
     items = []
     for item in cart:
         qty        = int(item.get("quantity") or 1)
@@ -1580,17 +1630,26 @@ async def _execute_create_order(
             "line_total":   round(unit_price * qty, 2),
         })
 
-    total_qty   = sum(i["quantity"] for i in items)
-    total_price = round(sum(i["line_total"] for i in items), 2)
+    total_qty    = sum(i["quantity"] for i in items)
+    agreed_price = round(sum(i["line_total"] for i in items), 2)
 
     is_multi = len(items) > 1
     pname    = f"Multiple Items ({len(items)} পণ্য)" if is_multi else items[0]["product_name"]
     pid      = None if is_multi else cart[0].get("product_id")
 
-    # Human-readable order ID: ORD-YYYYMMDD-XXXX
-    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-    suffix   = uuid.uuid4().hex[:4].upper()
-    order_id = f"ORD-{date_str}-{suffix}"
+    # UUID primary key; human-readable ref for customer display
+    order_id  = str(uuid.uuid4())
+    date_str  = datetime.now(timezone.utc).strftime("%Y%m%d")
+    suffix    = uuid.uuid4().hex[:4].upper()
+    order_ref = f"ORD-{date_str}-{suffix}"
+
+    # Read discount preview computed at summary step
+    dctx         = state.get("discount_preview") or {}
+    disc_code    = dctx.get("discount_code") or None
+    disc_amount  = float(dctx.get("discount_amount") or 0)
+    disc_name    = dctx.get("discount_name") or disc_code or ""
+    applied_list = dctx.get("applied_discounts") or []
+    net_amount   = round(max(0.0, agreed_price - disc_amount), 2) if (disc_code and disc_amount > 0) else agreed_price
 
     row = {
         "order_id":             order_id,
@@ -1600,12 +1659,16 @@ async def _execute_create_order(
         "product_id":           pid,
         "product_name":         pname,
         "quantity":             total_qty,
-        "agreed_price":         total_price,
+        "agreed_price":         agreed_price,
         "items":                items,
         "customer_name":        name,
         "customer_phone":       phone,
         "delivery_address":     address,
         "status":               "pending",
+        "discount_code":        disc_code,
+        "original_amount":      agreed_price,
+        "net_amount":           net_amount,
+        "order_ref":            order_ref,
     }
     print(f"ORDER_INSERT attempting: {row}")
     saved = False
@@ -1624,21 +1687,56 @@ async def _execute_create_order(
     if not saved:
         return "অর্ডার সেভ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
 
+    # Save order_discounts rows
+    if disc_code and applied_list:
+        for ad in applied_list:
+            if not ad or not ad.get("discount_id"):
+                continue
+            rtype_d = ad.get("reward_type") or "percentage"
+            if rtype_d not in ("percentage", "flat", "bonus", "free_delivery"):
+                rtype_d = "percentage"
+            try:
+                supabase.table("order_discounts").insert({
+                    "tenant_id":       tenant_id,
+                    "order_id":        order_id,
+                    "discount_id":     ad.get("discount_id"),
+                    "discount_code":   ad.get("discount_code") or disc_code,
+                    "discount_name":   ad.get("discount_name") or "",
+                    "rule_id":         ad.get("rule_id"),
+                    "rule_name":       ad.get("rule_name") or "",
+                    "rule_type":       ad.get("rule_type") or "",
+                    "product_id":      pid,
+                    "sku":             None,
+                    "product_name":    pname,
+                    "reward_type":     rtype_d,
+                    "discount_pct":    ad.get("discount_value", 0) if rtype_d == "percentage" else 0,
+                    "discount_flat":   ad.get("discount_value", 0) if rtype_d == "flat" else 0,
+                    "bonus_items":     ad.get("bonus_items") or [],
+                    "original_price":  agreed_price,
+                    "discount_amount": float(ad.get("discount_amount") or 0),
+                    "final_price":     net_amount,
+                }).execute()
+            except Exception as _die:
+                logger.warning(f"order_discounts insert failed: {_die}")
+
+    # Confirmation message
     lines_msg = [
         "✅ অর্ডার সফলভাবে নেওয়া হয়েছে!",
         "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📋 ID: #{order_id}",
+        f"📋 ID: #{order_ref}",
     ]
     for i in items:
         lines_msg.append(f"🛒 {i['product_name']} × {i['quantity']} — ৳{i['line_total']:.0f}")
+    lines_msg.append(f"💰 মূল মূল্য: ৳{agreed_price:.0f}")
+    if disc_code and disc_amount > 0:
+        lines_msg.append(f"🏷️ ছাড় ({disc_name}): -৳{disc_amount:.0f}")
+        lines_msg.append(f"💰 নেট মূল্য: ৳{net_amount:.0f}")
     lines_msg += [
-        f"💰 মোট: ৳{total_price:.0f}",
         f"📍 {address or '—'}",
         "━━━━━━━━━━━━━━━━━━━━━━━",
         "আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏",
     ]
     return "\n".join(lines_msg)
-
 
 async def _dispatch_step(
     tenant_id: str, conversation_id: str, sender_id: str,
