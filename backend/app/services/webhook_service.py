@@ -1574,24 +1574,31 @@ async def _execute_create_order(
         price    = float(item.get("price") or 0)
         pname    = item.get("product_name") or ""
         order_id = str(uuid.uuid4())
+        row = {
+            "order_id":             order_id,
+            "tenant_id":            tenant_id,
+            "conversation_id":      conversation_id,
+            "customer_platform_id": sender_id,
+            "product_id":           pid,
+            "product_name":         pname,
+            "quantity":             qty,
+            "agreed_price":         price,
+            "customer_name":        name,
+            "customer_phone":       phone,
+            "delivery_address":     address,
+            "status":               "pending",
+        }
+        print(f"ORDER_INSERT attempting: {row}")
         try:
-            supabase.table("orders").insert({
-                "order_id":             order_id,
-                "tenant_id":            tenant_id,
-                "conversation_id":      conversation_id,
-                "customer_platform_id": sender_id,
-                "product_id":           pid,
-                "product_name":         pname,
-                "quantity":             qty,
-                "agreed_price":         price,
-                "customer_name":        name,
-                "customer_phone":       phone,
-                "delivery_address":     address,
-                "status":               "pending",
-            }).execute()
-            order_ids.append(order_id[:8])
+            result = supabase.table("orders").insert(row).execute()
+            print(f"ORDER_INSERT result.data: {result.data}")
+            if result.data:
+                order_ids.append(order_id[:8])
+            else:
+                print(f"ORDER_INSERT no data returned (possible silent error)")
         except Exception as e:
-            logger.error(f"_execute_create_order insert error: {e}")
+            print(f"ORDER_INSERT exception: {type(e).__name__}: {e}")
+            logger.error(f"_execute_create_order insert error: {type(e).__name__}: {e}")
 
     _clear_order_state(conversation_id, state)
 
