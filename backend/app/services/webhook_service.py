@@ -1137,6 +1137,164 @@ def _gemini_classify(msg: str, state: dict, tenant_id: str, last_bot_msg: str) -
         return {"intent": "unclear", "data": {}, "natural_reply": "দুঃখিত, আবার বলুন।"}
 
 
+
+def _build_discount_rag_context(tenant_id: str) -> str:
+    """Fetch active discounts + rules + products; return rich text for Gemini RAG."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        disc_rows = (
+            supabase.table("discounts")
+            .select("*")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .lte("effective_from", now)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return ""
+
+    active = []
+    for d in disc_rows:
+        eff_to = d.get("effective_to")
+        if not eff_to or d.get("is_lifetime"):
+            active.append(d)
+        else:
+            try:
+                if datetime.fromisoformat(eff_to.replace("Z", "+00:00")) >= datetime.now(timezone.utc):
+                    active.append(d)
+            except Exception:
+                active.append(d)
+
+    if not active:
+        return ""
+
+    all_rule_ids = list({str(rid) for d in active for rid in (d.get("rule_ids") or [])})
+    rules_map: dict = {}
+    if all_rule_ids:
+        try:
+            rules_data = (
+                supabase.table("discount_rules")
+                .select("*")
+                .eq("tenant_id", tenant_id)
+                .in_("rule_id", all_rule_ids)
+                .execute()
+                .data or []
+            )
+            rules_map = {str(r["rule_id"]): r for r in rules_data}
+        except Exception:
+            pass
+
+    parts = []
+    for d in active:
+        eff_from = (d.get("effective_from") or "")[:10]
+        eff_to_s = (d.get("effective_to") or "ongoing")[:10]
+        dlines = [
+            f"Discount: {d.get('discount_name', 'Offer')} | Code: {d.get('discount_code', '')} | Priority: {d.get('priority', 99)}",
+            f"  Valid: {eff_from} to {eff_to_s}",
+        ]
+        for rid in (d.get("rule_ids") or []):
+            rule = rules_map.get(str(rid))
+            if not rule:
+                continue
+            reward    = rule.get("reward") or {}
+            conds     = rule.get("conditions") or {}
+            rtype     = reward.get("reward_type", "")
+            rval      = reward.get("discount_value", 0)
+            bonus     = reward.get("bonus_items") or []
+            rule_type = rule.get("rule_type", "")
+
+            if rtype == "percentage":
+                reward_str = f"{rval}% discount"
+            elif rtype == "flat":
+                reward_str = f"৳{rval} flat discount"
+            elif rtype == "bonus":
+                reward_str = "Free bonus: " + ", ".join(
+                    f"{b.get('name', '')} x{b.get('quantity', 1)}" for b in bonus[:3]
+                )
+            elif rtype == "free_delivery":
+                reward_str = "Free delivery"
+            else:
+                reward_str = ""
+
+            dlines.append(f"  Rule: {rule.get('rule_name', '')} ({rule_type}) -> {reward_str}")
+
+            if rule_type == "cart_value":
+                dlines.append(f"    Min cart: ৳{conds.get('min_amount', 0)}")
+            elif rule_type == "bulk_quantity":
+                dlines.append(f"    Min quantity: {conds.get('min_quantity', 1)}")
+            elif rule_type == "new_customer":
+                dlines.append("    Applies to: first-time customers")
+            elif rule_type == "repeated_customer":
+                for tier in conds.get("tiers", [])[:3]:
+                    dlines.append(
+                        f"    Tier: last ordered {tier.get('from_days', 0)}-{tier.get('to_days', 9999)} days ago"
+                    )
+            elif rule_type == "specific_product":
+                skus = conds.get("skus", [])
+                dlines.append(f"    SKUs in offer: {', '.join(skus)}")
+                if skus:
+                    try:
+                        prods = (
+                            supabase.table("products").select("name, sku, mrp")
+                            .eq("tenant_id", tenant_id).in_("sku", skus).execute().data or []
+                        )
+                        for p in prods:
+                            dlines.append(
+                                f"    Product: {p['name']} | SKU: {p.get('sku', '')} | Price: ৳{p.get('mrp', 0)}"
+                            )
+                    except Exception:
+                        pass
+            elif rule_type == "specific_category":
+                cats = conds.get("categories", [])
+                dlines.append(f"    Categories in offer: {', '.join(cats)}")
+                for cat in cats[:2]:
+                    try:
+                        prods = (
+                            supabase.table("products").select("name, sku, mrp")
+                            .eq("tenant_id", tenant_id).ilike("category", f"%{cat}%")
+                            .eq("is_active", True).limit(10).execute().data or []
+                        )
+                        for p in prods:
+                            dlines.append(
+                                f"    Product: {p['name']} | SKU: {p.get('sku', '')} | Price: ৳{p.get('mrp', 0)}"
+                            )
+                    except Exception:
+                        pass
+            elif rule_type == "seasonal":
+                dlines.append(f"    Season: {conds.get('start_date', '')} to {conds.get('end_date', '')}")
+
+        parts.append("\n".join(dlines))
+
+    return "\n\n".join(parts)
+
+
+def _answer_discount_via_gemini(tenant_id: str, question: str) -> str:
+    """RAG: build discount context, pass to Gemini, return natural Bangla answer."""
+    ctx = _build_discount_rag_context(tenant_id)
+    if not ctx:
+        return "এখন কোনো বিশেষ ছাড় নেই।"
+    prompt = (
+        "You are a helpful customer service bot for a Bangladeshi e-commerce store.\n"
+        "You have the following LIVE discount data from the database:\n\n"
+        f"{ctx}\n\n"
+        f"Customer asked: '{question}'\n\n"
+        "Answer their specific question using ONLY the data above.\n"
+        "Rules:\n"
+        "- Be specific: show product names, SKUs, prices, discount %, dates.\n"
+        "- If asked which products have discount, list every product found in the data.\n"
+        "- If asked about percentage, state the exact number.\n"
+        "- Answer in natural Bangla (Bengali script). Keep it concise and friendly.\n"
+        "- Do NOT invent information not in the data."
+    )
+    try:
+        resp = _gemini_client.models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
+        return resp.text.strip()
+    except Exception as e:
+        logger.warning(f"_answer_discount_via_gemini failed: {e}")
+        return "ছাড়ের তথ্য এখন দেখাতে পারছি না।"
+
+
 def _handle_info_query(intent: str, data: dict, tenant_id: str, state: dict) -> Optional[str]:
     if intent == "ask_price":
         term = data.get("product_search_term") or data.get("question") or ""
@@ -1155,11 +1313,8 @@ def _handle_info_query(intent: str, data: dict, tenant_id: str, state: dict) -> 
                     if avail > 0 else f"❌ {name} এখন স্টকে নেই।")
         return "এই পণ্যের স্টক তথ্য পাওয়া যাচ্ছে না।"
     if intent == "discount_check":
-        discounts = _query_active_discounts(tenant_id)
-        if discounts:
-            rows = [f"🏷️ {d.get('discount_name','অফার')}: {d.get('discount_value','')}% ছাড়" for d in discounts[:3]]
-            return "বর্তমান অফার:\n" + "\n".join(rows)
-        return "এখন কোনো বিশেষ ছাড় নেই।"
+        question = data.get("question") or data.get("product_search_term") or "\u09ac\u09b0\u09cd\u09a4\u09ae\u09be\u09a8 \u099b\u09be\u09a1\u09bc \u0995\u09c0 \u0995\u09c0 \u0986\u099b\u09c7?"
+        return _answer_discount_via_gemini(tenant_id, question)
     if intent == "product_list":
         cat  = data.get("category") or ""
         hits = _query_product_list(tenant_id, cat)
