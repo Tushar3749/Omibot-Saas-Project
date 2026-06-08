@@ -1,11 +1,9 @@
 """
 OmniBot SaaS — Test Bot Router
-Uses the real order-flow state machine + AIService.
-Conversation state persists in Supabase (platform="test").
-Each tenant gets ONE stable test conversation so state carries across messages.
+Fully Gemini-powered order flow — mirrors _handle_strict_order_flow logic
+without Meta API calls. Returns reply strings directly.
 """
 import logging
-import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -17,11 +15,14 @@ from app.database import supabase
 from app.services.ai_service import AIService
 from app.services.webhook_service import (
     _ALL_FLOW_KEYS,
-    _build_order_summary,
+    _apply_extracted_to_state,
+    _build_order_summary_v2,
     _cart_add_item,
-    _detect_adding_intent,
     _extract_product_for_order,
+    _gemini_order_intent,
+    _next_missing_step,
     _set_conv_state,
+    _step_question_v2,
     get_ai_config,
     get_or_create_conversation,
     get_recent_messages,
@@ -38,125 +39,177 @@ class TestBotRequest(BaseModel):
     quick_reply_payload: Optional[str] = None
 
 
-# ── Inline order-flow state machine (no Meta API calls) ───────────────────────
+# ── Gemini-powered order flow (no Meta API calls) ─────────────────────────────
 
 def _run_order_flow(
     msg: str,
-    msg_lower: str,
     payload: str,
     state: dict,
     conversation_id: str,
     tenant_id: str,
 ) -> Optional[str]:
     """
-    Mirrors _handle_strict_order_flow but returns the reply string directly
-    instead of calling send_reply / send_quick_reply.
-    Returns None when there is no active order_flow (caller should use Gemini).
+    Mirrors _handle_strict_order_flow using _gemini_order_intent.
+    Returns reply string or None (caller falls through to normal AI).
     """
     step = state.get("order_flow")
     if not step:
         return None
 
     def _clear_flow() -> str:
-        new_state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
-        _set_conv_state(conversation_id, new_state)
-        return "অর্ডার বাতিল হয়েছে। আর কোনো সাহায্য করতে পারি?"
+        clean = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+        _set_conv_state(conversation_id, clean)
+        return "❌ অর্ডার বাতিল করা হয়েছে।"
+
+    _ACTIVE_STEPS = {
+        "selecting_products", "collecting_name", "collecting_phone",
+        "collecting_address", "confirming",
+        "adding_more_products", "idle_with_cart",  # legacy aliases
+    }
+    if step not in _ACTIVE_STEPS:
+        return None
+
+    # Normalise legacy step names
+    if step in ("adding_more_products", "idle_with_cart"):
+        step = "selecting_products"
+        state = {**state, "order_flow": "selecting_products"}
 
     # Hard cancel via quick-reply
     if payload == "ORDER_CANCEL":
         return _clear_flow()
 
-    # ── collecting_name ────────────────────────────────────────────────────────
-    if step == "collecting_name":
-        digits_only = all(c.isdigit() or c.isspace() for c in msg)
-        if len(msg) < 2 or digits_only:
-            return "আপনার পূর্ণ নাম লিখুন (শুধু নম্বর নয়):"
-        new_state = {**state, "order_flow": "collecting_phone", "customer_name": msg}
-        _set_conv_state(conversation_id, new_state)
-        return "📞 আপনার ফোন নম্বর দিন (01XXXXXXXXX):"
+    intent_data = _gemini_order_intent(msg, state, tenant_id)
+    intent      = intent_data.get("intent", "other")
+    extracted   = intent_data.get("extracted_data") or {}
+    suggested   = intent_data.get("suggested_reply") or ""
 
-    # ── collecting_phone ───────────────────────────────────────────────────────
-    if step == "collecting_phone":
-        digits = "".join(c for c in msg if c.isdigit())
-        phone = digits if re.match(r"^01[3-9]\d{8}$", digits) else None
-        if not phone:
-            return "সঠিক বাংলাদেশি ফোন নম্বর দিন (01XXXXXXXXX):"
-        new_state = {**state, "order_flow": "collecting_address", "customer_phone": phone}
-        _set_conv_state(conversation_id, new_state)
-        return "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা):"
+    new_state = _apply_extracted_to_state(state, extracted)
+    new_state["order_flow"] = step
 
-    # ── collecting_address ─────────────────────────────────────────────────────
-    if step == "collecting_address":
-        if len(msg) < 10:
-            return "সম্পূর্ণ ঠিকানা দিন (বাড়ি/গ্রাম, থানা, জেলা — কমপক্ষে ১০ অক্ষর):"
-        new_state = {**state, "order_flow": "adding_more_products", "delivery_address": msg}
-        _set_conv_state(conversation_id, new_state)
-        return "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+    # ── cancel ────────────────────────────────────────────────────────────────
+    if intent == "cancel_order":
+        return _clear_flow()
 
-    # ── adding_more_products ───────────────────────────────────────────────────
-    if step == "adding_more_products":
-        # Hard cancel via quick-reply button
-        if payload == "ORDER_CANCEL":
-            return _clear_flow()
-
-        intent_data = _detect_adding_intent(msg)
-        intent      = intent_data.get("intent", "unknown")
-        search_term = intent_data.get("product_search_term") or msg
-
-        if intent == "cancel_order":
-            return _clear_flow()
-
-        if intent == "done_adding":
-            new_state = {**state, "order_flow": "confirming"}
-            _set_conv_state(conversation_id, new_state)
-            summary, _ = _build_order_summary(new_state)
-            return summary
-
-        if intent == "add_product":
-            product_info = _extract_product_for_order(tenant_id, search_term, state)
-            if product_info:
-                cart      = _cart_add_item(state.get("cart") or [], product_info)
-                new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
-                _set_conv_state(conversation_id, new_state)
-                pname = product_info.get("product_name") or product_info.get("name") or search_term
-                return f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
-            return f"'{search_term}' পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
-
-        return "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
-
-    # ── idle_with_cart ─────────────────────────────────────────────────────────
-    if step == "idle_with_cart":
-        product_info = _extract_product_for_order(tenant_id, msg, state)
+    # ── provide_product ───────────────────────────────────────────────────────
+    if intent == "provide_product":
+        search_term  = extracted.get("product_name") or msg
+        qty          = int(extracted.get("product_quantity") or 1)
+        product_info = _extract_product_for_order(tenant_id, search_term, state)
         if product_info:
-            cart      = _cart_add_item(state.get("cart") or [], product_info)
-            new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
+            product_info["quantity"] = qty
+            cart      = _cart_add_item(new_state.get("cart") or [], product_info)
+            new_state = {
+                **new_state, "cart": cart,
+                "order_flow":    "selecting_products",
+                "order_timeout": (datetime.now() + timedelta(hours=2)).isoformat(),
+            }
             _set_conv_state(conversation_id, new_state)
-            pname = product_info.get("product_name") or product_info.get("name") or msg
-            return f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
-        return "পণ্যটি খুঁজে পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
+            pname = product_info.get("product_name") or search_term
+            return f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কিছু নেবেন? (হ্যাঁ / না)"
+        new_state["order_flow"] = "selecting_products"
+        _set_conv_state(conversation_id, new_state)
+        return f"'{search_term}' পাওয়া যায়নি। অন্য নামে চেষ্টা করুন:"
 
-    # ── confirming ─────────────────────────────────────────────────────────────
-    if step == "confirming":
-        _CANCEL_KWS  = ["না", "na", "no", "cancel", "বাতিল", "na chai"]
-        _CONFIRM_KWS = ["হ্যাঁ", "হা", "ha", "hae", "yes", "ok", "okay", "confirm",
-                        "ঠিক আছে", "ji", "জি", "নিশ্চিত", "হ্যা"]
-        if any(w in msg_lower for w in _CANCEL_KWS):
-            return _clear_flow()
-        if payload == "ORDER_CONFIRM" or any(w in msg_lower for w in _CONFIRM_KWS):
-            summary, _ = _build_order_summary(state)
-            new_state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+    # ── done_adding ───────────────────────────────────────────────────────────
+    if intent == "done_adding":
+        if not (new_state.get("cart") or []):
             _set_conv_state(conversation_id, new_state)
-            return (
-                f"✅ টেস্ট অর্ডার সিমুলেশন সম্পন্ন!\n\n{summary}\n\n"
-                "(টেস্ট মোডে অর্ডার ডেটাবেজে সেভ হয়নি — লাইভ বটে আসল অর্ডার হবে।)"
-            )
-        summary, _ = _build_order_summary(state)
-        return f"{summary}\n\nনিশ্চিত করতে 'হ্যাঁ' বা বাতিল করতে 'না' লিখুন।"
+            return "আপনার কার্টে কোনো পণ্য নেই। আগে পণ্য যোগ করুন।"
+        next_step = _next_missing_step(new_state)
+        new_state["order_flow"] = next_step
+        _set_conv_state(conversation_id, new_state)
+        if next_step == "confirming":
+            return _build_order_summary_v2(new_state)
+        return _step_question_v2(next_step)
 
-    # Unknown step — clear it and fall through to Gemini
-    new_state = {k: v for k, v in state.items() if k not in _ALL_FLOW_KEYS}
+    # ── provide_name / provide_phone / provide_address ────────────────────────
+    if intent in ("provide_name", "provide_phone", "provide_address"):
+        next_step = _next_missing_step(new_state)
+        new_state["order_flow"] = next_step
+        _set_conv_state(conversation_id, new_state)
+        if next_step == "confirming":
+            return _build_order_summary_v2(new_state)
+        return _step_question_v2(next_step)
+
+    # ── modify_name / modify_phone / modify_address ───────────────────────────
+    import re as _re
+    if intent in ("modify_name", "modify_phone", "modify_address"):
+        field_map = {
+            "modify_name":    ("customer_name",    "নাম",    extracted.get("customer_name")),
+            "modify_phone":   ("customer_phone",   "ফোন",    extracted.get("phone")),
+            "modify_address": ("delivery_address", "ঠিকানা", extracted.get("address")),
+        }
+        key, label, raw_value = field_map[intent]
+        value = (raw_value or "").strip()
+        if key == "customer_phone" and value:
+            digits = "".join(c for c in value if c.isdigit())
+            value  = digits if _re.match(r"^01[3-9]\d{8}$", digits) else ""
+        if value:
+            new_state[key] = value
+        next_step = _next_missing_step(new_state)
+        new_state["order_flow"] = next_step
+        _set_conv_state(conversation_id, new_state)
+        if next_step == "confirming":
+            return f"✏️ {label} আপডেট হয়েছে!\n\n{_build_order_summary_v2(new_state)}"
+        return f"✏️ {label} আপডেট হয়েছে! {_step_question_v2(next_step)}"
+
+    # ── modify_product ────────────────────────────────────────────────────────
+    if intent == "modify_product":
+        pname   = (extracted.get("product_name") or "").lower()
+        new_qty = int(extracted.get("product_quantity") or 0)
+        cart    = list(new_state.get("cart") or [])
+        updated = False
+        if pname and new_qty > 0:
+            for item in cart:
+                iname = (item.get("product_name") or item.get("name") or "").lower()
+                if pname in iname or iname in pname:
+                    item["quantity"] = new_qty
+                    updated = True
+                    break
+        if updated:
+            new_state["cart"] = cart
+            _set_conv_state(conversation_id, new_state)
+            return f"✏️ পণ্য আপডেট হয়েছে!\n\n{_build_order_summary_v2(new_state)}"
+        _set_conv_state(conversation_id, new_state)
+        return "কোন পণ্যটি পরিবর্তন করতে চান? নাম ও নতুন পরিমাণ বলুন।"
+
+    # ── remove_product ────────────────────────────────────────────────────────
+    if intent == "remove_product":
+        pname    = (extracted.get("product_name") or "").lower()
+        cart     = new_state.get("cart") or []
+        new_cart = [
+            item for item in cart
+            if pname not in (item.get("product_name") or item.get("name") or "").lower()
+        ]
+        new_state["cart"] = new_cart
+        if new_cart:
+            new_state["order_flow"] = _next_missing_step(new_state)
+            _set_conv_state(conversation_id, new_state)
+            return f"🗑️ পণ্য সরানো হয়েছে!\n\n{_build_order_summary_v2(new_state)}"
+        new_state["order_flow"] = "selecting_products"
+        _set_conv_state(conversation_id, new_state)
+        return "কার্ট এখন খালি। কোন পণ্য নিতে চান?"
+
+    # ── confirm_order ─────────────────────────────────────────────────────────
+    if intent == "confirm_order" or payload == "ORDER_CONFIRM":
+        missing = _next_missing_step(new_state)
+        if missing != "confirming":
+            _set_conv_state(conversation_id, new_state)
+            return f"অর্ডার করতে আরও তথ্য দরকার। {_step_question_v2(missing)}"
+        # Test mode — simulate confirmation without saving to DB
+        summary = _build_order_summary_v2(new_state)
+        clean   = {k: v for k, v in new_state.items() if k not in _ALL_FLOW_KEYS}
+        _set_conv_state(conversation_id, clean)
+        return (
+            f"✅ টেস্ট অর্ডার সিমুলেশন সম্পন্ন!\n\n{summary}\n\n"
+            "(টেস্ট মোডে অর্ডার ডেটাবেজে সেভ হয়নি — লাইভ বটে আসল অর্ডার হবে।)"
+        )
+
+    # ── ask_question / frustrated / other ─────────────────────────────────────
+    current_step = new_state.get("order_flow") or step
+    reminder = f"\n\n📌 আপনার অর্ডার চলছে। {_step_question_v2(current_step)}"
     _set_conv_state(conversation_id, new_state)
-    return None
+    return (suggested or "দুঃখিত, বুঝতে পারিনি।") + reminder
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -168,33 +221,28 @@ async def test_bot_chat(
 ):
     tid = tenant["tenant_id"]
 
-    # Stable test conversation — same conversation_id for ALL messages from this tenant
     conv = get_or_create_conversation(tid, f"test_{tid}", "test")
     conversation_id = conv["conversation_id"]
 
-    # Load state BEFORE saving customer message (prevents duplication in history)
-    state   = conv.get("conversation_state") or {}
-    summary = conv.get("conversation_summary")
+    state    = conv.get("conversation_state") or {}
+    summary  = conv.get("conversation_summary")
     messages = get_recent_messages(conversation_id, limit=20)
 
     print(f"TEST_BOT conv={conversation_id} step={state.get('order_flow')} payload={body.quick_reply_payload}")
     logger.info(f"TEST_BOT conv={conversation_id} state={state}")
 
-    # Save customer message
-    msg = (body.message or "").strip()
+    msg     = (body.message or "").strip()
+    payload = body.quick_reply_payload or ""
     save_message(conversation_id, tid, "customer", msg)
 
-    msg_lower = msg.lower()
-    payload   = body.quick_reply_payload or ""
+    # 1. Active order flow → Gemini state machine
+    reply = _run_order_flow(msg, payload, state, conversation_id, tid)
 
-    # 1. Try order flow state machine first
-    reply = _run_order_flow(msg, msg_lower, payload, state, conversation_id, tid)
-
-    # 2. If no active order flow, call real AI service
+    # 2. No active flow → normal AI + check for order intent
     if reply is None:
         ai_cfg = get_ai_config(tid)
         try:
-            ai_result = await ai_service.generate_reply(
+            ai_result    = await ai_service.generate_reply(
                 tenant_id=tid,
                 conversation_id=conversation_id,
                 customer_message=msg,
@@ -203,15 +251,13 @@ async def test_bot_chat(
                 conversation_state=state,
                 conversation_summary=summary,
             )
-            reply = ai_result.get("reply") or "দুঃখিত, উত্তর দিতে পারছি না।"
-
-            # If Gemini detected order intent, start the flow
+            reply        = ai_result.get("reply") or "দুঃখিত, উত্তর দিতে পারছি না।"
             order_data   = ai_result.get("order_data")
             state_update = ai_result.get("state_update") or {}
+
             if order_data and not state.get("order_flow"):
-                from app.services.webhook_service import _extract_product_for_order as _epfo
                 product_name = order_data.get("product_name") or ""
-                cart_item = _epfo(tid, product_name, state) if product_name else {}
+                cart_item    = _extract_product_for_order(tid, product_name, state) if product_name else {}
                 if not cart_item and product_name:
                     cart_item = {
                         "product_id":   None,
@@ -220,17 +266,21 @@ async def test_bot_chat(
                         "price":        order_data.get("agreed_price"),
                         "quantity":     int(order_data.get("quantity") or 1),
                     }
-                cart = _cart_add_item([], cart_item) if cart_item else []
+                cart       = _cart_add_item([], cart_item) if cart_item else []
                 timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
-                new_state = {
+                new_state  = {
                     **state,
                     **state_update,
-                    "order_flow":    "collecting_name",
+                    "order_flow":    "selecting_products",
                     "cart":          cart,
                     "order_timeout": timeout_dt,
                 }
                 _set_conv_state(conversation_id, new_state)
-                reply = "আপনার নাম কী?"
+                if cart and cart_item:
+                    pname = cart_item.get("product_name") or "পণ্য"
+                    reply = f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কিছু নেবেন? (হ্যাঁ / না)"
+                else:
+                    reply = "কোন পণ্য নিতে চান? নাম বা বিবরণ লিখুন:"
             elif state_update:
                 _set_conv_state(conversation_id, {**state, **state_update})
 
@@ -238,10 +288,8 @@ async def test_bot_chat(
             logger.error(f"test_bot AI error: {exc}", exc_info=True)
             raise HTTPException(status_code=502, detail=f"AI সার্ভিস সমস্যা: {exc}")
 
-    # Save bot reply
     save_message(conversation_id, tid, "bot", reply)
 
-    # Re-read final state from DB for response
     conv_now = (
         supabase.table("conversations")
         .select("conversation_state")
@@ -262,18 +310,11 @@ async def test_bot_chat(
 
 @router.post("/reset")
 async def test_bot_reset(tenant: dict = Depends(get_current_tenant)):
-    """
-    Clear conversation_state and message history for this tenant's test conversation.
-    Called on page load and when user clicks the reset button.
-    """
     tid = tenant["tenant_id"]
     conv = get_or_create_conversation(tid, f"test_{tid}", "test")
     conversation_id = conv["conversation_id"]
 
-    # Wipe state
     _set_conv_state(conversation_id, {})
-
-    # Delete all messages for this test conversation
     try:
         supabase.table("messages").delete().eq("conversation_id", str(conversation_id)).execute()
     except Exception as e:
