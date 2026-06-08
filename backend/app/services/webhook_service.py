@@ -27,11 +27,14 @@ from app.services.memory_service import MemoryService
 from app.services.otp_service import normalize_bd_phone, request_otp, verify_otp
 from app.services import image_search_service as img_svc
 
+from google import genai as _genai
+
 logger = logging.getLogger(__name__)
 
-META_GRAPH_API = "https://graph.facebook.com/v19.0"
-ai_service     = AIService()
-memory_service = MemoryService()
+META_GRAPH_API  = "https://graph.facebook.com/v19.0"
+ai_service      = AIService()
+memory_service  = MemoryService()
+_gemini_client  = _genai.Client(api_key=settings.GEMINI_API_KEY)
 
 # ── Order flow trigger keywords ───────────────────────────────────────────────
 
@@ -752,6 +755,43 @@ _INTERRUPT_QR_BUTTONS = [
 ]
 
 
+def _detect_adding_intent(msg: str) -> dict:
+    """
+    Call Gemini to classify customer intent when asked 'আর কোনো পণ্য যোগ করতে চান?'
+    Returns {'intent': 'add_product'|'done_adding'|'cancel_order', 'product_search_term': str|None}
+    Falls back to {'intent': 'unknown'} on any error.
+    """
+    prompt = (
+        "Customer is in a product ordering flow.\n"
+        "They were asked: 'আর কোনো পণ্য যোগ করতে চান?'\n"
+        f"Customer replied: '{msg}'\n\n"
+        "Determine the intent. Return JSON only:\n"
+        '{"intent": "add_product", "product_search_term": "product name"}\n'
+        "OR\n"
+        '{"intent": "done_adding", "product_search_term": null}\n'
+        "OR\n"
+        '{"intent": "cancel_order", "product_search_term": null}\n\n'
+        "add_product = customer wants to add another product to their cart\n"
+        "done_adding = customer is done adding products, wants to proceed to order confirmation\n"
+        "cancel_order = customer wants to cancel the entire order\n\n"
+        "Return ONLY the JSON object, no other text."
+    )
+    try:
+        response = _gemini_client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=prompt,
+        )
+        text = response.text.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\n?", "", text)
+            text = re.sub(r"\n?```$", "", text.strip())
+        return json.loads(text)
+    except Exception as e:
+        logger.warning(f"_detect_adding_intent failed for msg='{msg}': {e}")
+        return {"intent": "unknown", "product_search_term": None}
+
+
 def _get_step_question(step: str) -> str:
     return {
         "collecting_name":      "আপনার নাম কী?",
@@ -1158,27 +1198,42 @@ async def _handle_strict_order_flow(
 
     # ── 10. ADDING MORE PRODUCTS ─────────────────────────────────────────────
     if step == "adding_more_products":
-        yes_kws = ["হ্যাঁ", "হা", "yes", "ha", "hae", "আরো", "আর", "যোগ"]
-        # Strong cancel → wipe entire order
-        if any(w in msg_lower for w in _STRONG_CANCEL) or payload == "ORDER_CANCEL":
+        # Hard cancel via quick-reply button
+        if payload == "ORDER_CANCEL":
             _cancel()
             return True
-        # Soft "no more products" → advance to confirming
-        if any(w in msg_lower for w in _SOFT_NO):
+
+        intent_data   = _detect_adding_intent(msg)
+        intent        = intent_data.get("intent", "unknown")
+        search_term   = intent_data.get("product_search_term") or msg
+
+        if intent == "cancel_order":
+            _cancel()
+            return True
+
+        if intent == "done_adding":
             new_state = {**state, "order_flow": "confirming"}
             _set_conv_state(conversation_id, new_state)
             summary, _ = _build_order_summary(new_state)
             save_message(conversation_id, tenant_id, "bot", summary)
             send_quick_reply(sender_id, summary, _CONFIRM_QR_BUTTONS, plain_token)
             return True
-        # Yes → ask for product name
-        if any(w in msg_lower for w in yes_kws):
-            new_state = {**state, "order_flow": "idle_with_cart"}
-            _set_conv_state(conversation_id, new_state)
-            reply = "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
+
+        if intent == "add_product":
+            product_info = _extract_product_for_order(tenant_id, search_term, state)
+            if product_info:
+                cart      = _cart_add_item(state.get("cart") or [], product_info)
+                new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
+                _set_conv_state(conversation_id, new_state)
+                pname = product_info.get("product_name") or product_info.get("name") or search_term
+                reply = f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+            else:
+                reply = f"'{search_term}' পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
+
+        # Unknown intent — ask again
         reply = "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
         save_message(conversation_id, tenant_id, "bot", reply)
         send_reply(sender_id, reply, plain_token)

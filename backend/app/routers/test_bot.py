@@ -17,10 +17,9 @@ from app.database import supabase
 from app.services.ai_service import AIService
 from app.services.webhook_service import (
     _ALL_FLOW_KEYS,
-    _SOFT_NO,
-    _STRONG_CANCEL,
     _build_order_summary,
     _cart_add_item,
+    _detect_adding_intent,
     _extract_product_for_order,
     _set_conv_state,
     get_ai_config,
@@ -96,21 +95,33 @@ def _run_order_flow(
 
     # ── adding_more_products ───────────────────────────────────────────────────
     if step == "adding_more_products":
-        yes_kws = ["হ্যাঁ", "হা", "yes", "ha", "hae", "আরো", "আর", "যোগ"]
-        # Strong cancel → wipe entire order
-        if any(w in msg_lower for w in _STRONG_CANCEL) or payload == "ORDER_CANCEL":
+        # Hard cancel via quick-reply button
+        if payload == "ORDER_CANCEL":
             return _clear_flow()
-        # Soft "no more products" → advance to confirming
-        if any(w in msg_lower for w in _SOFT_NO):
+
+        intent_data = _detect_adding_intent(msg)
+        intent      = intent_data.get("intent", "unknown")
+        search_term = intent_data.get("product_search_term") or msg
+
+        if intent == "cancel_order":
+            return _clear_flow()
+
+        if intent == "done_adding":
             new_state = {**state, "order_flow": "confirming"}
             _set_conv_state(conversation_id, new_state)
             summary, _ = _build_order_summary(new_state)
             return summary
-        # Yes → ask for product name
-        if any(w in msg_lower for w in yes_kws):
-            new_state = {**state, "order_flow": "idle_with_cart"}
-            _set_conv_state(conversation_id, new_state)
-            return "কোন পণ্য যোগ করতে চান? নাম বা বিবরণ লিখুন:"
+
+        if intent == "add_product":
+            product_info = _extract_product_for_order(tenant_id, search_term, state)
+            if product_info:
+                cart      = _cart_add_item(state.get("cart") or [], product_info)
+                new_state = {**state, "cart": cart, "order_flow": "adding_more_products"}
+                _set_conv_state(conversation_id, new_state)
+                pname = product_info.get("product_name") or product_info.get("name") or search_term
+                return f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
+            return f"'{search_term}' পাওয়া যায়নি। অন্য নাম দিয়ে চেষ্টা করুন:"
+
         return "আর কোনো পণ্য যোগ করতে চান? (হ্যাঁ / না)"
 
     # ── idle_with_cart ─────────────────────────────────────────────────────────
