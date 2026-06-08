@@ -1573,29 +1573,23 @@ async def _execute_create_order(
         qty      = int(item.get("quantity") or 1)
         price    = float(item.get("price") or 0)
         pname    = item.get("product_name") or ""
-        sku      = item.get("sku") or ""
         order_id = str(uuid.uuid4())
-        ref      = _gen_order_ref()
         try:
             supabase.table("orders").insert({
-                "order_id":         order_id,
-                "tenant_id":        tenant_id,
-                "conversation_id":  conversation_id,
-                "customer_id":      sender_id,
-                "product_id":       pid,
-                "product_name":     pname,
-                "sku":              sku,
-                "quantity":         qty,
-                "agreed_price":     price,
-                "total_amount":     price * qty,
-                "customer_name":    name,
-                "customer_phone":   phone,
-                "delivery_address": address,
-                "status":           "pending",
-                "order_ref":        ref,
-                "platform":         "facebook",
+                "order_id":             order_id,
+                "tenant_id":            tenant_id,
+                "conversation_id":      conversation_id,
+                "customer_platform_id": sender_id,
+                "product_id":           pid,
+                "product_name":         pname,
+                "quantity":             qty,
+                "agreed_price":         price,
+                "customer_name":        name,
+                "customer_phone":       phone,
+                "delivery_address":     address,
+                "status":               "pending",
             }).execute()
-            order_ids.append(ref)
+            order_ids.append(order_id[:8])
         except Exception as e:
             logger.error(f"_execute_create_order insert error: {e}")
 
