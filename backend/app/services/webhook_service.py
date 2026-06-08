@@ -1567,52 +1567,77 @@ async def _execute_create_order(
         _clear_order_state(conversation_id, state)
         return "কার্টে কোনো পণ্য নেই। আবার শুরু করুন।"
 
-    order_ids = []
+    # Build items JSONB — one entry per cart line
+    items = []
     for item in cart:
-        pid      = item.get("product_id")
-        qty      = int(item.get("quantity") or 1)
-        price    = float(item.get("price") or 0)
-        pname    = item.get("product_name") or ""
-        order_id = str(uuid.uuid4())
-        row = {
-            "order_id":             order_id,
-            "tenant_id":            tenant_id,
-            "conversation_id":      conversation_id,
-            "customer_platform_id": sender_id,
-            "product_id":           pid,
-            "product_name":         pname,
-            "quantity":             qty,
-            "agreed_price":         price,
-            "customer_name":        name,
-            "customer_phone":       phone,
-            "delivery_address":     address,
-            "status":               "pending",
-        }
-        print(f"ORDER_INSERT attempting: {row}")
-        try:
-            result = supabase.table("orders").insert(row).execute()
-            print(f"ORDER_INSERT result.data: {result.data}")
-            if result.data:
-                order_ids.append(order_id[:8])
-            else:
-                print(f"ORDER_INSERT no data returned (possible silent error)")
-        except Exception as e:
-            print(f"ORDER_INSERT exception: {type(e).__name__}: {e}")
-            logger.error(f"_execute_create_order insert error: {type(e).__name__}: {e}")
+        qty        = int(item.get("quantity") or 1)
+        unit_price = float(item.get("price") or 0)
+        items.append({
+            "product_id":   item.get("product_id"),
+            "product_name": item.get("product_name") or "",
+            "quantity":     qty,
+            "unit_price":   unit_price,
+            "line_total":   round(unit_price * qty, 2),
+        })
+
+    total_qty   = sum(i["quantity"] for i in items)
+    total_price = round(sum(i["line_total"] for i in items), 2)
+
+    is_multi = len(items) > 1
+    pname    = f"Multiple Items ({len(items)} পণ্য)" if is_multi else items[0]["product_name"]
+    pid      = None if is_multi else cart[0].get("product_id")
+
+    # Human-readable order ID: ORD-YYYYMMDD-XXXX
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    suffix   = uuid.uuid4().hex[:4].upper()
+    order_id = f"ORD-{date_str}-{suffix}"
+
+    row = {
+        "order_id":             order_id,
+        "tenant_id":            tenant_id,
+        "conversation_id":      conversation_id,
+        "customer_platform_id": sender_id,
+        "product_id":           pid,
+        "product_name":         pname,
+        "quantity":             total_qty,
+        "agreed_price":         total_price,
+        "items":                items,
+        "customer_name":        name,
+        "customer_phone":       phone,
+        "delivery_address":     address,
+        "status":               "pending",
+    }
+    print(f"ORDER_INSERT attempting: {row}")
+    saved = False
+    try:
+        result = supabase.table("orders").insert(row).execute()
+        print(f"ORDER_INSERT result.data: {result.data}")
+        saved = bool(result.data)
+        if not saved:
+            print("ORDER_INSERT no data returned (possible silent error)")
+    except Exception as e:
+        print(f"ORDER_INSERT exception: {type(e).__name__}: {e}")
+        logger.error(f"_execute_create_order insert error: {type(e).__name__}: {e}")
 
     _clear_order_state(conversation_id, state)
 
-    if not order_ids:
-        return "অর্ডার সেভ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
+    if not saved:
+        return "অর্ডার সেভ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।"
 
-    total = sum(float(i.get("price") or 0) * int(i.get("quantity") or 1) for i in cart)
-    refs  = ", ".join(order_ids)
-    return (
-        f"🎉 অর্ডার নিশ্চিত হয়েছে!\n"
-        f"অর্ডার নং: {refs}\n"
-        f"মোট: ৳{total:.0f}\n"
-        f"আমরা শীঘ্রই যোগাযোগ করব।"
-    )
+    lines_msg = [
+        "✅ অর্ডার সফলভাবে নেওয়া হয়েছে!",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📋 ID: #{order_id}",
+    ]
+    for i in items:
+        lines_msg.append(f"🛒 {i['product_name']} × {i['quantity']} — ৳{i['line_total']:.0f}")
+    lines_msg += [
+        f"💰 মোট: ৳{total_price:.0f}",
+        f"📍 {address or '—'}",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏",
+    ]
+    return "\n".join(lines_msg)
 
 
 async def _dispatch_step(

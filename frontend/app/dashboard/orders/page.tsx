@@ -6,7 +6,7 @@ import type { Order, DiscountBreakdown } from '@/types'
 import { formatBDT, formatDateTime } from '@/lib/utils'
 import {
   ShoppingBag, Phone, MapPin, TrendingUp, Tag, X,
-  ChevronDown, ChevronUp, Gift, User,
+  ChevronDown, ChevronUp, Gift, User, Package,
 } from 'lucide-react'
 
 const STATUSES = ['all', 'pending', 'confirmed', 'shipped', 'delivered', 'cancelled']
@@ -367,15 +367,14 @@ export default function OrdersPage() {
 
                       <div className="flex items-center gap-3 mt-3 flex-wrap">
                         <p className="text-xs" style={{ color: '#9E9E9E' }}>{formatDateTime(order.created_at)}</p>
-                        {/* Expand toggle for notes */}
-                        {order.notes && (
+                        {(order.notes || (order.items && order.items.length > 0)) && (
                           <button
                             onClick={() => toggleExpand(order.order_id)}
                             className="flex items-center gap-0.5 text-xs"
                             style={{ color: '#757575' }}
                           >
                             {isOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                            নোট
+                            {order.items && order.items.length > 1 ? `${order.items.length} পণ্য` : 'বিস্তারিত'}
                           </button>
                         )}
                       </div>
@@ -394,13 +393,51 @@ export default function OrdersPage() {
                   </div>
                 </div>
 
-                {/* Expandable notes */}
-                {isOpen && order.notes && (
-                  <div className="px-4 pb-4 pt-0">
-                    <div className="text-xs px-3 py-2 rounded"
-                         style={{ backgroundColor: '#F9F9F9', color: '#616161', border: '1px solid #E0E0E0' }}>
-                      {order.notes}
-                    </div>
+                {/* Expandable items + notes */}
+                {isOpen && (
+                  <div className="px-4 pb-4 pt-0 space-y-2">
+                    {order.items && order.items.length > 0 && (
+                      <div className="rounded-lg overflow-hidden"
+                           style={{ border: '1px solid #E0E0E0' }}>
+                        <div className="flex items-center gap-1.5 px-3 py-2"
+                             style={{ backgroundColor: '#F5F5F5', borderBottom: '1px solid #E0E0E0' }}>
+                          <Package size={12} style={{ color: '#757575' }} />
+                          <span className="text-xs font-medium" style={{ color: '#424242' }}>অর্ডার আইটেম</span>
+                        </div>
+                        {order.items.map((item, idx) => (
+                          <div key={idx}
+                               className="flex items-center justify-between px-3 py-2 text-xs"
+                               style={{
+                                 borderBottom: idx < order.items!.length - 1 ? '1px solid #F0F0F0' : undefined,
+                                 backgroundColor: '#FAFAFA',
+                               }}>
+                            <div>
+                              <span className="font-medium" style={{ color: '#282A35' }}>{item.product_name}</span>
+                              <span className="ml-2" style={{ color: '#9E9E9E' }}>× {item.quantity}</span>
+                            </div>
+                            <div className="text-right">
+                              <span className="font-semibold" style={{ color: '#282A35' }}>৳{item.line_total.toLocaleString()}</span>
+                              {item.quantity > 1 && (
+                                <span className="block text-xs" style={{ color: '#9E9E9E' }}>৳{item.unit_price}/টি</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                        <div className="flex justify-between px-3 py-2 text-xs font-bold"
+                             style={{ backgroundColor: '#F0F0F0', borderTop: '1px solid #E0E0E0' }}>
+                          <span style={{ color: '#424242' }}>মোট</span>
+                          <span style={{ color: '#282A35' }}>
+                            ৳{order.items.reduce((s, i) => s + i.line_total, 0).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {order.notes && (
+                      <div className="text-xs px-3 py-2 rounded"
+                           style={{ backgroundColor: '#F9F9F9', color: '#616161', border: '1px solid #E0E0E0' }}>
+                        {order.notes}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

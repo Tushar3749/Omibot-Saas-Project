@@ -159,6 +159,14 @@ export interface Message {
   created_at: string
 }
 
+export interface OrderItem {
+  product_id: string | null
+  product_name: string
+  quantity: number
+  unit_price: number
+  line_total: number
+}
+
 export interface Order {
   order_id: string
   tenant_id: string
@@ -175,6 +183,7 @@ export interface Order {
   customer_name: string | null
   delivery_address: string | null
   notes: string | null
+  items: OrderItem[] | null
   status: 'pending' | 'confirmed' | 'shipped' | 'delivered' | 'cancelled'
   tracking_number: string | null
   courier_name: string | null
