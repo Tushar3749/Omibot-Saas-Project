@@ -1,4 +1,4 @@
-﻿"""
+"""
 OmniBot SaaS — Webhook Processing Service
 Handles incoming Meta (Facebook / Instagram) webhook events:
   1. HMAC-SHA256 signature verification
@@ -722,6 +722,7 @@ _ORDER_STATE_KEYS = (
     "customer_name", "customer_phone", "delivery_address",
     "completed_states", "last_searched_product",
     "order_timeout", "last_bot_message", "discount_preview",
+    "pre_abandoned_step", "abuse_count",
     # legacy keys
     "order_flow_interrupted", "interrupted_question",
     "order_flow_paused", "paused_flow", "interruption_pending",
@@ -1061,69 +1062,76 @@ async def _build_order_summary_v2(
     ]
     return "\n".join(summary_parts)
 
-def _get_step_question(step: str) -> str:
-    return {
-        "selecting_products": "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।",
-        "ask_quantity":       "কত পিস নেবেন?",
-        "confirm_add":        "আর কিছু নেবেন? (হ্যাঁ/না)",
-        "ask_name":           "👤 আপনার নাম কী?",
-        "ask_phone":          "📞 ফোন নম্বর দিন (01XXXXXXXXX):",
-        "ask_address":        "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/এলাকা/জেলা):",
-        "show_summary":       "অর্ডার নিশ্চিত করতে 'হ্যাঁ' লিখুন।",
-    }.get(step, "অর্ডার চালিয়ে যান।")
-
-
 def _gemini_classify(msg: str, state: dict, tenant_id: str, last_bot_msg: str) -> dict:
     current_step = state.get("current_step", "selecting_products")
     store_name   = _get_store_name(tenant_id)
     catalog_text = "\n".join(
-        f"- {p['name']} (SKU: {p.get('sku','')}, দাম: ৳{p.get('mrp') or 0}, ক্যাট: {p.get('category','')})"
+        f"- {p['name']} (SKU: {p.get('sku','')}, Price: ৳{p.get('mrp') or 0}, Cat: {p.get('category','')})"
         for p in _get_product_catalog(tenant_id)
-    ) or "কোনো পণ্য নেই"
-    cs = state.get("completed_states") or {}
+    ) or "No products"
+    cs   = state.get("completed_states") or {}
+    cart = state.get("cart") or []
+    cart_text = _build_cart_text(cart) if cart else "Empty"
+
+    # Brief discount context (first 600 chars)
+    disc_ctx   = _build_discount_rag_context(tenant_id)
+    disc_brief = disc_ctx[:600] if disc_ctx else "None"
+
     prompt = (
-        f"You are an order processing AI for '{store_name}' (Bangladeshi e-commerce).\n"
+        f"You are an order processing AI for '{store_name}' (Bangladeshi e-commerce).\n\n"
+        f"CURRENT ORDER STATE:\n"
         f"Current step: {current_step}\n"
-        f"Cart: {_build_cart_text(state.get('cart') or [])}\n"
-        f"Customer name: {state.get('customer_name') or 'not yet collected'}\n"
-        f"Phone: {state.get('customer_phone') or 'not yet collected'}\n"
-        f"Address: {state.get('delivery_address') or 'not yet collected'}\n"
-        f"Completed: product={cs.get('product',False)}, name={cs.get('name',False)}, phone={cs.get('phone',False)}, address={cs.get('address',False)}\n"
-        f"Last searched product_id: {state.get('last_searched_product') or 'none'}\n"
-        f"Last bot message: {last_bot_msg or 'none'}\n"
-        f"Available products:\n{catalog_text}\n\n"
+        f"Cart: {cart_text}\n"
+        f"Customer name: {state.get('customer_name') or 'not collected'}\n"
+        f"Phone: {state.get('customer_phone') or 'not collected'}\n"
+        f"Address: {state.get('delivery_address') or 'not collected'}\n"
+        f"Completed: name={cs.get('name',False)}, phone={cs.get('phone',False)}, address={cs.get('address',False)}\n"
+        f"Last bot message: {last_bot_msg or 'none'}\n\n"
+        f"PRODUCT CATALOG:\n{catalog_text}\n\n"
+        f"ACTIVE DISCOUNTS:\n{disc_brief}\n\n"
         f"Customer said: '{msg}'\n\n"
-        "RULES:\n"
-        "- 'order korte chai' without product \u2192 start_order\n"
-        "- 'mustard oil nite chai' \u2192 provide_product\n"
-        "- 'mustard oil koto?' \u2192 ask_price (NOT buying)\n"
-        "- 'mustard oil ache?' \u2192 stock_check\n"
-        "- '2'/'2 ta'/'dui ta' after quantity question \u2192 ask_quantity_answer\n"
-        "- '\u09b9\u09cd\u09af\u09be\u0981'/'yes' ALONE after quantity question \u2192 NOT quantity, re-ask\n"
-        "- 11-digit number starting with 01 \u2192 provide_phone\n"
-        "- 'cancel'/'\u09ac\u09be\u09a4\u09bf\u09b2'/'order korbo na' \u2192 cancel_order\n"
-        "- '\u09b9\u09cd\u09af\u09be\u0981' after '\u0986\u09b0 \u0995\u09bf\u099b\u09c1 \u09a8\u09c7\u09ac\u09c7\u09a8?' \u2192 want_more\n"
-        "- '\u09a8\u09be' after '\u0986\u09b0 \u0995\u09bf\u099b\u09c1 \u09a8\u09c7\u09ac\u09c7\u09a8?' \u2192 done_adding\n"
-        "- '\u09b9\u09cd\u09af\u09be\u0981' after order summary \u2192 confirm_order\n"
-        "- Detect ALL fields if customer gives multiple at once\n\n"
-        'Return JSON ONLY:\n'
-        '{\n'
-        '  "intent": "start_order|provide_product|ask_quantity_answer|want_more|done_adding|provide_name|provide_phone|provide_address|confirm_order|cancel_order|modify_cart|modify_info|ask_price|stock_check|ask_recommendation|product_list|discount_check|delivery_info|payment_info|frustrated|off_topic|unclear",\n'
-        '  "data": {\n'
+        "Classify intent and extract data. Return ONLY valid JSON:\n"
+        "{\n"
+        '  "primary_intent": "<intent>",\n'
+        '  "modifications": {\n'
+        '    "name": null,\n'
+        '    "phone": null,\n'
+        '    "address": null,\n'
+        '    "cart_changes": null\n'
+        "  },\n"
+        '  "extracted_data": {\n'
         '    "product_search_term": null,\n'
         '    "quantity": null,\n'
         '    "name": null,\n'
         '    "phone": null,\n'
         '    "address": null,\n'
-        '    "modify_field": null,\n'
-        '    "modify_value": null,\n'
         '    "district": null,\n'
         '    "category": null,\n'
         '    "question": null\n'
-        '  },\n'
-        '  "natural_reply": "Natural Bangla reply"\n'
-        '}\n'
-        "Return ONLY the JSON, no other text."
+        "  },\n"
+        '  "natural_reply": "<Bangla reply>"\n'
+        "}\n\n"
+        "VALID INTENTS (pick exactly one):\n"
+        "answer_current_step, provide_product, specify_quantity, want_more_products, done_adding,\n"
+        "provide_name, provide_phone, provide_address, confirm_order, cancel_order,\n"
+        "modify_info, modify_cart, ask_discount, ask_price, ask_stock, ask_delivery, ask_payment,\n"
+        "ask_product_list, ask_recommendation, frustrated, go_back, off_topic, unclear\n\n"
+        "CRITICAL RULES:\n"
+        "1. 'order korte chai' / 'order dite chai' WITHOUT product name → answer_current_step\n"
+        "2. 'mustard oil nite chai' / 'tel lagbe' / any product name with buying intent → provide_product\n"
+        "3. 'mustard oil koto?' / 'dam koto?' → ask_price (NOT provide_product)\n"
+        "4. 'mustard oil ache?' / 'stock ache?' → ask_stock (NOT provide_product)\n"
+        "5. A number ('2','2 ta','dui','tin') AFTER bot asked quantity → specify_quantity\n"
+        "6. 'হ্যাঁ'/'yes'/'ha' ALONE after 'আর কিছু নেবেন?' → want_more_products\n"
+        "7. 'না'/'no'/'na' after 'আর কিছু নেবেন?' → done_adding\n"
+        "8. 11-digit number starting with 01 → provide_phone\n"
+        "9. 'cancel'/'বাতিল'/'order korbo na' → cancel_order at ANY step\n"
+        "10. 'হ্যাঁ'/'yes' after order summary is shown → confirm_order\n"
+        "11. 'discount ache?' / 'offer ki?' / 'ছাড় কিছু আছে?' → ask_discount (NOT provide_product)\n"
+        "12. Customer can give MULTIPLE fields at once — extract ALL (name + phone + address)\n"
+        "13. 'নাম হবে X মোবাইল Y' → modify_info with modifications.name=X, modifications.phone=Y\n"
+        "For modify_cart, set cart_changes as: [{\"action\":\"add|remove|update_qty\",\"product_search\":\"term\",\"quantity\":N}]\n"
+        "Return ONLY the JSON. No extra text."
     )
     try:
         resp = _gemini_client.models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
@@ -1134,7 +1142,19 @@ def _gemini_classify(msg: str, state: dict, tenant_id: str, last_bot_msg: str) -
         return json.loads(text)
     except Exception as e:
         logger.warning(f"_gemini_classify failed: {e}")
-        return {"intent": "unclear", "data": {}, "natural_reply": "দুঃখিত, আবার বলুন।"}
+        return {"primary_intent": "unclear", "modifications": {}, "extracted_data": {}, "natural_reply": "দুঃখিত, আবার বলুন।"}
+
+# Normalise new 21-intent names to old handler names for backwards compat.
+_INTENT_MAP: dict = {
+    "specify_quantity":   "ask_quantity_answer",
+    "want_more_products": "want_more",
+    "ask_stock":          "stock_check",
+    "ask_product_list":   "product_list",
+    "ask_discount":       "discount_check",
+    "ask_delivery":       "delivery_info",
+    "ask_payment":        "payment_info",
+}
+
 
 
 
@@ -1295,7 +1315,31 @@ def _answer_discount_via_gemini(tenant_id: str, question: str) -> str:
         return "ছাড়ের তথ্য এখন দেখাতে পারছি না।"
 
 
-def _handle_info_query(intent: str, data: dict, tenant_id: str, state: dict) -> Optional[str]:
+_STEP_QUESTIONS: dict = {
+    "selecting_products": "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।",
+    "ask_quantity":       "কত পিস নেবেন? শুধু সংখ্যা লিখুন।",
+    "confirm_add":        "আর কিছু নেবেন? হ্যাঁ বা না বলুন।",
+    "ask_name":           "আপনার নাম কী?",
+    "ask_phone":          "ফোন নম্বর দিন (01XXXXXXXXX)।",
+    "ask_address":        "ডেলিভারি ঠিকানা দিন (বাড়ি/এলাকা/জেলা)।",
+    "show_summary":       "অর্ডার কনফার্ম করতে হ্যাঁ, বাতিল করতে না বলুন।",
+    "abandoned_check":    "চালিয়ে যেতে হ্যাঁ, বাতিল করতে না বলুন।",
+}
+
+
+def _get_step_question(step: str) -> str:
+    return _STEP_QUESTIONS.get(step, "পরের ধাপে যেতে প্রয়োজনীয় তথ্য দিন।")
+
+
+def _handle_info_query(intent: str, data: dict, tenant_id: str, state: dict, natural_reply: str = "") -> Optional[str]:
+    step = state.get("current_step", "")
+    if intent == "frustrated":
+        base = natural_reply or "আমি বুঝতে পারছি, আমি সাহায্য করছি।"
+        return f"{base}\n{_get_step_question(step)}"
+    if intent == "off_topic":
+        return f"এটি বিষয়ের বাইরে। অর্ডার চলছে — {_get_step_question(step)}"
+    if intent == "unclear":
+        return f"বুঝতে পারিনি। আপনি কি {_get_step_question(step)}?"
     if intent == "ask_price":
         term = data.get("product_search_term") or data.get("question") or ""
         hits = _search_product_db(tenant_id, term) if term else []
@@ -1467,11 +1511,12 @@ async def _step_selecting_products(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified    = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent        = classified.get("intent", "unclear")
-    data          = classified.get("data") or {}
+    intent        = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data          = classified.get("extracted_data") or classified.get("data") or {}
     natural_reply = classified.get("natural_reply") or ""
+    intent        = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1489,7 +1534,17 @@ async def _step_selecting_products(
             return f"✅ পাওয়া গেছে: {p['product_name']} (৳{p['price']:.0f}/পিস)\nকত পিস নেবেন?"
         return f"'{search_term}' নামে কোনো পণ্য পাওয়া যায়নি। অন্য কোনো পণ্য বলুন।"
 
-    if intent == "start_order":
+    if intent in ("start_order", "answer_current_step"):
+        if data.get("product_search_term"):
+            intent = "provide_product"  # fall through to provide_product block above
+            # re-route: execute provide_product logic
+            hits = _search_product_db(tenant_id, data["product_search_term"])
+            if hits:
+                p         = hits[0]
+                new_state = {**state, "last_searched_product": p["product_id"], "current_step": "ask_quantity"}
+                _set_conv_state(conversation_id, new_state)
+                return f"✅ পাওয়া গেছে: {p['product_name']} (৳{p['price']:.0f}/পিস)\nকত পিস নেবেন?"
+            return f"'{data.get('product_search_term','')}' নামে কোনো পণ্য পাওয়া যায়নি। অন্য কোনো পণ্য বলুন।"
         return "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
 
     return natural_reply or "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
@@ -1500,10 +1555,11 @@ async def _step_ask_quantity(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent     = classified.get("intent", "unclear")
-    data       = classified.get("data") or {}
+    intent     = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data       = classified.get("extracted_data") or classified.get("data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1511,6 +1567,13 @@ async def _step_ask_quantity(
         _clear_order_state(conversation_id, state)
         return "❌ অর্ডার বাতিল করা হয়েছে।"
 
+    # answer_current_step at quantity step = treat as specify_quantity
+    if intent == "answer_current_step" and data.get("quantity"):
+        intent = "ask_quantity_answer"
+    if intent == "go_back":
+        new_state = {**state, "current_step": "selecting_products"}
+        _set_conv_state(conversation_id, new_state)
+        return "ठিক আছে! কোন পণ্য নেবেন? পণ্যের নাম বলুন।"
     qty = data.get("quantity")
     if intent == "ask_quantity_answer" and qty:
         try:
@@ -1558,10 +1621,11 @@ async def _step_confirm_add(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent     = classified.get("intent", "unclear")
-    data       = classified.get("data") or {}
+    intent     = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data       = classified.get("extracted_data") or classified.get("data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1599,6 +1663,10 @@ async def _step_confirm_add(
             _set_conv_state(conversation_id, new_state)
             return f"'{search_term}' পাওয়া যায়নি। আর কিছু নেবেন? (হ্যাঁ/না)"
 
+    if intent == "go_back":
+        new_state = {**state, "current_step": "selecting_products"}
+        _set_conv_state(conversation_id, new_state)
+        return "আগের ধাপে ফিরে যাচ্ছি। কোন পণ্য নেবেন?"
     msg_lower = msg.strip().lower()
     if any(w in msg_lower for w in ["না", "na", "no", "nah", "nope"]):
         cs = dict(state.get("completed_states") or {})
@@ -1614,10 +1682,11 @@ async def _step_ask_name(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent     = classified.get("intent", "unclear")
-    data       = classified.get("data") or {}
+    intent     = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data       = classified.get("extracted_data") or classified.get("data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1655,10 +1724,11 @@ async def _step_ask_phone(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent     = classified.get("intent", "unclear")
-    data       = classified.get("data") or {}
+    intent     = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data       = classified.get("extracted_data") or classified.get("data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1689,10 +1759,11 @@ async def _step_ask_address(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent     = classified.get("intent", "unclear")
-    data       = classified.get("data") or {}
+    intent     = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data       = classified.get("extracted_data") or classified.get("data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1716,10 +1787,11 @@ async def _step_show_summary(
     msg: str, state: dict, plain_token: str, ai_config: dict,
 ) -> str:
     classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
-    intent     = classified.get("intent", "unclear")
-    data       = classified.get("data") or {}
+    intent     = classified.get("primary_intent") or classified.get("intent", "unclear")
+    data       = classified.get("extracted_data") or classified.get("data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
 
-    info_reply = _handle_info_query(intent, data, tenant_id, state)
+    info_reply = _handle_info_query(intent, data, tenant_id, state, classified.get("natural_reply") or "")
     if info_reply:
         return info_reply
 
@@ -1728,21 +1800,58 @@ async def _step_show_summary(
         return "❌ অর্ডার বাতিল করা হয়েছে।"
 
     if intent == "modify_info":
-        field = (data.get("modify_field") or "").lower()
-        value = data.get("modify_value") or ""
-        if field == "name" and value:
-            new_state = {**state, "customer_name": value}
-            _set_conv_state(conversation_id, new_state)
-            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
-        if field == "phone" and value:
-            new_state = {**state, "customer_phone": value}
-            _set_conv_state(conversation_id, new_state)
-            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
-        if field == "address" and value:
-            new_state = {**state, "delivery_address": value}
-            _set_conv_state(conversation_id, new_state)
-            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
-        return "কী পরিবর্তন করতে চান? নাম, ফোন, নাকি ঠিকানা?"
+        mods        = classified.get("modifications") or {}
+        name_val    = mods.get("name") or data.get("name")
+        phone_val   = mods.get("phone") or data.get("phone")
+        address_val = mods.get("address") or data.get("address")
+        # Backwards compat: old modify_field / modify_value format
+        old_field = (data.get("modify_field") or "").lower()
+        old_value = data.get("modify_value") or ""
+        if old_field and old_value:
+            if old_field == "name":    name_val    = name_val or old_value
+            elif old_field == "phone": phone_val   = phone_val or old_value
+            else:                      address_val = address_val or old_value
+        if not any([name_val, phone_val, address_val]):
+            return "কী পরিবর্তন করতে চান? নাম, ফোন, নাকি ঠিকানা?"
+        new_state = dict(state)
+        if name_val:    new_state["customer_name"]    = name_val
+        if phone_val:   new_state["customer_phone"]   = phone_val
+        if address_val: new_state["delivery_address"] = address_val
+        _set_conv_state(conversation_id, new_state)
+        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+
+    if intent == "modify_cart":
+        cart_changes = (classified.get("modifications") or {}).get("cart_changes") or []
+        cart = list(state.get("cart") or [])
+        for change in cart_changes:
+            action = change.get("action", "")
+            search = (change.get("product_search") or "").lower()
+            qty    = int(change.get("quantity") or 1)
+            if action == "add":
+                hit = _fuzzy_product_search(tenant_id, search, None)
+                if hit and hit.get("product_id"):
+                    hit["quantity"] = qty
+                    existing = next((i for i, c in enumerate(cart)
+                                     if c.get("product_id") == hit["product_id"]), None)
+                    if existing is not None:
+                        cart[existing]["quantity"] = cart[existing].get("quantity", 0) + qty
+                    else:
+                        cart.append(hit)
+            elif action == "remove":
+                cart = [c for c in cart if search not in (c.get("product_name") or "").lower()
+                        and search not in (c.get("sku") or "").lower()]
+            elif action == "update_qty":
+                for c in cart:
+                    if search in (c.get("product_name") or "").lower() or search in (c.get("sku") or "").lower():
+                        c["quantity"] = qty
+        new_state = {**state, "cart": cart}
+        _set_conv_state(conversation_id, new_state)
+        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+
+    if intent == "go_back":
+        new_state = {**state, "current_step": "ask_address"}
+        _set_conv_state(conversation_id, new_state)
+        return "📍 ডেলিভারি ঠিকানা পরিবর্তন করতে পারেন। ঠিকানা দিন:"
 
     if intent == "confirm_order":
         return await _execute_create_order(tenant_id, conversation_id, sender_id, state, plain_token, ai_config)
@@ -1757,6 +1866,32 @@ async def _step_show_summary(
         return "❌ অর্ডার বাতিল করা হয়েছে।"
 
     return await _build_order_summary_v2(state, tenant_id, sender_id, conversation_id)
+
+
+async def _step_abandoned_check(
+    tenant_id: str, conversation_id: str, sender_id: str,
+    msg: str, state: dict, plain_token: str, ai_config: dict,
+) -> str:
+    msg_lower = msg.strip().lower()
+    yes_words = ["হ্যাঁ", "ha", "haa", "hya", "yes", "ok", "ji", "hm"]
+    no_words  = ["না", "na", "no", "cancel", "বাতিল"]
+    if any(w in msg_lower for w in yes_words):
+        prev_step   = state.get("pre_abandoned_step") or "selecting_products"
+        new_timeout = (datetime.now() + timedelta(hours=2)).isoformat()
+        new_state   = {**state, "current_step": prev_step, "order_timeout": new_timeout}
+        _set_conv_state(conversation_id, new_state)
+        return "ঠিক আছে! চালিয়ে যাচ্ছি।\n" + _get_step_question(prev_step)
+    if any(w in msg_lower for w in no_words):
+        _clear_order_state(conversation_id, state)
+        return "❌ অর্ডার বাতিল করা হয়েছে। নতুন অর্ডার দিতে পণ্যের নাম লিখুন।"
+    cart_brief = ", ".join(
+        f"{i.get('product_name', '?')}×{i.get('quantity', 1)}"
+        for i in (state.get("cart") or [])
+    ) or "খালি"
+    return (
+        f"⏰ অর্ডার পোঁছানো হয়নি।\n🛒 কার্ট: {cart_brief}\n\n"
+        "চালিয়ে যেতে 'হ্যাঁ', বাতিল করতে 'না' বলুন।"
+    )
 
 
 async def _execute_create_order(
@@ -1780,6 +1915,7 @@ async def _execute_create_order(
         items.append({
             "product_id":   item.get("product_id"),
             "product_name": item.get("product_name") or "",
+            "sku":          item.get("sku") or "",
             "quantity":     qty,
             "unit_price":   unit_price,
             "line_total":   round(unit_price * qty, 2),
@@ -1789,7 +1925,7 @@ async def _execute_create_order(
     agreed_price = round(sum(i["line_total"] for i in items), 2)
 
     is_multi = len(items) > 1
-    pname    = f"Multiple Items ({len(items)} পণ্য)" if is_multi else items[0]["product_name"]
+    pname    = ", ".join(i["product_name"] for i in items) if is_multi else items[0]["product_name"]
     pid      = None if is_multi else cart[0].get("product_id")
 
     # UUID primary key; human-readable ref for customer display
@@ -1916,6 +2052,8 @@ async def _dispatch_step(
         return await _step_ask_address(**kwargs)
     if step == "show_summary":
         return await _step_show_summary(**kwargs)
+    if step == "abandoned_check":
+        return await _step_abandoned_check(**kwargs)
     _clear_order_state(conversation_id, state)
     return "অর্ডার ফ্লো রিসেট হয়েছে। আবার শুরু করুন।"
 
@@ -1934,12 +2072,47 @@ async def _handle_order_flow(
     if not msg:
         return False
 
+    # Abuse detection
+    esc_kws = [k.strip().lower() for k in (ai_config.get("escalation_keywords") or []) if k and k.strip()]
+    if esc_kws:
+        msg_lc = msg.lower()
+        if any(kw in msg_lc for kw in esc_kws):
+            abuse_n   = (state.get("abuse_count") or 0) + 1
+            new_state = {**state, "abuse_count": abuse_n}
+            _set_conv_state(conversation_id, new_state)
+            if abuse_n == 1:
+                abuse_reply = "অনুগ্রহ করে ভদ্রভাবে কথা বলুন। 😊"
+            elif abuse_n == 2:
+                abuse_reply = "আমি আপনাকে সাহায্য করতে চাই। 🙏"
+            else:
+                try:
+                    supabase.table("conversations").update(
+                        {"is_ai_active": False}
+                    ).eq("conversation_id", conversation_id).execute()
+                except Exception:
+                    pass
+                abuse_reply = "আমাদের টিম শীঘ্রই যোগাযোগ করবে।"
+            save_message(conversation_id, tenant_id, "bot", abuse_reply)
+            send_reply(sender_id, abuse_reply, plain_token)
+            return True
+
     order_timeout = state.get("order_timeout")
-    if order_timeout:
+    if order_timeout and state.get("current_step") != "abandoned_check":
         try:
             if datetime.now() > datetime.fromisoformat(order_timeout):
-                _clear_order_state(conversation_id, state)
-                timeout_msg = "⏰ অর্ডার সময়সীমা পেরিয়ে গেছে। নতুন অর্ডার দিতে আবার পণ্যের নাম লিখুন।"
+                pre_step   = state.get("current_step") or "selecting_products"
+                cart_items = state.get("cart") or []
+                cart_brief = ", ".join(
+                    f"{i.get('product_name', '?')}×{i.get('quantity', 1)}"
+                    for i in cart_items
+                ) or "খালি"
+                new_state  = {**state, "current_step": "abandoned_check", "pre_abandoned_step": pre_step}
+                _set_conv_state(conversation_id, new_state)
+                timeout_msg = (
+                    f"⏰ অর্ডার পোঁছানানো হয়নি।\n"
+                    f"🛒 কার্ট: {cart_brief}\n\n"
+                    "চালিয়ে যেতে 'হ্যাঁ', বাতিল করতে 'না' বলুন।"
+                )
                 save_message(conversation_id, tenant_id, "bot", timeout_msg)
                 send_reply(sender_id, timeout_msg, plain_token)
                 return True
