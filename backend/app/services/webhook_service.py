@@ -2057,16 +2057,9 @@ async def process_message(
         intent = await ai_service.detect_order_intent(message_text, messages, state)
         if intent["is_order_intent"] and intent["confidence"] in ("high", "medium"):
             product_name = intent.get("product_name") or state.get("interested_product") or ""
-            cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
-            if not cart_item and product_name:
-                cart_item = {
-                    "product_id":   None,
-                    "product_name": product_name,
-                    "sku":          "",
-                    "price":        state.get("negotiated_price"),
-                    "quantity":     intent.get("quantity", 1),
-                }
-            cart       = _cart_add_item([], cart_item) if cart_item else []
+            # Only add to cart if product actually exists in the products table
+            cart_item = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
+            cart      = _cart_add_item([], cart_item) if cart_item else []
             timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
             _set_conv_state(conversation_id, {
                 **state,
@@ -2078,7 +2071,7 @@ async def process_message(
                 pname = cart_item.get("product_name") or cart_item.get("name") or "পণ্য"
                 reply = f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কিছু নেবেন? (হ্যাঁ / না)"
             else:
-                reply = "কোন পণ্য নিতে চান? নাম বা বিবরণ লিখুন:"
+                reply = "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return
@@ -2121,15 +2114,7 @@ async def process_message(
     if order_data and not state.get("order_flow"):
         # Gemini detected buying intent via extract_order — hand off to Python state machine
         product_name = order_data.get("product_name") or ""
-        cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
-        if not cart_item and product_name:
-            cart_item = {
-                "product_id":   None,
-                "product_name": product_name,
-                "sku":          "",
-                "price":        order_data.get("agreed_price"),
-                "quantity":     int(order_data.get("quantity") or 1),
-            }
+        cart_item  = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}
         cart       = _cart_add_item([], cart_item) if cart_item else []
         timeout_dt = (datetime.now() + timedelta(hours=2)).isoformat()
         new_state  = {**state, "order_flow": "selecting_products", "cart": cart, "order_timeout": timeout_dt}
@@ -2140,7 +2125,7 @@ async def process_message(
             pname      = cart_item.get("product_name") or cart_item.get("name") or "পণ্য"
             flow_reply = f"✅ '{pname}' কার্টে যোগ হয়েছে! আর কিছু নেবেন? (হ্যাঁ / না)"
         else:
-            flow_reply = "কোন পণ্য নিতে চান? নাম বা বিবরণ লিখুন:"
+            flow_reply = "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
         save_message(conversation_id, tenant_id, "bot", flow_reply)
         send_reply(sender_id, flow_reply, plain_token)
         return
