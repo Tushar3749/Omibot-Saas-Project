@@ -2549,6 +2549,41 @@ async def process_message(
         state = new_state
         _set_conv_state(conversation_id, state)
 
+    # ── 0.1. Greeting message — first contact only ───────────────────────────
+    # `messages` was fetched before saving the current message, so empty = first ever message
+    greeting_msg = (ai_config.get("greeting_message") or "").strip()
+    if greeting_msg and not messages:
+        save_message(conversation_id, tenant_id, "bot", greeting_msg)
+        send_reply(sender_id, greeting_msg, plain_token)
+        return
+
+    # ── 0.2. Bangladesh operational modes ────────────────────────────────────
+    _now_bd = datetime.now(timezone(timedelta(hours=6)))  # Bangladesh Standard Time (UTC+6)
+
+    if ai_config.get("hartal_mode"):
+        hartal_msg = (ai_config.get("hartal_message") or "").strip() or \
+            "আজ হরতাল আছে। ডেলিভারি সাময়িক বন্ধ। পরে অর্ডার করুন।"
+        save_message(conversation_id, tenant_id, "bot", hartal_msg)
+        send_reply(sender_id, hartal_msg, plain_token)
+        return
+
+    if ai_config.get("friday_offline_enabled") and _now_bd.weekday() == 4:  # 4 = Friday
+        _hr = _now_bd.hour
+        if 12 <= _hr < 14:  # Jummah prayer window (12pm–2pm BST)
+            offline_msg = "আজ শুক্রবার জুম্মার নামাজের সময়, অফিস বন্ধ। বিকেল ২টার পর যোগাযোগ করুন।"
+            save_message(conversation_id, tenant_id, "bot", offline_msg)
+            send_reply(sender_id, offline_msg, plain_token)
+            return
+
+    if ai_config.get("ramadan_mode") and not state.get("ramadan_welcomed"):
+        # Send a one-time Ramadan greeting before answering; continue to normal flow
+        _ramadan_greeting = "রমজান মোবারক! 🌙 আমাদের স্টোরে স্বাগতম।"
+        save_message(conversation_id, tenant_id, "bot", _ramadan_greeting)
+        send_reply(sender_id, _ramadan_greeting, plain_token)
+        state = {**state, "ramadan_welcomed": True}
+        _set_conv_state(conversation_id, state)
+        # Do NOT return — continue so their actual question gets answered
+
     # ── 0.5. Abuse detection ──────────────────────────────────────────────────
     escalation_keywords = ai_config.get("escalation_keywords") or []
     is_abusive = _detect_abuse(message_text or "") if message_text else False

@@ -135,7 +135,7 @@ async def update_ai_config(
 ):
     allowed = {
         # Bot identity
-        "bot_name", "system_prompt", "language",
+        "bot_name", "system_prompt", "language", "greeting_message",
         "escalation_keywords", "forbidden_topics", "prompt_injection_guard",
         # Order management
         "min_order_amount", "max_order_qty_per_customer", "preorder_enabled",
