@@ -17,6 +17,7 @@ from app.services.webhook_service import (
     _ORDER_STATE_KEYS,
     _build_cart_text,
     _build_order_summary_v2,
+    _build_product_catalog_for_ai,
     _clear_order_state,
     _dispatch_step,
     _extract_product_for_order,
@@ -145,6 +146,7 @@ async def test_bot_chat(
                 raw_messages=messages,
                 conversation_state=state,
                 conversation_summary=summary,
+                product_catalog=_build_product_catalog_for_ai(tid),
             )
             reply        = ai_result.get("reply") or "দুঃখিত, উত্তর দিতে পারছি না।"
             order_data   = ai_result.get("order_data")

@@ -95,7 +95,7 @@ class AIService:
 
     # ── System Prompt ─────────────────────────────────────────────────────────
 
-    def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None, sentiment_hint: str = "") -> str:
+    def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None, sentiment_hint: str = "", product_catalog: str = "") -> str:
         bot_name    = ai_config.get("bot_name", "Assistant")
         language    = ai_config.get("language", "bangla")
         base_prompt = ai_config.get("system_prompt", "")
@@ -159,6 +159,29 @@ class AIService:
             else "\n[Knowledge Base: কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি।]"
         )
 
+        catalog_block = ""
+        if product_catalog:
+            catalog_block = (
+                "\n[আমাদের পণ্য তালিকা — CRITICAL RULE]\n"
+                "⚠️ তুমি শুধুমাত্র নিচের তালিকার পণ্য সম্পর্কে কথা বলতে পারবে।\n"
+                "এই তালিকায় নেই এমন কোনো পণ্য আমাদের কাছে আছে — এটা কখনো বলবে না।\n"
+                "Customer যদি এমন পণ্য জিজ্ঞেস করে যা তালিকায় নেই:\n"
+                "  → বলো: 'দুঃখিত, [পণ্যের নাম] আমাদের কাছে নেই।'\n"
+                "  → তারপর তালিকার relevant পণ্য ও ক্যাটাগরি দেখাও।\n"
+                "পণ্যের উল্লেখ করলে সবসময় SKU ও মূল্য সহ দেখাও।\n"
+                "Gemini general knowledge থেকে কোনো পণ্যের তথ্য বলবে না — শুধু এই তালিকা ব্যবহার করো।\n\n"
+                f"{product_catalog}\n"
+            )
+
+        context_rule = (
+            "\n[Context Awareness — IMPORTANT]\n"
+            "• সবসময় শেষ কয়েকটি বার্তা পড়বে।\n"
+            "• Customer যদি শুধু একটি সংখ্যা বা পরিমাণ পাঠায় (যেমন '৩ ডজন', '২ কেজি', '৫ পিস'): "
+            "আগের বার্তায় যে পণ্যের কথা হয়েছে সেটার পরিমাণ হিসেবে ধরো।\n"
+            "• আগের বার্তা মনে নেই বলবে না — সব বার্তা তোমাকে দেওয়া আছে।\n"
+            "• Product recommendation করলে তালিকা থেকে actual name, SKU ও price দেখাও।\n"
+        )
+
         sentiment_block = (
             "\n[আচরণ নির্দেশনা — গালি ও আবেগ সনাক্তকরণ]\n"
             "• গালিগালাজ (শালা, হারামি, মাদারচোদ, বাল ইত্যাদি) পেলে সরাসরি গালিতে সাড়া দিও না। "
@@ -188,7 +211,8 @@ class AIService:
             f"তোমার নাম: {bot_name}\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
-            f"{forbidden_instr}{state_instr}{discount_block}{sentiment_block}"
+            f"{forbidden_instr}{state_instr}{discount_block}"
+            f"{catalog_block}{context_rule}{sentiment_block}"
             f"{rag_block}\n"
             f"{order_rules}\n"
             "সাধারণ নিয়ম:\n"
@@ -230,6 +254,7 @@ class AIService:
         conversation_summary: Optional[str] = None,
         discount_context: Optional[dict] = None,
         sentiment_hint: str = "",
+        product_catalog: str = "",
     ) -> dict:
         """
         Returns:
@@ -244,7 +269,7 @@ class AIService:
         rag_context = await self.rag.get_relevant_context(tenant_id, customer_message)
 
         # 3. System prompt
-        system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint)
+        system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint, product_catalog)
 
         # 4. Build contents — ALL raw_messages (up to 20) passed directly so Gemini
         #    always has full context. Summary prepended as a synthetic exchange when

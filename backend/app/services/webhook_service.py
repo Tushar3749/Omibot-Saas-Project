@@ -102,6 +102,17 @@ def _detect_sentiment(text: str) -> str:
     return ""
 
 
+_ADULT_WORDS = [
+    "sex", "sexy", "xxx", "porn", "naked", "nude", "boobs", "dick", "pussy",
+    "যৌন", "সেক্স", "নেকেড", "পর্ন", "চুদ", "মাল দেখা",
+]
+
+
+def _detect_adult_content(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in _ADULT_WORDS)
+
+
 def _get_delivered_orders_for_return(tenant_id: str, phone: str, window_days: int) -> list[dict]:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
     result = (
@@ -871,6 +882,42 @@ def _query_product_list(tenant_id: str, category: Optional[str] = None) -> list[
     except Exception as e:
         logger.warning(f"_query_product_list error: {e}")
         return []
+
+
+def _build_product_catalog_for_ai(tenant_id: str) -> str:
+    """
+    Fetches all active products and returns a compact catalog string for
+    injection into the Gemini system prompt. Gemini is then forbidden from
+    mentioning any product not in this list.
+    """
+    try:
+        rows = (
+            supabase.table("products")
+            .select("name, sku, mrp, category")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .order("category")
+            .limit(120)
+            .execute()
+            .data or []
+        )
+        if not rows:
+            return ""
+        by_cat: dict = {}
+        for p in rows:
+            cat = p.get("category") or "অন্যান্য"
+            by_cat.setdefault(cat, []).append(p)
+        lines = []
+        for cat, prods in by_cat.items():
+            lines.append(f"[{cat}]")
+            for p in prods:
+                sku = p.get("sku") or ""
+                sku_part = f" ({sku})" if sku else ""
+                lines.append(f"  • {p['name']}{sku_part} — ৳{float(p['mrp']):.0f}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"_build_product_catalog_for_ai error: {e}")
+        return ""
 
 
 def _query_delivery_charge(tenant_id: str, district: Optional[str] = None) -> Optional[dict]:
@@ -2584,6 +2631,34 @@ async def process_message(
         _set_conv_state(conversation_id, state)
         # Do NOT return — continue so their actual question gets answered
 
+    # ── 0.3. Adult / inappropriate content detection ─────────────────────────
+    if message_text and _detect_adult_content(message_text):
+        sexual_count = state.get("sexual_count", 0) + 1
+        state = {**state, "sexual_count": sexual_count}
+        _set_conv_state(conversation_id, state)
+        if sexual_count == 1:
+            adult_reply = "আমি শুধু পণ্য সম্পর্কে সাহায্য করতে পারি। কী পণ্য দরকার?"
+        elif sexual_count == 2:
+            adult_reply = "অনুগ্রহ করে পণ্য সম্পর্কে জিজ্ঞেস করুন।"
+        else:
+            abusive_count = state.get("abusive_count", 0) + 1
+            state = {**state, "abusive_count": abusive_count}
+            if abusive_count >= 3:
+                supabase.table("conversations").update({
+                    "is_ai_active": False,
+                    "conversation_state": state,
+                }).eq("conversation_id", conversation_id).execute()
+                adult_reply = (
+                    "আমি আপনার সমস্যা সমাধানে অক্ষম।\n"
+                    "আমাদের টিম শীঘ্রই যোগাযোগ করবে।"
+                )
+            else:
+                _set_conv_state(conversation_id, state)
+                adult_reply = "⚠️ অনুগ্রহ করে পণ্য সম্পর্কে কথা বলুন।"
+        save_message(conversation_id, tenant_id, "bot", adult_reply)
+        send_reply(sender_id, adult_reply, plain_token)
+        return
+
     # ── 0.5. Abuse detection ──────────────────────────────────────────────────
     escalation_keywords = ai_config.get("escalation_keywords") or []
     is_abusive = _detect_abuse(message_text or "") if message_text else False
@@ -2778,7 +2853,8 @@ async def process_message(
         logger.warning(f"Discount engine error: {_de}")
 
     # ── 8. Normal AI flow ─────────────────────────────────────────────────────
-    sentiment = _detect_sentiment(message_text) if message_text else ""
+    sentiment       = _detect_sentiment(message_text) if message_text else ""
+    product_catalog = _build_product_catalog_for_ai(tenant_id)
 
     result = await ai_service.generate_reply(
         tenant_id=tenant_id,
@@ -2790,6 +2866,7 @@ async def process_message(
         conversation_summary=summary,
         discount_context=discount_ctx,
         sentiment_hint=sentiment,
+        product_catalog=product_catalog,
     )
 
     reply_text   = result["reply"]
