@@ -101,29 +101,70 @@ async def approve_return(return_id: str, tenant: dict = Depends(get_current_tena
         try:
             stock_res = (
                 supabase.table("stock")
-                .select("current_stock")
+                .select("current_stock, physical_stock, issued_stock")
                 .eq("tenant_id", tid)
                 .eq("product_id", pid)
                 .maybe_single()
                 .execute()
             )
-            before = (stock_res.data or {}).get("current_stock", 0) if stock_res else 0
-            after  = before + qty
-            supabase.table("stock").upsert(
-                {"tenant_id": tid, "product_id": pid, "current_stock": after},
-                on_conflict="tenant_id,product_id",
-            ).execute()
-            supabase.table("stock_history").insert({
-                "tenant_id":       tid,
-                "product_id":      pid,
-                "sku":             sku,
-                "change_type":     "return",
-                "quantity_change": qty,
-                "quantity_before": before,
-                "quantity_after":  after,
-                "reference_id":    return_id,
-                "note":            f"Return approved — {item.get('reason', '')}",
-            }).execute()
+            sr     = (stock_res.data or {}) if stock_res else {}
+            phys   = int(sr.get("physical_stock") or 0)
+            issued = int(sr.get("issued_stock") or 0)
+            cur    = int(sr.get("current_stock") or 0)
+
+            note_text = f"Return approved — {item.get('reason', '')}"
+
+            if phys > 0 or issued > 0:
+                new_phys = phys + qty
+                new_cur  = max(0, new_phys - issued)
+                supabase.table("stock").upsert(
+                    {"tenant_id": tid, "product_id": pid,
+                     "physical_stock": new_phys, "current_stock": new_cur},
+                    on_conflict="tenant_id,product_id",
+                ).execute()
+                supabase.table("stock_history").insert({
+                    "tenant_id":       tid,
+                    "product_id":      pid,
+                    "sku":             sku,
+                    "change_type":     "return",
+                    "quantity_change": qty,
+                    "quantity_before": cur,
+                    "quantity_after":  new_cur,
+                    "reference_id":    return_id,
+                    "note":            note_text,
+                }).execute()
+                try:
+                    supabase.table("stock_movements").insert({
+                        "tenant_id":       tid,
+                        "product_id":      pid,
+                        "order_id":        ret.get("order_id"),
+                        "movement_type":   "return",
+                        "quantity":        qty,
+                        "physical_before": phys,
+                        "physical_after":  new_phys,
+                        "issued_before":   issued,
+                        "issued_after":    issued,
+                        "note":            note_text,
+                    }).execute()
+                except Exception as _me:
+                    logger.warning(f"stock_movements insert failed: {_me}")
+            else:
+                after = cur + qty
+                supabase.table("stock").upsert(
+                    {"tenant_id": tid, "product_id": pid, "current_stock": after},
+                    on_conflict="tenant_id,product_id",
+                ).execute()
+                supabase.table("stock_history").insert({
+                    "tenant_id":       tid,
+                    "product_id":      pid,
+                    "sku":             sku,
+                    "change_type":     "return",
+                    "quantity_change": qty,
+                    "quantity_before": cur,
+                    "quantity_after":  after,
+                    "reference_id":    return_id,
+                    "note":            note_text,
+                }).execute()
         except Exception as exc:
             logger.warning(f"Stock restore failed for product {pid}: {exc}")
 

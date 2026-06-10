@@ -6,7 +6,7 @@ import type { Order, DiscountBreakdown } from '@/types'
 import { formatBDT, formatDateTime } from '@/lib/utils'
 import {
   ShoppingBag, Phone, MapPin, TrendingUp, Tag, X,
-  ChevronDown, ChevronUp, Gift, User, Package,
+  Gift, User, Package, Truck, Hash,
 } from 'lucide-react'
 
 const STATUSES = ['all', 'pending', 'confirmed', 'shipped', 'delivered', 'cancelled']
@@ -21,10 +21,10 @@ const STATUS_STYLES: Record<string, { bg: string; color: string; border: string 
 
 // ─── Discount Breakdown Modal ─────────────────────────────────────────────────
 function DiscountModal({
-  orderId, orderName, onClose,
+  orderId, orderRef, onClose,
 }: {
   orderId: string
-  orderName: string
+  orderRef: string
   onClose: () => void
 }) {
   const [data, setData]       = useState<DiscountBreakdown | null>(null)
@@ -46,7 +46,7 @@ function DiscountModal({
              style={{ backgroundColor: '#282A35' }}>
           <div>
             <h2 className="font-semibold text-white text-sm">Discount Breakdown</h2>
-            <p className="text-xs mt-0.5" style={{ color: '#B0BEC5' }}>{orderName}</p>
+            <p className="text-xs mt-0.5" style={{ color: '#B0BEC5' }}>{orderRef}</p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-white">
             <X size={18} />
@@ -62,16 +62,12 @@ function DiscountModal({
             </p>
           ) : (
             <div className="space-y-4">
-
-              {/* Code badge */}
               <div className="flex items-center gap-2">
                 <Tag size={13} style={{ color: '#04AA6D' }} />
                 <span className="font-mono text-sm font-semibold" style={{ color: '#04AA6D' }}>
                   {data.discount_code}
                 </span>
               </div>
-
-              {/* Per-product rows */}
               {data.rows.map(r => (
                 <div key={r.discount_id}
                      className="rounded-lg p-3 space-y-2"
@@ -84,8 +80,7 @@ function DiscountModal({
                       {r.sku && (
                         <p className="text-xs font-mono mt-0.5" style={{ color: '#9E9E9E' }}>{r.sku}</p>
                       )}
-                      <p className="text-xs mt-0.5 capitalize"
-                         style={{ color: '#757575' }}>
+                      <p className="text-xs mt-0.5 capitalize" style={{ color: '#757575' }}>
                         {r.discount_rule_name} ({r.discount_rule_type.replace(/_/g, ' ')})
                       </p>
                     </div>
@@ -97,8 +92,6 @@ function DiscountModal({
                         : 'ফ্রি ডেলিভারি'}
                     </span>
                   </div>
-
-                  {/* Bonus items */}
                   {r.reward_type === 'bonus' && r.bonus_items?.length > 0 && (
                     <div className="space-y-1">
                       {r.bonus_items.map((b, i) => (
@@ -110,8 +103,6 @@ function DiscountModal({
                       ))}
                     </div>
                   )}
-
-                  {/* Price breakdown */}
                   {r.original_price != null && r.reward_type !== 'bonus' && (
                     <div className="grid grid-cols-3 gap-2 text-xs pt-1"
                          style={{ borderTop: '1px solid #E0E0E0' }}>
@@ -131,8 +122,6 @@ function DiscountModal({
                   )}
                 </div>
               ))}
-
-              {/* Total summary */}
               <div className="rounded-lg p-3"
                    style={{ backgroundColor: '#E8F5E9', border: '1px solid #A5D6A7' }}>
                 <div className="flex justify-between text-xs mb-1">
@@ -149,7 +138,6 @@ function DiscountModal({
                   <span style={{ color: '#1B5E20' }}>৳{(data.net_amount ?? 0).toLocaleString()}</span>
                 </div>
               </div>
-
             </div>
           )}
         </div>
@@ -163,13 +151,200 @@ function DiscountModal({
   )
 }
 
+// ─── Order Card ───────────────────────────────────────────────────────────────
+function OrderCard({
+  order,
+  onStatusChange,
+  onDiscountClick,
+}: {
+  order: Order
+  onStatusChange: (id: string, status: string) => void
+  onDiscountClick: (id: string, ref: string) => void
+}) {
+  const style         = STATUS_STYLES[order.status]
+  const subtotal      = order.agreed_price ?? 0
+  const deliveryCharge= order.delivery_charge ?? 0
+  const origAmt       = order.original_amount ?? subtotal
+  const netAmt        = order.net_amount ?? (subtotal + deliveryCharge)
+  const discAmt       = origAmt > 0 && netAmt < (origAmt + deliveryCharge)
+                        ? Math.max(0, origAmt - (netAmt - deliveryCharge))
+                        : 0
+  const hasDisc       = !!(order.discount_code && discAmt > 0)
+  const displayRef    = order.order_ref || order.order_id.slice(0, 8).toUpperCase()
+
+  return (
+    <div className="card overflow-hidden">
+
+      {/* ── Header row ─────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between gap-3 px-4 py-3"
+           style={{ borderBottom: '1px solid var(--c-border)', backgroundColor: 'var(--c-surface)' }}>
+        <div className="flex items-center gap-2.5 min-w-0">
+          <Hash size={13} style={{ color: '#9E9E9E', flexShrink: 0 }} />
+          <span className="font-mono text-sm font-semibold truncate" style={{ color: '#282A35' }}>
+            {displayRef}
+          </span>
+          <span className="text-xs flex-shrink-0" style={{ color: '#9E9E9E' }}>
+            {formatDateTime(order.created_at)}
+          </span>
+          {style && (
+            <span className="badge border text-xs flex-shrink-0"
+                  style={{ backgroundColor: style.bg, color: style.color, borderColor: style.border }}>
+              {order.status}
+            </span>
+          )}
+          {order.discount_code && (
+            <button
+              onClick={() => onDiscountClick(order.order_id, displayRef)}
+              className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-mono hover:opacity-80 transition-opacity flex-shrink-0"
+              style={{ backgroundColor: '#E3F2FD', color: '#1565C0', border: '1px solid #90CAF9' }}
+              title="Discount breakdown দেখুন"
+            >
+              <Tag size={9} />
+              {order.discount_code}
+            </button>
+          )}
+        </div>
+        <select
+          value={order.status}
+          onChange={e => onStatusChange(order.order_id, e.target.value)}
+          className="input text-sm w-auto shrink-0 py-1.5 pr-8 cursor-pointer"
+        >
+          {['pending','confirmed','shipped','delivered','cancelled'].map(s => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="p-4 space-y-4">
+
+        {/* ── Product list ───────────────────────────────────────────────── */}
+        {order.items && order.items.length > 0 ? (
+          <div className="rounded-lg overflow-hidden"
+               style={{ border: '1px solid #E0E0E0' }}>
+            <div className="flex items-center gap-1.5 px-3 py-2"
+                 style={{ backgroundColor: '#F5F5F5', borderBottom: '1px solid #E0E0E0' }}>
+              <Package size={12} style={{ color: '#757575' }} />
+              <span className="text-xs font-medium" style={{ color: '#424242' }}>পণ্য তালিকা</span>
+            </div>
+            {order.items.map((item, idx) => (
+              <div key={idx}
+                   className="flex items-center justify-between px-3 py-2 text-xs"
+                   style={{
+                     borderBottom: idx < order.items!.length - 1 ? '1px solid #F0F0F0' : undefined,
+                     backgroundColor: '#FAFAFA',
+                   }}>
+                <div>
+                  <span className="font-medium" style={{ color: '#282A35' }}>{item.product_name}</span>
+                  <span className="ml-2" style={{ color: '#9E9E9E' }}>× {item.quantity}</span>
+                </div>
+                <span className="font-semibold" style={{ color: '#282A35' }}>
+                  ৳{item.line_total.toLocaleString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="flex items-center justify-between text-sm"
+               style={{ color: '#424242' }}>
+            <span>{order.product_name}</span>
+            <span className="font-medium">× {order.quantity}</span>
+          </div>
+        )}
+
+        {/* ── Price breakdown ────────────────────────────────────────────── */}
+        <div className="rounded-lg overflow-hidden text-xs"
+             style={{ border: '1px solid #E0E0E0' }}>
+          <div className="flex justify-between px-3 py-2"
+               style={{ backgroundColor: '#FAFAFA', borderBottom: '1px solid #F0F0F0' }}>
+            <span style={{ color: '#757575' }}>🛒 পণ্য সাবটোটাল</span>
+            <span className="font-medium" style={{ color: '#282A35' }}>৳{subtotal.toLocaleString()}</span>
+          </div>
+          <div className="flex justify-between px-3 py-2"
+               style={{ backgroundColor: '#FAFAFA', borderBottom: '1px solid #F0F0F0' }}>
+            <span className="flex items-center gap-1" style={{ color: '#757575' }}>
+              <Truck size={10} /> ডেলিভারি চার্জ
+              {order.district && (
+                <span className="ml-1 px-1.5 py-0.5 rounded text-xs"
+                      style={{ backgroundColor: '#E8F5E9', color: '#2E7D32' }}>
+                  {order.district}
+                </span>
+              )}
+            </span>
+            <span className="font-medium" style={{ color: '#424242' }}>
+              {deliveryCharge > 0 ? `৳${deliveryCharge.toLocaleString()}` : 'ফ্রি'}
+            </span>
+          </div>
+          {hasDisc && (
+            <div className="flex justify-between px-3 py-2"
+                 style={{ backgroundColor: '#FAFAFA', borderBottom: '1px solid #F0F0F0' }}>
+              <span style={{ color: '#E53935' }}>🏷️ ছাড় ({order.discount_code})</span>
+              <span className="font-semibold" style={{ color: '#E53935' }}>-৳{discAmt.toLocaleString()}</span>
+            </div>
+          )}
+          <div className="flex justify-between px-3 py-2.5 font-bold text-sm"
+               style={{ backgroundColor: hasDisc ? '#E8F5E9' : '#F5F5F5' }}>
+            <span style={{ color: hasDisc ? '#1B5E20' : '#282A35' }}>💰 নেট মোট</span>
+            <span style={{ color: hasDisc ? '#1B5E20' : '#282A35' }}>৳{netAmt.toLocaleString()}</span>
+          </div>
+        </div>
+
+        {/* ── Customer + address ─────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {(order.customer_name || order.customer_phone) && (
+            <div className="flex items-start gap-2 p-2.5 rounded"
+                 style={{ backgroundColor: '#F9F9F9', border: '1px solid #F0F0F0' }}>
+              <User size={13} style={{ color: '#9E9E9E', marginTop: 1, flexShrink: 0 }} />
+              <div className="min-w-0">
+                {order.customer_name && (
+                  <p className="text-sm font-semibold truncate" style={{ color: '#282A35' }}>
+                    {order.customer_name}
+                  </p>
+                )}
+                {order.customer_phone && (
+                  <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: '#616161' }}>
+                    <Phone size={9} />{order.customer_phone}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+          {order.delivery_address && (
+            <div className="flex items-start gap-2 p-2.5 rounded"
+                 style={{ backgroundColor: '#F9F9F9', border: '1px solid #F0F0F0' }}>
+              <MapPin size={13} style={{ color: '#9E9E9E', marginTop: 1, flexShrink: 0 }} />
+              <div className="min-w-0">
+                <p className="text-xs font-medium" style={{ color: '#424242' }}>
+                  {order.delivery_address}
+                </p>
+                {order.district && (
+                  <p className="text-xs mt-0.5 font-semibold" style={{ color: '#2E7D32' }}>
+                    {order.district}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Notes */}
+        {order.notes && (
+          <div className="text-xs px-3 py-2 rounded"
+               style={{ backgroundColor: '#F9F9F9', color: '#616161', border: '1px solid #E0E0E0' }}>
+            {order.notes}
+          </div>
+        )}
+
+      </div>
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function OrdersPage() {
   const [orders, setOrders]           = useState<Order[]>([])
   const [filter, setFilter]           = useState('all')
   const [loading, setLoading]         = useState(true)
-  const [expanded, setExpanded]       = useState<string | null>(null)
-  const [discountModal, setDiscountModal] = useState<{ id: string; name: string } | null>(null)
+  const [discountModal, setDiscountModal] = useState<{ id: string; ref: string } | null>(null)
 
   useEffect(() => { loadOrders() }, [filter])
 
@@ -188,7 +363,6 @@ export default function OrdersPage() {
     } catch { toast.error('আপডেট ব্যর্থ') }
   }
 
-  // Revenue uses net_amount if available, fallback to agreed_price
   const revenue = orders
     .filter(o => ['confirmed', 'delivered'].includes(o.status))
     .reduce((sum, o) => sum + (o.net_amount ?? o.agreed_price ?? 0), 0)
@@ -198,12 +372,8 @@ export default function OrdersPage() {
     .reduce((sum, o) => {
       const orig = o.original_amount ?? o.agreed_price ?? 0
       const net  = o.net_amount ?? orig
-      return sum + (orig - net)
+      return sum + Math.max(0, orig - net)
     }, 0)
-
-  function toggleExpand(id: string) {
-    setExpanded(prev => prev === id ? null : id)
-  }
 
   return (
     <div className="space-y-5 max-w-5xl">
@@ -269,188 +439,22 @@ export default function OrdersPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {orders.map((order, idx) => {
-            const style    = STATUS_STYLES[order.status]
-            const isOpen   = expanded === order.order_id
-            const origAmt  = order.original_amount ?? order.agreed_price
-            const netAmt   = order.net_amount ?? order.agreed_price
-            const hasDisc  = !!(order.discount_code && origAmt && netAmt && origAmt > netAmt)
-            const discAmt  = hasDisc ? (origAmt! - netAmt!) : 0
-
-            return (
-              <div key={order.order_id}
-                   className="card overflow-hidden"
-                   style={{ animation: `floatUp 0.3s ease-out ${idx * 40}ms both` }}>
-
-                {/* Main row */}
-                <div className="p-4 sm:p-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-
-                      {/* Title + status */}
-                      <div className="flex items-center gap-2.5 mb-3 flex-wrap">
-                        <h3 className="font-semibold" style={{ color: '#282A35' }}>{order.product_name}</h3>
-                        {style && (
-                          <span className="badge border text-xs"
-                                style={{ backgroundColor: style.bg, color: style.color, borderColor: style.border }}>
-                            {order.status}
-                          </span>
-                        )}
-                        {order.discount_code && (
-                          <button
-                            onClick={() => setDiscountModal({ id: order.order_id, name: order.product_name })}
-                            className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-mono hover:opacity-80 transition-opacity"
-                            style={{ backgroundColor: '#E3F2FD', color: '#1565C0', border: '1px solid #90CAF9' }}
-                            title="Discount breakdown দেখুন"
-                          >
-                            <Tag size={9} />
-                            {order.discount_code}
-                          </button>
-                        )}
-                      </div>
-
-                      {/* Metrics grid */}
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                        <div className="p-2.5 rounded" style={{ backgroundColor: '#F9F9F9' }}>
-                          <p className="text-xs mb-0.5" style={{ color: '#9E9E9E' }}>পরিমাণ</p>
-                          <p className="text-sm font-semibold" style={{ color: '#282A35' }}>{order.quantity} টি</p>
-                        </div>
-
-                        {/* Price: show net if discounted, else agreed */}
-                        {(netAmt != null || order.agreed_price != null) && (
-                          <div className="p-2.5 rounded" style={{ backgroundColor: hasDisc ? '#E8F5E9' : '#F9F9F9' }}>
-                            <p className="text-xs mb-0.5" style={{ color: hasDisc ? '#4CAF50' : '#9E9E9E' }}>
-                              {hasDisc ? 'নেট মূল্য' : 'মূল্য'}
-                            </p>
-                            {hasDisc && origAmt != null && (
-                              <p className="text-xs line-through" style={{ color: '#9E9E9E' }}>
-                                ৳{origAmt.toLocaleString()}
-                              </p>
-                            )}
-                            <p className="text-sm font-bold" style={{ color: hasDisc ? '#1B5E20' : '#282A35' }}>
-                              {formatBDT(netAmt ?? order.agreed_price ?? 0)}
-                            </p>
-                            {hasDisc && (
-                              <p className="text-xs font-medium" style={{ color: '#E53935' }}>
-                                -৳{discAmt.toFixed(2)}
-                              </p>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Customer info: name + phone stacked */}
-                        {(order.customer_name || order.customer_phone) && (
-                          <div className="p-2.5 rounded" style={{ backgroundColor: '#F9F9F9' }}>
-                            <p className="text-xs mb-0.5 flex items-center gap-1" style={{ color: '#9E9E9E' }}>
-                              <User size={10} /> কাস্টমার
-                            </p>
-                            {order.customer_name && (
-                              <p className="text-sm font-semibold" style={{ color: '#282A35' }}>{order.customer_name}</p>
-                            )}
-                            {order.customer_phone && (
-                              <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: '#616161' }}>
-                                <Phone size={9} />{order.customer_phone}
-                              </p>
-                            )}
-                          </div>
-                        )}
-
-                        {order.delivery_address && (
-                          <div className="p-2.5 rounded" style={{ backgroundColor: '#F9F9F9' }}>
-                            <p className="text-xs mb-0.5 flex items-center gap-1" style={{ color: '#9E9E9E' }}>
-                              <MapPin size={10} /> ঠিকানা
-                            </p>
-                            <p className="text-xs font-medium truncate" style={{ color: '#424242' }}>{order.delivery_address}</p>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-3 mt-3 flex-wrap">
-                        <p className="text-xs" style={{ color: '#9E9E9E' }}>{formatDateTime(order.created_at)}</p>
-                        {(order.notes || (order.items && order.items.length > 0)) && (
-                          <button
-                            onClick={() => toggleExpand(order.order_id)}
-                            className="flex items-center gap-0.5 text-xs"
-                            style={{ color: '#757575' }}
-                          >
-                            {isOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                            {order.items && order.items.length > 1 ? `${order.items.length} পণ্য` : 'বিস্তারিত'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Status dropdown */}
-                    <select
-                      value={order.status}
-                      onChange={e => updateStatus(order.order_id, e.target.value)}
-                      className="input text-sm w-auto shrink-0 py-1.5 pr-8 cursor-pointer"
-                    >
-                      {['pending','confirmed','shipped','delivered','cancelled'].map(s => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                {/* Expandable items + notes */}
-                {isOpen && (
-                  <div className="px-4 pb-4 pt-0 space-y-2">
-                    {order.items && order.items.length > 0 && (
-                      <div className="rounded-lg overflow-hidden"
-                           style={{ border: '1px solid #E0E0E0' }}>
-                        <div className="flex items-center gap-1.5 px-3 py-2"
-                             style={{ backgroundColor: '#F5F5F5', borderBottom: '1px solid #E0E0E0' }}>
-                          <Package size={12} style={{ color: '#757575' }} />
-                          <span className="text-xs font-medium" style={{ color: '#424242' }}>অর্ডার আইটেম</span>
-                        </div>
-                        {order.items.map((item, idx) => (
-                          <div key={idx}
-                               className="flex items-center justify-between px-3 py-2 text-xs"
-                               style={{
-                                 borderBottom: idx < order.items!.length - 1 ? '1px solid #F0F0F0' : undefined,
-                                 backgroundColor: '#FAFAFA',
-                               }}>
-                            <div>
-                              <span className="font-medium" style={{ color: '#282A35' }}>{item.product_name}</span>
-                              <span className="ml-2" style={{ color: '#9E9E9E' }}>× {item.quantity}</span>
-                            </div>
-                            <div className="text-right">
-                              <span className="font-semibold" style={{ color: '#282A35' }}>৳{item.line_total.toLocaleString()}</span>
-                              {item.quantity > 1 && (
-                                <span className="block text-xs" style={{ color: '#9E9E9E' }}>৳{item.unit_price}/টি</span>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                        <div className="flex justify-between px-3 py-2 text-xs font-bold"
-                             style={{ backgroundColor: '#F0F0F0', borderTop: '1px solid #E0E0E0' }}>
-                          <span style={{ color: '#424242' }}>মোট</span>
-                          <span style={{ color: '#282A35' }}>
-                            ৳{order.items.reduce((s, i) => s + i.line_total, 0).toLocaleString()}
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                    {order.notes && (
-                      <div className="text-xs px-3 py-2 rounded"
-                           style={{ backgroundColor: '#F9F9F9', color: '#616161', border: '1px solid #E0E0E0' }}>
-                        {order.notes}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
+          {orders.map((order, idx) => (
+            <div key={order.order_id} style={{ animation: `floatUp 0.3s ease-out ${idx * 40}ms both` }}>
+              <OrderCard
+                order={order}
+                onStatusChange={updateStatus}
+                onDiscountClick={(id, ref) => setDiscountModal({ id, ref })}
+              />
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Discount breakdown modal */}
       {discountModal && (
         <DiscountModal
           orderId={discountModal.id}
-          orderName={discountModal.name}
+          orderRef={discountModal.ref}
           onClose={() => setDiscountModal(null)}
         />
       )}

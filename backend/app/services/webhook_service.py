@@ -731,6 +731,7 @@ def _gen_order_ref() -> str:
 _ORDER_STATE_KEYS = (
     "order_flow", "current_step", "cart",
     "customer_name", "customer_phone", "delivery_address",
+    "district", "delivery_charge",
     "completed_states", "last_searched_product",
     "order_timeout", "last_bot_message", "discount_preview",
     "pre_abandoned_step", "abuse_count",
@@ -786,7 +787,8 @@ def _format_cart_for_prompt(cart: list) -> str:
 
 
 def _query_stock(tenant_id: str, product_name: str) -> Optional[dict]:
-    """Returns {name, current_stock} for the closest matching product, or None."""
+    """Returns {name, current_stock} for the closest matching product, or None.
+    Uses physical_stock - issued_stock when populated; falls back to current_stock."""
     try:
         prods = (
             supabase.table("products")
@@ -803,14 +805,20 @@ def _query_stock(tenant_id: str, product_name: str) -> Optional[dict]:
         p = prods[0]
         stock_row = (
             supabase.table("stock")
-            .select("current_stock")
+            .select("current_stock, physical_stock, issued_stock")
             .eq("tenant_id", tenant_id)
             .eq("product_id", p["product_id"])
             .maybe_single()
             .execute()
         )
-        stock = (stock_row.data or {}).get("current_stock", 0) if stock_row else 0
-        return {"name": p["name"], "current_stock": int(stock or 0)}
+        sd     = (stock_row.data or {}) if stock_row else {}
+        phys   = int(sd.get("physical_stock") or 0)
+        issued = int(sd.get("issued_stock") or 0)
+        if phys > 0 or issued > 0:
+            stock = max(0, phys - issued)
+        else:
+            stock = int(sd.get("current_stock") or 0)
+        return {"name": p["name"], "current_stock": stock}
     except Exception as e:
         logger.warning(f"_query_stock error: {e}")
         return None
@@ -963,6 +971,8 @@ def _new_order_state() -> dict:
         "customer_name":         None,
         "customer_phone":        None,
         "delivery_address":      None,
+        "district":              None,
+        "delivery_charge":       0.0,
         "completed_states": {
             "product":   False,
             "quantity":  False,
@@ -1089,15 +1099,26 @@ async def _build_order_summary_v2(
         except Exception as _de:
             logger.warning(f"Discount engine in summary: {_de}")
 
+    delivery_charge  = float(state.get("delivery_charge") or 0)
+    district         = (state.get("district") or "").strip()
+    final_net        = round(net_amount + delivery_charge, 2)
+
+    delivery_line = (
+        f"🚚 ডেলিভারি চার্জ ({district}): ৳{delivery_charge:.0f}"
+        if district else
+        f"🚚 ডেলিভারি চার্জ: ৳{delivery_charge:.0f}"
+    )
+
     summary_parts = [
         "📦 অর্ডার কনফার্ম করুন:",
         "━━━━━━━━━━━━━━━━━━━━━━━",
         items_str,
-        f"💰 মূল মূল্য: ৳{total:.0f}",
+        f"🛒 পণ্য সাবটোটাল: ৳{total:.0f}",
     ]
     if disc_code and disc_amount > 0:
-        summary_parts.append(f"🏷️ ছাড় ({disc_name or disc_code}): -৳{disc_amount:.0f}")
-        summary_parts.append(f"💰 নেট মূল্য: ৳{net_amount:.0f}")
+        summary_parts.append(f"🏷️ ছাড় ({disc_name or disc_code}): -৳{disc_amount:.0f}")
+    summary_parts.append(delivery_line)
+    summary_parts.append(f"💰 নেট মোট: ৳{final_net:.0f}")
     summary_parts += [
         f"👤 {state.get('customer_name') or '—'}",
         f"📱 {state.get('customer_phone') or '—'}",
@@ -1825,11 +1846,55 @@ async def _step_ask_address(
     if address and len(address) >= 5:
         cs    = dict(state.get("completed_states") or {})
         cs["address"] = True
-        new_state = {**state, "delivery_address": address, "completed_states": cs, "current_step": "show_summary"}
+        district     = (data.get("district") or "").strip()
+        delivery_row = _query_delivery_charge(tenant_id, district) if district else None
+        if delivery_row:
+            delivery_charge = float(delivery_row.get("charge") or 0)
+            actual_district = delivery_row.get("district") or district
+            new_state = {**state, "delivery_address": address, "district": actual_district,
+                         "delivery_charge": delivery_charge, "completed_states": cs,
+                         "current_step": "show_summary"}
+            _set_conv_state(conversation_id, new_state)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+        # District not yet found — save address and ask for district
+        new_state = {**state, "delivery_address": address,
+                     "completed_states": cs, "current_step": "ask_district"}
         _set_conv_state(conversation_id, new_state)
-        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
-
+        return "আপনার জেলার নাম বলুন (যেমন: ঢাকা, চট্টগ্রাম, সিলেট, রাজশাহী):"
     return "📍 ডেলিভারি ঠিকানা দিন (বাড়ি নম্বর/এলাকা/জেলা — কমপক্ষে ৫ অক্ষর):"
+
+
+
+async def _step_ask_district(
+    tenant_id: str, conversation_id: str, sender_id: str,
+    msg: str, state: dict, plain_token: str, ai_config: dict,
+) -> str:
+    """Collect district when it was not extractable from the full address."""
+    classified = _gemini_classify(msg, state, tenant_id, state.get("last_bot_message") or "")
+    intent     = classified.get("primary_intent") or "unclear"
+    data       = classified.get("extracted_data") or {}
+    intent     = _INTENT_MAP.get(intent, intent)
+
+    if intent == "cancel_order":
+        _clear_order_state(conversation_id, state)
+        return "❌ অর্ডার বাতিল করা হয়েছে।"
+
+    district = (data.get("district") or msg.strip()).strip()
+    if not district:
+        return "আপনার জেলার নাম বলুন (যেমন: ঢাকা, চট্টগ্রাম, সিলেট, রাজশাহী):"
+
+    delivery_row    = _query_delivery_charge(tenant_id, district)
+    delivery_charge = float((delivery_row or {}).get("charge") or 0)
+    actual_district = (delivery_row or {}).get("district") or district
+    cs = dict(state.get("completed_states") or {})
+    cs["address"] = True
+    new_state = {**state,
+                 "district":         actual_district,
+                 "delivery_charge":  delivery_charge,
+                 "completed_states": cs,
+                 "current_step":     "show_summary"}
+    _set_conv_state(conversation_id, new_state)
+    return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
 
 
 async def _step_show_summary(
@@ -1944,14 +2009,78 @@ async def _step_abandoned_check(
     )
 
 
+def _stock_issue(tenant_id: str, product_id: str, quantity: int, order_id: str) -> None:
+    """Issue stock for a newly placed order. Increments issued_stock (new model) or
+    decrements current_stock (legacy). Also logs to stock_movements."""
+    try:
+        sr = (
+            supabase.table("stock")
+            .select("current_stock, physical_stock, issued_stock")
+            .eq("tenant_id", tenant_id)
+            .eq("product_id", product_id)
+            .maybe_single()
+            .execute().data
+        )
+        if not sr:
+            return
+        phys       = int(sr.get("physical_stock") or 0)
+        issued_old = int(sr.get("issued_stock") or 0)
+        cur_old    = int(sr.get("current_stock") or 0)
+
+        if phys > 0 or issued_old > 0:
+            issued_new = issued_old + quantity
+            avail_new  = max(0, phys - issued_new)
+            supabase.table("stock").update({
+                "issued_stock":  issued_new,
+                "current_stock": avail_new,
+            }).eq("tenant_id", tenant_id).eq("product_id", product_id).execute()
+            before, after = cur_old, avail_new
+        else:
+            issued_new = issued_old
+            after      = max(0, cur_old - quantity)
+            supabase.table("stock").update({"current_stock": after}) \
+                .eq("tenant_id", tenant_id).eq("product_id", product_id).execute()
+            before = cur_old
+
+        prod = supabase.table("products").select("sku").eq("product_id", product_id) \
+            .maybe_single().execute().data
+        supabase.table("stock_history").insert({
+            "tenant_id":       tenant_id,
+            "product_id":      product_id,
+            "sku":             (prod or {}).get("sku", ""),
+            "change_type":     "order_placed",
+            "quantity_change": -quantity,
+            "quantity_before": before,
+            "quantity_after":  after,
+        }).execute()
+        try:
+            supabase.table("stock_movements").insert({
+                "tenant_id":       tenant_id,
+                "product_id":      product_id,
+                "order_id":        order_id,
+                "movement_type":   "issue",
+                "quantity":        quantity,
+                "physical_before": phys,
+                "physical_after":  phys,
+                "issued_before":   issued_old,
+                "issued_after":    issued_new,
+            }).execute()
+        except Exception as _me:
+            logger.warning(f"stock_movements insert failed: {_me}")
+    except Exception as _se:
+        logger.warning(f"_stock_issue failed for product {product_id}: {_se}")
+
+
 async def _execute_create_order(
     tenant_id: str, conversation_id: str, sender_id: str,
     state: dict, plain_token: str, ai_config: dict,
 ) -> str:
-    cart    = state.get("cart") or []
-    name    = state.get("customer_name") or ""
-    phone   = state.get("customer_phone") or ""
-    address = state.get("delivery_address") or ""
+    cart            = state.get("cart") or []
+    name            = state.get("customer_name") or ""
+    phone           = state.get("customer_phone") or ""
+    address         = state.get("delivery_address") or ""
+    district        = state.get("district") or None
+    delivery_charge = float(state.get("delivery_charge") or 0)
 
     if not cart:
         _clear_order_state(conversation_id, state)
@@ -1990,7 +2119,8 @@ async def _execute_create_order(
     disc_amount  = float(dctx.get("discount_amount") or 0)
     disc_name    = dctx.get("discount_name") or disc_code or ""
     applied_list = dctx.get("applied_discounts") or []
-    net_amount   = round(max(0.0, agreed_price - disc_amount), 2) if (disc_code and disc_amount > 0) else agreed_price
+    products_net = round(max(0.0, agreed_price - disc_amount), 2) if (disc_code and disc_amount > 0) else agreed_price
+    net_amount   = round(products_net + delivery_charge, 2)
 
     row = {
         "order_id":             order_id,
@@ -2005,6 +2135,8 @@ async def _execute_create_order(
         "customer_name":        name,
         "customer_phone":       phone,
         "delivery_address":     address,
+        "district":             district,
+        "delivery_charge":      delivery_charge,
         "status":               "pending",
         "discount_code":        disc_code,
         "original_amount":      agreed_price,
@@ -2077,6 +2209,12 @@ async def _execute_create_order(
         "━━━━━━━━━━━━━━━━━━━━━━━",
         "আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ! 🙏",
     ]
+
+    # Issue stock for every cart item
+    for it in items:
+        if it.get("product_id"):
+            _stock_issue(tenant_id, it["product_id"], int(it["quantity"]), order_id)
+
     return "\n".join(lines_msg)
 
 async def _dispatch_step(
@@ -2100,6 +2238,8 @@ async def _dispatch_step(
         return await _step_ask_phone(**kwargs)
     if step == "ask_address":
         return await _step_ask_address(**kwargs)
+    if step == "ask_district":
+        return await _step_ask_district(**kwargs)
     if step == "show_summary":
         return await _step_show_summary(**kwargs)
     if step == "abandoned_check":
@@ -2335,36 +2475,10 @@ def save_order(tenant_id: str, conversation_id: str, sender_id: str, order_data:
             except Exception as _die:
                 logger.warning(f"order_discounts insert failed: {_die}")
 
-    # ── Deduct stock immediately when order is placed ──────────────────────────
-    quantity   = order_data.get("quantity", 1)
+    # Issue stock for the placed order
+    quantity = int(order_data.get("quantity") or 1)
     if product_id and quantity:
-        try:
-            stock_row = (
-                supabase.table("stock")
-                .select("current_stock")
-                .eq("tenant_id", tenant_id)
-                .eq("product_id", product_id)
-                .maybe_single()
-                .execute().data
-            )
-            if stock_row is not None:
-                before = stock_row.get("current_stock", 0)
-                after  = max(0, before - quantity)
-                supabase.table("stock").update({"current_stock": after}) \
-                    .eq("tenant_id", tenant_id).eq("product_id", product_id).execute()
-                prod = supabase.table("products").select("sku").eq("product_id", product_id) \
-                    .maybe_single().execute().data
-                supabase.table("stock_history").insert({
-                    "tenant_id":       tenant_id,
-                    "product_id":      product_id,
-                    "sku":             (prod or {}).get("sku", ""),
-                    "change_type":     "order_placed",
-                    "quantity_change": -quantity,
-                    "quantity_before": before,
-                    "quantity_after":  after,
-                }).execute()
-        except Exception as _se:
-            logger.warning(f"Stock deduction failed for product {product_id}: {_se}")
+        _stock_issue(tenant_id, product_id, quantity, order_id)
 
 
 def _set_conv_state(conversation_id: str, state: dict) -> None:

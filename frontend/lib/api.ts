@@ -347,6 +347,8 @@ export const stockAPI = {
   history:      () => api.get('/api/stock/history').then(r => r.data),
   alerts:       () => api.get('/api/stock/alerts').then(r => r.data),
   setThreshold: (threshold: number) => api.patch('/api/stock/threshold', { threshold }).then(r => r.data),
+  report:       (params: { from_date?: string; to_date?: string; product_id?: string }) =>
+    api.get('/api/stock/report', { params }).then(r => r.data),
   importCSV:    (file: File) => {
     const fd = new FormData()
     fd.append('file', file)

@@ -169,6 +169,7 @@ export interface OrderItem {
 
 export interface Order {
   order_id: string
+  order_ref: string | null
   tenant_id: string
   conversation_id: string | null
   customer_platform_id: string | null
@@ -182,6 +183,8 @@ export interface Order {
   customer_phone: string | null
   customer_name: string | null
   delivery_address: string | null
+  district: string | null
+  delivery_charge: number | null
   notes: string | null
   items: OrderItem[] | null
   status: 'pending' | 'confirmed' | 'shipped' | 'delivered' | 'cancelled'

@@ -5,7 +5,8 @@ Reads and writes from the dedicated `stock` table.
 import csv
 import io
 import logging
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from collections import defaultdict
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from app.auth.dependencies import get_current_tenant
 from app.database import supabase
 from app.models.schemas import StockManualUpdate, LowStockThreshold
@@ -40,6 +41,34 @@ def _log_stock_change(tenant_id: str, product_id: str, sku: str, change_type: st
     }).execute()
 
 
+def _log_movement(tenant_id: str, product_id: str, movement_type: str,
+                   quantity: int, physical_before: int, physical_after: int,
+                   issued_before: int, issued_after: int, note: str = None):
+    try:
+        supabase.table("stock_movements").insert({
+            "tenant_id":       tenant_id,
+            "product_id":      product_id,
+            "order_id":        None,
+            "movement_type":   movement_type,
+            "quantity":        quantity,
+            "physical_before": physical_before,
+            "physical_after":  physical_after,
+            "issued_before":   issued_before,
+            "issued_after":    issued_after,
+            "note":            note,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"stock_movements insert failed: {e}")
+
+
+def _compute_available(row: dict) -> int:
+    phys   = int(row.get("physical_stock") or 0)
+    issued = int(row.get("issued_stock") or 0)
+    if phys > 0 or issued > 0:
+        return max(0, phys - issued)
+    return int(row.get("current_stock") or 0)
+
+
 @router.get("/")
 async def list_stock(tenant: dict = Depends(get_current_tenant)):
     """All active products with current stock levels from the stock table."""
@@ -61,7 +90,7 @@ async def list_stock(tenant: dict = Depends(get_current_tenant)):
     pids = [p["product_id"] for p in products]
     stock_res = (
         supabase.table("stock")
-        .select("product_id, current_stock, low_stock_threshold")
+        .select("product_id, current_stock, physical_stock, issued_stock, low_stock_threshold")
         .eq("tenant_id", tid)
         .in_("product_id", pids)
         .execute()
@@ -70,12 +99,18 @@ async def list_stock(tenant: dict = Depends(get_current_tenant)):
     default_threshold = _get_tenant_threshold(tid)
 
     for p in products:
-        s = stock_map.get(p["product_id"], {})
-        stock_val = s.get("current_stock", 0)
-        threshold = s.get("low_stock_threshold", default_threshold)
-        p["stock"] = stock_val
-        p["low_stock"]    = 0 < stock_val <= threshold
-        p["out_of_stock"] = stock_val == 0
+        s         = stock_map.get(p["product_id"], {})
+        phys      = int(s.get("physical_stock") or 0)
+        issued    = int(s.get("issued_stock") or 0)
+        available = _compute_available(s)
+        threshold = s.get("low_stock_threshold") or default_threshold
+
+        p["stock"]          = available
+        p["physical_stock"] = phys
+        p["issued_stock"]   = issued
+        p["available"]      = available
+        p["low_stock"]      = 0 < available <= threshold
+        p["out_of_stock"]   = available == 0
 
     return {"products": products, "threshold": default_threshold}
 
@@ -97,26 +132,138 @@ async def update_stock(body: StockManualUpdate, tenant: dict = Depends(get_curre
 
     stock_row = (
         supabase.table("stock")
-        .select("current_stock")
+        .select("current_stock, physical_stock, issued_stock")
         .eq("tenant_id", tid)
         .eq("product_id", body.product_id)
         .maybe_single()
         .execute().data
-    )
-    before = (stock_row or {}).get("current_stock", 0)
-    after  = body.quantity
+    ) or {}
 
-    supabase.table("stock").upsert(
-        {"tenant_id": tid, "product_id": body.product_id, "current_stock": after},
-        on_conflict="tenant_id,product_id",
-    ).execute()
+    phys_before   = int(stock_row.get("physical_stock") or 0)
+    issued        = int(stock_row.get("issued_stock") or 0)
+    cur_before    = int(stock_row.get("current_stock") or 0)
+    new_physical  = body.quantity
+    new_model     = (phys_before > 0 or issued > 0)
+
+    if new_model:
+        new_cur = max(0, new_physical - issued)
+        upsert_data = {
+            "tenant_id":      tid,
+            "product_id":     body.product_id,
+            "physical_stock": new_physical,
+            "current_stock":  new_cur,
+        }
+        movement_type = "manual_add" if new_physical >= phys_before else "manual_remove"
+        _log_movement(tid, body.product_id, movement_type,
+                      abs(new_physical - phys_before),
+                      phys_before, new_physical, issued, issued, note=body.note)
+    else:
+        new_cur = new_physical
+        upsert_data = {
+            "tenant_id":     tid,
+            "product_id":    body.product_id,
+            "current_stock": new_cur,
+        }
+
+    supabase.table("stock").upsert(upsert_data, on_conflict="tenant_id,product_id").execute()
 
     _log_stock_change(
         tid, body.product_id, product["sku"],
-        "manual", after - before, before, after,
+        "manual", new_cur - cur_before, cur_before, new_cur,
         note=body.note,
     )
-    return {"product_id": body.product_id, "sku": product["sku"], "stock": after}
+    return {"product_id": body.product_id, "sku": product["sku"], "stock": new_cur}
+
+
+@router.get("/report")
+async def stock_report(
+    from_date: str = Query(None),
+    to_date:   str = Query(None),
+    product_id: str = Query(None),
+    tenant: dict = Depends(get_current_tenant),
+):
+    """Per-product stock movement summary for a date range."""
+    tid = tenant["tenant_id"]
+
+    q = (
+        supabase.table("stock_movements")
+        .select("*")
+        .eq("tenant_id", tid)
+        .order("created_at", desc=False)
+    )
+    if from_date:
+        q = q.gte("created_at", from_date)
+    if to_date:
+        q = q.lte("created_at", to_date + "T23:59:59Z" if len(to_date) == 10 else to_date)
+    if product_id:
+        q = q.eq("product_id", product_id)
+
+    movements = q.execute().data or []
+
+    if not movements:
+        return []
+
+    groups: dict[str, list] = defaultdict(list)
+    for m in movements:
+        groups[m["product_id"]].append(m)
+
+    all_pids = list(groups.keys())
+    prods_res = (
+        supabase.table("products")
+        .select("product_id, sku, name")
+        .eq("tenant_id", tid)
+        .in_("product_id", all_pids)
+        .execute()
+    )
+    prod_map = {p["product_id"]: p for p in (prods_res.data or [])}
+
+    stock_res = (
+        supabase.table("stock")
+        .select("product_id, current_stock, physical_stock, issued_stock")
+        .eq("tenant_id", tid)
+        .in_("product_id", all_pids)
+        .execute()
+    )
+    stock_map = {s["product_id"]: s for s in (stock_res.data or [])}
+
+    rows = []
+    for pid, ms in groups.items():
+        prod = prod_map.get(pid, {})
+        st   = stock_map.get(pid, {})
+
+        issued_ms = [m for m in ms if m["movement_type"] == "issue"]
+        ship_ms   = [m for m in ms if m["movement_type"] == "ship"]
+        ret_ms    = [m for m in ms if m["movement_type"] == "return"]
+
+        qty_issued  = sum(m["quantity"] for m in issued_ms)
+        qty_shipped = sum(m["quantity"] for m in ship_ms)
+        qty_returns = sum(m["quantity"] for m in ret_ms)
+        orders_count = len({m["order_id"] for m in issued_ms if m.get("order_id")})
+
+        sorted_ms     = sorted(ms, key=lambda m: m["created_at"])
+        opening_stock = sorted_ms[0].get("physical_before") if sorted_ms else None
+        closing_stock = sorted_ms[-1].get("physical_after") if sorted_ms else None
+
+        current_phys = int(st.get("physical_stock") or st.get("current_stock") or 0)
+        if opening_stock is None:
+            opening_stock = current_phys
+        if closing_stock is None:
+            closing_stock = current_phys
+
+        rows.append({
+            "product_id":    pid,
+            "product_name":  prod.get("name", ""),
+            "sku":           prod.get("sku", ""),
+            "orders_count":  orders_count,
+            "qty_issued":    qty_issued,
+            "qty_shipped":   qty_shipped,
+            "qty_returns":   qty_returns,
+            "opening_stock": opening_stock,
+            "closing_stock": closing_stock,
+        })
+
+    rows.sort(key=lambda r: r["product_name"])
+    return rows
 
 
 @router.post("/import/csv")
@@ -158,7 +305,6 @@ async def import_stock_csv(
         )
     reader.fieldnames = headers
 
-    # Pre-fetch active SKU → product_id map
     sku_res = (
         supabase.table("products")
         .select("product_id, sku")
@@ -207,19 +353,26 @@ async def import_stock_csv(
         try:
             before_res = (
                 supabase.table("stock")
-                .select("current_stock")
+                .select("current_stock, physical_stock, issued_stock")
                 .eq("tenant_id", tid)
                 .eq("product_id", product_id)
                 .maybe_single()
                 .execute()
             )
-            before = (before_res.data or {}).get("current_stock", 0) if before_res else 0
+            sr     = (before_res.data or {}) if before_res else {}
+            before = int(sr.get("current_stock") or 0)
+            phys   = int(sr.get("physical_stock") or 0)
+            issued = int(sr.get("issued_stock") or 0)
 
-            upsert_data: dict = {
-                "tenant_id":     tid,
-                "product_id":    product_id,
-                "current_stock": new_stock,
-            }
+            upsert_data: dict = {"tenant_id": tid, "product_id": product_id}
+
+            if phys > 0 or issued > 0:
+                new_cur = max(0, new_stock - issued)
+                upsert_data["physical_stock"] = new_stock
+                upsert_data["current_stock"]  = new_cur
+            else:
+                new_cur = new_stock
+                upsert_data["current_stock"] = new_cur
 
             threshold_val = row.get("low_stock_threshold", "")
             if threshold_val:
@@ -231,14 +384,11 @@ async def import_stock_csv(
                         "message": f"low_stock_threshold '{threshold_val}' invalid — ignored",
                     })
 
-            supabase.table("stock").upsert(
-                upsert_data,
-                on_conflict="tenant_id,product_id",
-            ).execute()
+            supabase.table("stock").upsert(upsert_data, on_conflict="tenant_id,product_id").execute()
 
             _log_stock_change(
                 tid, product_id, sku,
-                "import", new_stock - before, before, new_stock,
+                "import", new_cur - before, before, new_cur,
                 note="CSV bulk import",
             )
             imported += 1
@@ -276,12 +426,18 @@ async def low_stock_alerts(tenant: dict = Depends(get_current_tenant)):
 
     stock_res = (
         supabase.table("stock")
-        .select("product_id, current_stock, low_stock_threshold")
+        .select("product_id, current_stock, physical_stock, issued_stock, low_stock_threshold")
         .eq("tenant_id", tid)
         .execute()
     )
     all_stock = stock_res.data or []
-    low = [s for s in all_stock if s["current_stock"] <= s.get("low_stock_threshold", 10)]
+
+    low = []
+    for s in all_stock:
+        avail     = _compute_available(s)
+        threshold = s.get("low_stock_threshold") or 10
+        if avail <= threshold:
+            low.append({**s, "_available": avail})
 
     if not low:
         return {"alerts": [], "threshold": _get_tenant_threshold(tid), "count": 0}
@@ -301,7 +457,7 @@ async def low_stock_alerts(tenant: dict = Depends(get_current_tenant)):
         p = prod_map.get(s["product_id"], {})
         alerts.append({
             **p,
-            "stock":             s["current_stock"],
+            "stock":               s["_available"],
             "low_stock_threshold": s.get("low_stock_threshold", 10),
         })
 
