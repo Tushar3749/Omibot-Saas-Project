@@ -10,7 +10,7 @@ import {
   LogOut, Bot, Megaphone, BookOpen, FlaskConical,
   ChevronLeft, ChevronRight, Sun, Moon,
   RotateCcw, Layers, AlertTriangle, MoreHorizontal,
-  RefreshCw, Percent, Receipt, Bell, X,
+  RefreshCw, Percent, Receipt, Bell, X, GitBranch,
 } from 'lucide-react'
 import { notificationsAPI } from '@/lib/api'
 import type { AppNotification } from '@/types'
@@ -55,9 +55,10 @@ const NAV_GROUPS = [
   {
     label: 'Setup',
     items: [
-      { href: '/dashboard/channels',      icon: LinkIcon,        label: 'Channels' },
-      { href: '/dashboard/settings',      icon: Settings,        label: 'AI Settings' },
-      { href: '/dashboard/subscription',  icon: CreditCard,      label: 'Subscription' },
+      { href: '/dashboard/channels',       icon: LinkIcon,     label: 'Channels' },
+      { href: '/dashboard/settings',       icon: Settings,     label: 'AI Settings' },
+      { href: '/dashboard/order-process',  icon: GitBranch,    label: 'Order Process' },
+      { href: '/dashboard/subscription',   icon: CreditCard,   label: 'Subscription' },
     ],
   },
 ]
