@@ -705,7 +705,7 @@ def get_ai_config(tenant_id: str) -> dict:
         .maybe_single()
         .execute()
     )
-    return result.data if result is not None else {}
+    return (result.data if result is not None else None) or {}
 
 
 def _generate_discount_code() -> str:
@@ -1112,6 +1112,8 @@ async def _build_order_summary_v2(
 def _gemini_classify(msg: str, state: dict, tenant_id: str, last_bot_msg: str) -> dict:
     current_step = state.get("current_step", "selecting_products")
     store_name   = _get_store_name(tenant_id)
+    _ai_cfg      = get_ai_config(tenant_id)
+    bot_name     = (_ai_cfg.get("bot_name") or "Assistant").strip()
     catalog_text = "\n".join(
         f"- {p['name']} (SKU: {p.get('sku','')}, Price: ৳{p.get('mrp') or 0}, Cat: {p.get('category','')})"
         for p in _get_product_catalog(tenant_id)
@@ -1125,7 +1127,8 @@ def _gemini_classify(msg: str, state: dict, tenant_id: str, last_bot_msg: str) -
     disc_brief = disc_ctx[:600] if disc_ctx else "None"
 
     prompt = (
-        f"You are an order processing AI for '{store_name}' (Bangladeshi e-commerce).\n\n"
+        f"You are an order processing AI named '{bot_name}' for '{store_name}' (Bangladeshi e-commerce).\n"
+        f"CRITICAL: In natural_reply you MUST always call yourself '{bot_name}'. Never use any other name.\n\n"
         f"CURRENT ORDER STATE:\n"
         f"Current step: {current_step}\n"
         f"Cart: {cart_text}\n"

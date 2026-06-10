@@ -206,11 +206,18 @@ class AIService:
             "• শুধু পণ্যের বিষয়ে তথ্য ও দাম নিয়ে কথা বলো — নাম/ফোন/ঠিকানা চাওয়া order system-এর কাজ।\n"
         )
 
+        bot_name_rule = (
+            f"\n[IDENTITY — MUST FOLLOW]\n"
+            f"তোমার নাম {bot_name}। তুমি নিজেকে সবসময় '{bot_name}' হিসেবে পরিচয় দেবে।\n"
+            f"কখনো অন্য কোনো নাম (যেমন রিয়া, Assistant, AI ইত্যাদি) ব্যবহার করবে না।\n"
+        )
+
         return (
             f"{protection}\n\n"
             f"তোমার নাম: {bot_name}\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
+            f"{bot_name_rule}"
             f"{forbidden_instr}{state_instr}{discount_block}"
             f"{catalog_block}{context_rule}{sentiment_block}"
             f"{rag_block}\n"
