@@ -428,14 +428,6 @@ export const discountRulesAPI = {
 }
 
 
-// ── Negotiation Rules ─────────────────────────────────────────────────────────
-export const negotiationAPI = {
-  list:   () => api.get('/api/negotiation/').then(r => r.data),
-  create: (data: Record<string, unknown>) => api.post('/api/negotiation/', data).then(r => r.data),
-  update: (id: string, data: Record<string, unknown>) => api.patch(`/api/negotiation/${id}`, data).then(r => r.data),
-  delete: (id: string) => api.delete(`/api/negotiation/${id}`).then(r => r.data),
-}
-
 // ── Notifications ─────────────────────────────────────────────────────────────
 export const notificationsAPI = {
   count:      () => api.get('/api/notifications/count').then(r => r.data as { count: number }),

@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback, useRef } from 'react'
+import toast from 'react-hot-toast'
 import { discountsAPI, discountRulesAPI, configAPI } from '@/lib/api'
 import type {
   Discount, DiscountRule, OrderDiscount,
@@ -1325,7 +1326,9 @@ export default function DiscountsPage() {
   const [detail,    setDetail]    = useState<Discount | null>(null)
   const [search,    setSearch]    = useState('')
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [crMode,    setCrMode]    = useState<string>('best_deal')
+  const [crMode,       setCrMode]       = useState<string>('best_deal')
+  const [stackCap,     setStackCap]     = useState<number>(30)
+  const [savingCr,     setSavingCr]     = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1338,10 +1341,23 @@ export default function DiscountsPage() {
       setDiscounts(d)
       setRules(r)
       if (cfg?.conflict_resolution) setCrMode(cfg.conflict_resolution)
+      if (cfg?.discount_stack_cap)  setStackCap(Number(cfg.discount_stack_cap) || 30)
     } finally {
       setLoading(false)
     }
   }, [])
+
+  async function saveCrMode() {
+    setSavingCr(true)
+    try {
+      await configAPI.update({ conflict_resolution: crMode, discount_stack_cap: stackCap })
+      toast.success('✅ Conflict resolution সংরক্ষিত!')
+    } catch {
+      toast.error('সংরক্ষণ ব্যর্থ')
+    } finally {
+      setSavingCr(false)
+    }
+  }
 
   useEffect(() => { load() }, [load])
 
@@ -1417,6 +1433,71 @@ export default function DiscountsPage() {
             </button>
           )}
         </div>
+      </div>
+
+      {/* Conflict Resolution Banner */}
+      <div className="mb-4 p-4 rounded-xl" style={{ background: 'var(--c-card)', border: `1px solid ${cr.border}` }}>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <TrendingDown size={14} style={{ color: cr.color }} />
+            <p className="text-sm font-semibold" style={{ color: 'var(--c-text)' }}>Discount Conflict Resolution</p>
+            <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+                  style={{ background: cr.bg, color: cr.color, border: `1px solid ${cr.border}` }}>
+              {cr.label}
+            </span>
+          </div>
+          <button
+            onClick={saveCrMode}
+            disabled={savingCr}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white"
+            style={{ background: 'var(--c-accent)', opacity: savingCr ? 0.7 : 1 }}
+          >
+            {savingCr ? <><span className="spinner h-3 w-3" /> সংরক্ষণ...</> : <>সংরক্ষণ করুন</>}
+          </button>
+        </div>
+        <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>একাধিক discount rule match হলে কোনটি প্রযোজ্য হবে</p>
+        <div className="grid grid-cols-2 gap-2">
+          {([
+            { value: 'best_deal',      label: 'Best Deal Wins',   desc: 'সর্বোচ্চ ছাড়ের rule apply হবে' },
+            { value: 'priority_wins',  label: 'Priority Wins',    desc: 'সর্বোচ্চ priority-র rule apply হবে' },
+            { value: 'stack_all',      label: 'Stack All',        desc: 'সব matching rules একসাথে যোগ হবে' },
+            { value: 'stack_with_cap', label: 'Stack with Cap',   desc: 'সব যোগ হবে সর্বোচ্চ cap পর্যন্ত' },
+          ] as const).map(opt => {
+            const m = CR_META[opt.value]
+            return (
+              <label key={opt.value}
+                className="flex items-start gap-2 p-2.5 rounded-lg cursor-pointer"
+                style={{
+                  border: `1px solid ${crMode === opt.value ? m.border : 'var(--c-border)'}`,
+                  background: crMode === opt.value ? m.bg : 'var(--c-surface)',
+                }}>
+                <input type="radio" name="cr_mode" value={opt.value}
+                  checked={crMode === opt.value}
+                  onChange={() => setCrMode(opt.value)}
+                  className="mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="text-xs font-semibold" style={{ color: crMode === opt.value ? m.color : 'var(--c-text)' }}>{opt.label}</p>
+                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>{opt.desc}</p>
+                </div>
+              </label>
+            )
+          })}
+        </div>
+        {crMode === 'stack_with_cap' && (
+          <div className="mt-3 flex items-center gap-3">
+            <label className="text-xs font-medium whitespace-nowrap" style={{ color: 'var(--c-text)' }}>Maximum Stack Cap</label>
+            <div className="relative w-28">
+              <input
+                type="number" min={1} max={100} step={1}
+                className="w-full rounded px-3 py-1.5 text-sm pr-8"
+                style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)', color: 'var(--c-text)' }}
+                value={stackCap}
+                onChange={e => setStackCap(parseFloat(e.target.value) || 30)}
+              />
+              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs pointer-events-none" style={{ color: 'var(--c-muted)' }}>%</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tabs */}

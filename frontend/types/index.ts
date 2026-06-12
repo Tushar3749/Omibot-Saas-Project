@@ -12,6 +12,7 @@ export interface Tenant {
 export interface AIConfig {
   config_id: string
   tenant_id: string
+  store_name: string | null
   bot_name: string
   system_prompt: string | null
   language: 'bangla' | 'english' | 'banglish'
@@ -28,6 +29,7 @@ export interface AIConfig {
   partial_payment_advance_pct: number
   payment_deadline_hours: number
   installment_enabled: boolean
+  return_window_days: number
   // Message templates
   tpl_shipping_confirm: string | null
   tpl_delay_notify: string | null
@@ -36,10 +38,7 @@ export interface AIConfig {
   tpl_review_request: string | null
   tpl_referral: string | null
   // Smart AI
-  price_range_filter_enabled: boolean
   product_image_auto_send: boolean
-  catalog_pdf_auto_send: boolean
-  competitor_response_template: string | null
   // Bangladesh
   pathao_store_id: string | null
   pathao_client_id: string | null
@@ -50,6 +49,8 @@ export interface AIConfig {
   hartal_mode: boolean
   hartal_message: string | null
   friday_offline_enabled: boolean
+  friday_start_hour: number
+  friday_end_hour: number
   ramadan_mode: boolean
   ramadan_start_time: string
   ramadan_end_time: string

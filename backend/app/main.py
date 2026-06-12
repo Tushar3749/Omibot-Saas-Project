@@ -11,7 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.config import settings
-from app.routers import auth, webhook, products, conversations, orders, analytics, channels, payment, campaigns, knowledge, test_bot, combos, stock, returns, complaints, negotiation, courier, otp, product_images, discount_rules, discounts, notifications
+from app.routers import auth, webhook, products, conversations, orders, analytics, channels, payment, campaigns, knowledge, test_bot, combos, stock, returns, complaints, courier, otp, product_images, discount_rules, discounts, notifications
 from app.routers import settings as settings_router
 
 # ── Sentry ────────────────────────────────────────────────────────────────────
@@ -70,7 +70,6 @@ app.include_router(combos.router,        prefix="/api/combos",        tags=["Com
 app.include_router(stock.router,         prefix="/api/stock",         tags=["Stock"])
 app.include_router(returns.router,       prefix="/api/returns",       tags=["Returns"])
 app.include_router(complaints.router,    prefix="/api/complaints",    tags=["Complaints"])
-app.include_router(negotiation.router,   prefix="/api/negotiation",   tags=["Negotiation"])
 app.include_router(settings_router.router, prefix="/api/settings",    tags=["Settings"])
 app.include_router(courier.router,       prefix="/api/courier",       tags=["Courier"])
 app.include_router(otp.router,           prefix="/api/otp",           tags=["OTP"])

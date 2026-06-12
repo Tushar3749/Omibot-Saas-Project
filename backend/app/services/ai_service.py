@@ -97,6 +97,7 @@ class AIService:
 
     def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None, sentiment_hint: str = "", product_catalog: str = "") -> str:
         bot_name    = ai_config.get("bot_name", "Assistant")
+        store_name  = (ai_config.get("store_name") or "").strip() or "আমাদের স্টোর"
         language    = ai_config.get("language", "bangla")
         base_prompt = ai_config.get("system_prompt", "")
         forbidden   = ai_config.get("forbidden_topics", [])
@@ -215,6 +216,7 @@ class AIService:
         return (
             f"{protection}\n\n"
             f"তোমার নাম: {bot_name}\n"
+            f"তুমি {store_name}-এর AI assistant।\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
             f"{bot_name_rule}"

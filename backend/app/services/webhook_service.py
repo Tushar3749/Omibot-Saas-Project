@@ -2724,6 +2724,27 @@ async def process_message(
     # ── 0.2. Bangladesh operational modes ────────────────────────────────────
     _now_bd = datetime.now(timezone(timedelta(hours=6)))  # Bangladesh Standard Time (UTC+6)
 
+    # ── 0.1.5. Eid greeting — once per conversation on eid date + next day ───
+    if (
+        ai_config.get("eid_greeting_enabled")
+        and ai_config.get("eid_greeting_date")
+        and not state.get("eid_greeted")
+    ):
+        try:
+            _eid_date = datetime.strptime(
+                str(ai_config.get("eid_greeting_date", ""))[:10], "%Y-%m-%d"
+            ).date()
+            _today_bd = _now_bd.date()
+            if 0 <= (_today_bd - _eid_date).days <= 1:
+                eid_msg = (ai_config.get("eid_greeting_message") or "ঈদ মোবারক! 🌙").strip()
+                state   = {**state, "eid_greeted": True}
+                _set_conv_state(conversation_id, state)
+                save_message(conversation_id, tenant_id, "bot", eid_msg)
+                send_reply(sender_id, eid_msg, plain_token)
+                # Do NOT return — continue to answer their question
+        except Exception:
+            pass
+
     if ai_config.get("hartal_mode"):
         hartal_msg = (ai_config.get("hartal_message") or "").strip() or \
             "আজ হরতাল আছে। ডেলিভারি সাময়িক বন্ধ। পরে অর্ডার করুন।"
@@ -2732,21 +2753,37 @@ async def process_message(
         return
 
     if ai_config.get("friday_offline_enabled") and _now_bd.weekday() == 4:  # 4 = Friday
-        _hr = _now_bd.hour
-        if 12 <= _hr < 14:  # Jummah prayer window (12pm–2pm BST)
-            offline_msg = "আজ শুক্রবার জুম্মার নামাজের সময়, অফিস বন্ধ। বিকেল ২টার পর যোগাযোগ করুন।"
+        _hr      = _now_bd.hour
+        _f_start = int(ai_config.get("friday_start_hour") or 13)
+        _f_end   = int(ai_config.get("friday_end_hour") or 15)
+        if _f_start <= _hr < _f_end:
+            offline_msg = "আজ শুক্রবার জুম্মার নামাজের সময়, অফিস বন্ধ। পরে যোগাযোগ করুন।"
             save_message(conversation_id, tenant_id, "bot", offline_msg)
             send_reply(sender_id, offline_msg, plain_token)
             return
 
-    if ai_config.get("ramadan_mode") and not state.get("ramadan_welcomed"):
-        # Send a one-time Ramadan greeting before answering; continue to normal flow
-        _ramadan_greeting = "রমজান মোবারক! 🌙 আমাদের স্টোরে স্বাগতম।"
-        save_message(conversation_id, tenant_id, "bot", _ramadan_greeting)
-        send_reply(sender_id, _ramadan_greeting, plain_token)
-        state = {**state, "ramadan_welcomed": True}
-        _set_conv_state(conversation_id, state)
-        # Do NOT return — continue so their actual question gets answered
+    if ai_config.get("ramadan_mode"):
+        _r_start = (ai_config.get("ramadan_start_time") or "09:00")
+        _r_end   = (ai_config.get("ramadan_end_time") or "21:00")
+        try:
+            _rs_h, _rs_m = map(int, _r_start.split(":"))
+            _re_h, _re_m = map(int, _r_end.split(":"))
+            _now_min     = _now_bd.hour * 60 + _now_bd.minute
+            _in_window   = (_rs_h * 60 + _rs_m) <= _now_min < (_re_h * 60 + _re_m)
+        except Exception:
+            _in_window = True
+        if not _in_window:
+            _closed_msg = "রমজান মাসে আমাদের সেবার সময়সীমা পরিবর্তিত হয়েছে। নির্ধারিত সময়ে যোগাযোগ করুন।"
+            save_message(conversation_id, tenant_id, "bot", _closed_msg)
+            send_reply(sender_id, _closed_msg, plain_token)
+            return
+        if not state.get("ramadan_welcomed"):
+            _ramadan_greeting = "রমজান মোবারক! 🌙 আমাদের স্টোরে স্বাগতম।"
+            save_message(conversation_id, tenant_id, "bot", _ramadan_greeting)
+            send_reply(sender_id, _ramadan_greeting, plain_token)
+            state = {**state, "ramadan_welcomed": True}
+            _set_conv_state(conversation_id, state)
+            # Do NOT return — continue so their actual question gets answered
 
     # ── 0.3. Adult / inappropriate content detection ─────────────────────────
     if message_text and _detect_adult_content(message_text):
