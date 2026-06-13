@@ -35,7 +35,7 @@ from app.models.schemas import (
     CustomColumnCreate, CSVImportResponse,
 )
 from app.services.rag_service import RAGService
-from app.services.cloudinary_service import upload_product_image
+from app.services.supabase_storage_service import upload_product_image
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,6 +92,7 @@ async def list_products(tenant: dict = Depends(get_current_tenant)):
 
     if products:
         pids = [p["product_id"] for p in products]
+
         stock_res = (
             supabase.table("stock")
             .select("product_id, current_stock")
@@ -100,8 +101,22 @@ async def list_products(tenant: dict = Depends(get_current_tenant)):
             .execute()
         )
         stock_map = {s["product_id"]: s["current_stock"] for s in (stock_res.data or [])}
+
+        img_res = (
+            supabase.table("product_images")
+            .select("product_id")
+            .eq("tenant_id", tid)
+            .in_("product_id", pids)
+            .execute()
+        )
+        img_count_map: dict = {}
+        for img in (img_res.data or []):
+            pid = img["product_id"]
+            img_count_map[pid] = img_count_map.get(pid, 0) + 1
+
         for p in products:
             p["current_stock"] = stock_map.get(p["product_id"], 0)
+            p["image_count"]   = img_count_map.get(p["product_id"], 0)
 
     return products
 
@@ -519,7 +534,7 @@ async def import_history(tenant: dict = Depends(get_current_tenant)):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Image Upload  (Cloudinary)   ← BEFORE parameterised /{product_id}
+#  Image Upload  (Supabase Storage)   ← BEFORE parameterised /{product_id}
 # ─────────────────────────────────────────────────────────────────────────────
 @router.post("/upload-image")
 async def upload_image(
@@ -536,8 +551,9 @@ async def upload_image(
         raise HTTPException(status_code=413, detail="Image must be under 5 MB")
 
     tid = tenant["tenant_id"]
+    folder = f"{tid}/{product_id}" if product_id else tid
     try:
-        image_url = upload_product_image(raw, file.filename or "product.jpg", tid)
+        image_url = upload_product_image(raw, file.filename or "product.jpg", folder)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

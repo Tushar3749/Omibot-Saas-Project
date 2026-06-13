@@ -89,6 +89,7 @@ export interface Product {
   name: string
   mrp: number
   current_stock: number
+  image_count?: number
   category: string | null
   image_url: string | null
   extra_fields: Record<string, unknown>

@@ -1,6 +1,6 @@
 """
 OmniBot SaaS — Product Images Router
-CRUD for per-product images with Cloudinary upload + vector embedding.
+CRUD for per-product images with Supabase Storage upload + vector embedding.
 
 Routes (static before parameterized):
   GET    /search           text-based image search
@@ -16,7 +16,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from app.auth.dependencies import get_current_tenant
 from app.database import supabase
-from app.services.cloudinary_service import upload_product_image, delete_product_image
+from app.services.supabase_storage_service import upload_product_image, delete_product_image
 from app.services.image_search_service import (
     embed_description,
     analyze_image,
@@ -72,7 +72,7 @@ async def upload_image(
     tenant: dict             = Depends(get_current_tenant),
 ):
     """
-    Upload a product image to Cloudinary, optionally auto-describe with Gemini,
+    Upload a product image to Supabase Storage, optionally auto-describe with Gemini,
     embed the description, and store everything in product_images.
     """
     tid = tenant["tenant_id"]
@@ -93,9 +93,20 @@ async def upload_image(
     file_bytes = await file.read()
     filename   = f"{image_id}_{file.filename or 'image.jpg'}"
 
-    # Upload to Cloudinary
+    # Auto-set primary when this is the first image for the product
+    existing_count_res = (
+        supabase.table("product_images")
+        .select("image_id", count="exact")
+        .eq("tenant_id", tid)
+        .eq("product_id", product_id)
+        .execute()
+    )
+    if not is_primary and (existing_count_res.count or 0) == 0:
+        is_primary = True
+
+    # Upload to Supabase Storage
     try:
-        image_url = upload_product_image(file_bytes, filename, f"{tid}/products/{product_id}")
+        image_url = upload_product_image(file_bytes, filename, f"{tid}/{product_id}")
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -132,6 +143,7 @@ async def upload_image(
         "image_url":         image_url,
         "image_description": final_description or None,
         "is_primary":        is_primary,
+        "file_size":         len(file_bytes),
     }
     if embedding:
         row["embedding"] = embedding
@@ -208,7 +220,7 @@ async def delete_image(
     image_id: str,
     tenant: dict = Depends(get_current_tenant),
 ):
-    """Delete a product image from DB and Cloudinary (best-effort)."""
+    """Delete a product image from DB and Supabase Storage (best-effort)."""
     tid = tenant["tenant_id"]
 
     img = (
@@ -244,7 +256,7 @@ async def delete_image(
                 "image_id", next_img.data[0]["image_id"]
             ).execute()
 
-    # Delete from Cloudinary (non-blocking best-effort)
+    # Delete from Supabase Storage (best-effort)
     delete_product_image(image_url)
 
     return {"deleted": True}

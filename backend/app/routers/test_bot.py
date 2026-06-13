@@ -6,7 +6,9 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.auth.dependencies import get_current_tenant
@@ -193,6 +195,102 @@ async def test_bot_chat(
         "conversation_id": conversation_id,
         "order_flow":      final_state.get("order_flow"),
         "state":           final_state,
+    }
+
+
+@router.post("/image")
+async def test_bot_image(
+    file: UploadFile = File(...),
+    tenant: dict = Depends(get_current_tenant),
+):
+    """Process an image sent to the test bot — runs full 2-phase image recognition."""
+    from app.services.image_search_service import (
+        analyze_customer_image,
+        search_products_by_text,
+        search_product_images,
+        get_primary_image_cached,
+        format_image_recognition_reply,
+        _enrich_with_product,
+        _embed_query,
+    )
+
+    tid = tenant["tenant_id"]
+
+    allowed = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    if file.content_type not in allowed:
+        raise HTTPException(status_code=400, detail="Only JPEG/PNG/WebP/GIF images accepted")
+
+    image_bytes = await file.read()
+    if len(image_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be under 5MB")
+
+    mime_type = file.content_type or "image/jpeg"
+
+    # Vision with 8s timeout (slightly relaxed for test environment)
+    try:
+        analysis: dict = await asyncio.wait_for(
+            asyncio.to_thread(analyze_customer_image, image_bytes, mime_type),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        analysis = {"product_description": "", "likely_product_name": "", "category": "", "confidence": "low"}
+    except Exception as exc:
+        logger.warning(f"test_bot image Vision error: {exc}")
+        analysis = {"product_description": "", "likely_product_name": "", "category": "", "confidence": "low"}
+
+    description  = analysis.get("product_description", "")
+    product_name = analysis.get("likely_product_name", "")
+    category     = analysis.get("category", "")
+    confidence   = analysis.get("confidence", "low")
+    keywords     = [kw for kw in [product_name, category] if kw]
+
+    # Parallel Phase A + Phase B embed
+    async def _phase_a() -> list[dict]:
+        if not keywords:
+            return []
+        return await asyncio.to_thread(search_products_by_text, tid, keywords)
+
+    async def _phase_b() -> list[float] | None:
+        if not description:
+            return None
+        try:
+            return await asyncio.to_thread(_embed_query, description)
+        except Exception:
+            return None
+
+    text_products, query_embedding = await asyncio.gather(_phase_a(), _phase_b())
+
+    products: list[dict] = []
+
+    if text_products and confidence in ("high", "medium"):
+        for p in text_products[:3]:
+            img_url = get_primary_image_cached(tid, p["product_id"])
+            products.append({**p, "image_url": img_url or p.get("image_url"), "similarity": 0.9})
+    elif query_embedding:
+        matches = await asyncio.to_thread(search_product_images, tid, query_embedding, 3)
+        products = _enrich_with_product(tid, matches)
+        if not products and text_products:
+            for p in text_products[:3]:
+                img_url = get_primary_image_cached(tid, p["product_id"])
+                products.append({**p, "image_url": img_url or p.get("image_url"), "similarity": 0.5})
+    elif text_products:
+        for p in text_products[:3]:
+            img_url = get_primary_image_cached(tid, p["product_id"])
+            products.append({**p, "image_url": img_url or p.get("image_url"), "similarity": 0.5})
+
+    reply = format_image_recognition_reply(products, analysis)
+
+    # Persist to test conversation
+    conv = get_or_create_conversation(tid, f"test_{tid}", "test")
+    cid  = conv["conversation_id"]
+    save_message(cid, tid, "customer", "[ছবি পাঠানো হয়েছে]")
+    save_message(cid, tid, "bot", reply)
+
+    return {
+        "reply":           reply,
+        "analysis":        analysis,
+        "products":        products,
+        "conversation_id": str(cid),
     }
 
 

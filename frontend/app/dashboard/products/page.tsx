@@ -374,15 +374,25 @@ export default function ProductsPage() {
               {filtered.map(p => (
                 <tr key={p.product_id} className="hover:bg-slate-50 transition-colors">
                   <td className="td pl-3 pr-1">
-                    {p.image_url ? (
-                      <img src={p.image_url} alt={p.name}
-                           className="w-9 h-9 object-cover rounded-lg border border-slate-200 flex-shrink-0" />
-                    ) : (
-                      <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
-                           style={{ backgroundColor: '#F5F5F5' }}>
-                        <Package size={14} style={{ color: '#BDBDBD' }} />
-                      </div>
-                    )}
+                    <div className="relative inline-block">
+                      {p.image_url ? (
+                        <img src={p.image_url} alt={p.name}
+                             className="w-9 h-9 object-cover rounded-lg border border-slate-200 flex-shrink-0" />
+                      ) : (
+                        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+                             style={{ backgroundColor: '#F5F5F5' }}>
+                          <Package size={14} style={{ color: '#BDBDBD' }} />
+                        </div>
+                      )}
+                      {(p.image_count ?? 0) > 0 && (
+                        <span
+                          className="absolute -bottom-1 -right-1 text-white text-[9px] font-bold rounded-full leading-none flex items-center justify-center"
+                          style={{ backgroundColor: '#7B1FA2', minWidth: 16, height: 16, padding: '0 3px' }}
+                        >
+                          {p.image_count}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="td">
                     <code className="text-xs bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded font-mono">{p.sku}</code>
@@ -415,13 +425,17 @@ export default function ProductsPage() {
                     <div className="flex gap-1.5">
                       <button
                         onClick={() => setImageManagerProduct({ id: p.product_id, name: p.name })}
-                        className="p-1.5 rounded-lg transition-colors"
+                        className="flex items-center gap-1 px-1.5 py-1 rounded-lg transition-colors text-xs font-medium"
                         style={{ color: '#7B1FA2' }}
-                        title="Images পরিচালনা করুন"
+                        title="ছবি আপলোড ও পরিচালনা"
                         onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#F3E5F5')}
                         onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
                       >
-                        <Image size={15} />
+                        <Image size={14} />
+                        {(p.image_count ?? 0) > 0
+                          ? <span>{p.image_count} টি ছবি</span>
+                          : <span>ছবি</span>
+                        }
                       </button>
                       <button onClick={() => openEdit(p)} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 transition-colors hover:text-primary-600">
                         <Edit2 size={15} />
@@ -521,7 +535,7 @@ export default function ProductsPage() {
                     >
                       {uploadingImg
                         ? <><span className="spinner h-3.5 w-3.5" /> আপলোড হচ্ছে...</>
-                        : <><Upload size={13} /> Cloudinary-তে আপলোড</>}
+                        : <><Upload size={13} /> ছবি আপলোড</>}
                     </button>
                     <input
                       type="url" className="input text-sm"

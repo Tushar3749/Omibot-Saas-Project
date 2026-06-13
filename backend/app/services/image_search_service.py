@@ -10,7 +10,10 @@ Two search paths:
 Embedding model: text-embedding-004 (768-dim)
 Vision model   : gemini-2.5-flash (multimodal)
 """
+import asyncio
+import json
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -26,9 +29,17 @@ _client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 # ── Vision prompt ─────────────────────────────────────────────────────────────
 _VISION_PROMPT = (
-    "এই ছবিতে কী দেখা যাচ্ছে? পণ্যের ধরন, রং, আকার, কাপড়/উপাদান, "
-    "ডিজাইন এবং বৈশিষ্ট্য বাংলায় বিস্তারিত বর্ণনা করুন। "
-    "শুধু পণ্যের তথ্য দিন, অন্য কিছু নয়।"
+    "Describe this product image in detail. Include: product type, color, shape, "
+    "packaging, brand text visible, size, material. Be specific for search matching."
+)
+
+# Vision prompt when customer sends an image — returns structured JSON
+_CUSTOMER_IMAGE_PROMPT = (
+    "This is a product image from a customer. Describe what product this is. "
+    "Include: product name, type, category, approximate size/weight. "
+    'Return JSON only, no markdown: {"product_description": "detailed description", '
+    '"likely_product_name": "best guess name in Bangla", '
+    '"category": "category guess", "confidence": "high/medium/low"}'
 )
 
 # ── Text-to-image trigger keywords ───────────────────────────────────────────
@@ -257,6 +268,216 @@ def get_primary_image(tenant_id: str, product_id: str) -> Optional[str]:
         .execute()
     )
     return res.data[0]["image_url"] if res.data else None
+
+
+# ── In-memory primary image URL cache (per product_id, 5-min TTL) ────────────
+
+_image_url_cache: dict[str, tuple[Optional[str], float]] = {}
+_CACHE_TTL = 300  # seconds
+
+
+def get_primary_image_cached(tenant_id: str, product_id: str) -> Optional[str]:
+    """Return primary image URL with 5-minute in-process cache."""
+    now = time.time()
+    cached = _image_url_cache.get(product_id)
+    if cached and now - cached[1] < _CACHE_TTL:
+        return cached[0]
+    url = get_primary_image(tenant_id, product_id)
+    _image_url_cache[product_id] = (url, now)
+    return url
+
+
+# ── Customer image analysis (JSON output) ────────────────────────────────────
+
+def analyze_customer_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+    """
+    Analyze a customer-sent image with Gemini Vision.
+    Returns structured JSON: product_description, likely_product_name, category, confidence.
+    """
+    try:
+        response = _client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                genai_types.Content(parts=[
+                    genai_types.Part(
+                        inline_data=genai_types.Blob(mime_type=mime_type, data=image_bytes)
+                    ),
+                    genai_types.Part(text=_CUSTOMER_IMAGE_PROMPT),
+                ])
+            ],
+        )
+        raw = (response.text or "").strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("analyze_customer_image: non-JSON response from Gemini")
+        return {"product_description": "", "likely_product_name": "", "category": "", "confidence": "low"}
+    except Exception as e:
+        logger.error(f"analyze_customer_image failed: {e}")
+        return {"product_description": "", "likely_product_name": "", "category": "", "confidence": "low"}
+
+
+# ── Phase A: fast text search ─────────────────────────────────────────────────
+
+def search_products_by_text(tenant_id: str, keywords: list[str], limit: int = 5) -> list[dict]:
+    """
+    Phase A: ILIKE search on product name and category.
+    Fast (<100ms), used before vector search.
+    """
+    if not keywords:
+        return []
+    try:
+        conditions = []
+        for kw in keywords[:3]:
+            safe = kw.replace("%", "").replace("'", "")[:60]
+            if safe:
+                conditions.append(f"name.ilike.%{safe}%")
+                conditions.append(f"category.ilike.%{safe}%")
+        if not conditions:
+            return []
+        result = (
+            supabase.table("products")
+            .select("product_id, name, sku, mrp, category, image_url")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .or_(",".join(conditions))
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error(f"search_products_by_text failed: {e}")
+        return []
+
+
+# ── 2-phase customer image recognition ───────────────────────────────────────
+
+async def recognize_and_search_customer_image(
+    tenant_id: str,
+    image_url: str,
+    access_token: Optional[str] = None,
+    match_count: int = 3,
+) -> tuple[list[dict], dict]:
+    """
+    Full customer-image recognition pipeline:
+      1. Download image
+      2. Gemini Vision (JSON, 5s timeout) → product_description + confidence
+      3. Parallel: Phase A (text search) + Phase B embed
+      4. Return Phase A if high/medium confidence, else Phase B, else Phase A fallback
+    Returns (products, analysis_dict).
+    """
+    # 1. Download
+    try:
+        image_bytes, mime_type = await download_image(image_url, access_token)
+    except Exception as e:
+        logger.warning(f"Customer image download failed: {e}")
+        return [], {}
+
+    # 2. Vision with timeout
+    try:
+        analysis: dict = await asyncio.wait_for(
+            asyncio.to_thread(analyze_customer_image, image_bytes, mime_type),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Gemini Vision timed out for customer image")
+        return [], {}
+    except Exception as e:
+        logger.warning(f"Gemini Vision error for customer image: {e}")
+        return [], {}
+
+    description  = analysis.get("product_description", "")
+    product_name = analysis.get("likely_product_name", "")
+    category     = analysis.get("category", "")
+    confidence   = analysis.get("confidence", "low")
+
+    logger.info(f"Customer image analysis: name={product_name!r} confidence={confidence}")
+
+    if confidence == "low" and not description and not product_name:
+        return [], analysis
+
+    keywords = [kw for kw in [product_name, category] if kw]
+
+    # 3. Parallel Phase A + Phase B setup
+    async def _phase_a() -> list[dict]:
+        if not keywords:
+            return []
+        return await asyncio.to_thread(search_products_by_text, tenant_id, keywords)
+
+    async def _phase_b_embed() -> Optional[list[float]]:
+        if not description:
+            return None
+        try:
+            return await asyncio.to_thread(_embed_query, description)
+        except Exception as exc:
+            logger.warning(f"Embedding failed in customer image search: {exc}")
+            return None
+
+    text_products, query_embedding = await asyncio.gather(_phase_a(), _phase_b_embed())
+
+    def _enrich_text(rows: list[dict], sim: float) -> list[dict]:
+        result = []
+        for p in rows[:match_count]:
+            img_url = get_primary_image_cached(tenant_id, p["product_id"])
+            result.append({**p, "image_url": img_url or p.get("image_url"), "image_description": "", "similarity": sim})
+        return result
+
+    # 4. Decide which results to return
+    if text_products and confidence in ("high", "medium"):
+        return _enrich_text(text_products, 0.9 if confidence == "high" else 0.75), analysis
+
+    if query_embedding:
+        matches = await asyncio.to_thread(
+            search_product_images, tenant_id, query_embedding, match_count
+        )
+        vector_results = _enrich_with_product(tenant_id, matches)
+        if vector_results:
+            return vector_results, analysis
+
+    if text_products:
+        return _enrich_text(text_products, 0.5), analysis
+
+    return [], analysis
+
+
+# ── Image-recognition response formatter ─────────────────────────────────────
+
+def format_image_recognition_reply(products: list[dict], analysis: dict) -> str:
+    """Bangla reply for customer image recognition flow."""
+    if not products:
+        return (
+            "দুঃখিত, এই পণ্যটি আমাদের কাছে নেই।\n"
+            "আমাদের পণ্য তালিকা দেখতে চান?"
+        )
+
+    likely_name = (analysis.get("likely_product_name") or "").strip()
+
+    if len(products) == 1:
+        p    = products[0]
+        name = p.get("name", "পণ্য")
+        sku  = p.get("sku", "")
+        mrp  = p.get("mrp", 0)
+        intro = f"এটা দেখে মনে হচ্ছে {likely_name}!\n" if likely_name else ""
+        return (
+            f"{intro}আমাদের কাছে আছে:\n"
+            f"🛒 {name} ({sku}) — ৳{mrp:,.0f}\n\n"
+            "এটি কি নিতে চান?"
+        )
+
+    intro = (
+        f"{likely_name} সম্পর্কিত পণ্যগুলো:\n"
+        if likely_name
+        else "এই পণ্যগুলোর সাথে মিলছে:\n"
+    )
+    lines = [intro]
+    for i, p in enumerate(products[:3], 1):
+        lines.append(f"{i}. {p['name']} — ৳{p.get('mrp', 0):,.0f}")
+    lines.append("\nকোনটি আপনার?")
+    return "\n".join(lines)
 
 
 def should_trigger_image_search(text: str) -> bool:

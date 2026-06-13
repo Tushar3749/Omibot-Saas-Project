@@ -2613,11 +2613,12 @@ async def _handle_customer_image(
     plain_token: str,
 ) -> bool:
     """
-    Analyze customer's image with Gemini → vector search → send top matches.
-    Returns True if handled, False to fall through to AI.
+    2-phase customer image recognition:
+    Phase A (Gemini JSON + text search) and Phase B (vector search) run in parallel.
+    Returns True if handled.
     """
     logger.info(f"Processing customer image for tenant={tenant_id}")
-    products = await img_svc.search_by_customer_image(
+    products, analysis = await img_svc.recognize_and_search_customer_image(
         tenant_id=tenant_id,
         image_url=image_url,
         access_token=plain_token,
@@ -2628,12 +2629,12 @@ async def _handle_customer_image(
         send_reply(sender_id, reply, plain_token)
         return True
 
-    # Send first product image + text summary
+    # Send first product image first (fast visual confirmation)
     first = products[0]
     if first.get("image_url"):
         send_image_attachment(sender_id, first["image_url"], plain_token)
 
-    reply = img_svc.format_product_reply(products)
+    reply = img_svc.format_image_recognition_reply(products, analysis)
     save_message(conversation_id, tenant_id, "bot", reply)
     send_reply(sender_id, reply, plain_token)
     return True
