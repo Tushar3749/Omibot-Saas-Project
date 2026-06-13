@@ -12,14 +12,20 @@ export interface Tenant {
 export interface AIConfig {
   config_id: string
   tenant_id: string
+  // Identity
+  store_name: string | null
   bot_name: string
   system_prompt: string | null
   language: 'bangla' | 'english' | 'banglish'
+  greeting_message: string | null
+  // Security
   conflict_resolution?: 'priority_wins' | 'best_deal' | 'stack_all' | 'stack_with_cap'
+  discount_stack_cap?: number
   escalation_keywords: string[]
   forbidden_topics: string[]
   prompt_injection_guard: boolean
   // Order management
+  return_window_days: number
   min_order_amount: number
   max_order_qty_per_customer: number
   preorder_enabled: boolean
@@ -35,21 +41,21 @@ export interface AIConfig {
   tpl_wrong_item: string | null
   tpl_review_request: string | null
   tpl_referral: string | null
-  // Smart AI
-  price_range_filter_enabled: boolean
+  // AI behaviour
   product_image_auto_send: boolean
-  catalog_pdf_auto_send: boolean
-  competitor_response_template: string | null
-  // Bangladesh
+  // Bangladesh — integrations
   pathao_store_id: string | null
   pathao_client_id: string | null
   pathao_client_secret: string | null
   steadfast_api_key: string | null
   steadfast_api_secret: string | null
   sundarban_enabled: boolean
+  // Bangladesh — local settings
   hartal_mode: boolean
   hartal_message: string | null
   friday_offline_enabled: boolean
+  friday_offline_start: string
+  friday_offline_end: string
   ramadan_mode: boolean
   ramadan_start_time: string
   ramadan_end_time: string

@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback, useRef } from 'react'
+import toast from 'react-hot-toast'
 import { discountsAPI, discountRulesAPI, configAPI } from '@/lib/api'
 import type {
   Discount, DiscountRule, OrderDiscount,
@@ -9,7 +10,7 @@ import {
   Plus, Trash2, Edit2, X, Receipt, CheckCircle,
   Search, Eye, TrendingDown, Layers, Settings,
   ShoppingBag, RefreshCw, ChevronDown, ChevronRight,
-  Calculator, ArrowRight,
+  Calculator, Save,
 } from 'lucide-react'
 
 // ── Types ─────────────────────────────────────────────────────
@@ -65,6 +66,130 @@ const CR_META: Record<string, { label: string; bangla: string; desc: string; col
     desc: 'একটি সর্বোচ্চ সীমা পর্যন্ত discounts stack হবে',
     color: '#FF7043', bg: 'rgba(255,112,67,0.07)', border: 'rgba(255,112,67,0.25)',
   },
+}
+
+// ── Conflict Resolution Editor ────────────────────────────────
+
+function ConflictResolutionBanner({
+  crMode,
+  stackCap,
+  onSaved,
+}: {
+  crMode: string
+  stackCap: number
+  onSaved: (mode: string, cap: number) => void
+}) {
+  const [editing,  setEditing]  = useState(false)
+  const [tempMode, setTempMode] = useState(crMode)
+  const [tempCap,  setTempCap]  = useState(stackCap)
+  const [saving,   setSaving]   = useState(false)
+
+  const cr = CR_META[crMode] || CR_META['best_deal']
+
+  function startEdit() {
+    setTempMode(crMode)
+    setTempCap(stackCap)
+    setEditing(true)
+  }
+
+  async function handleSave() {
+    setSaving(true)
+    try {
+      const update: Record<string, unknown> = { conflict_resolution: tempMode }
+      if (tempMode === 'stack_with_cap') update.discount_stack_cap = tempCap
+      await configAPI.update(update)
+      onSaved(tempMode, tempCap)
+      setEditing(false)
+      toast.success('✅ Conflict resolution সংরক্ষিত হয়েছে!')
+    } catch {
+      toast.error('সংরক্ষণ ব্যর্থ হয়েছে')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl mb-4" style={{ background: cr.bg, border: `1px solid ${cr.border}` }}>
+      {!editing ? (
+        <div className="flex items-center justify-between gap-3 px-4 py-3">
+          <div className="flex items-center gap-3">
+            <Settings size={15} className="flex-shrink-0" style={{ color: cr.color }} />
+            <div>
+              <p className="text-sm font-bold" style={{ color: cr.color }}>
+                ⚙️ বর্তমান নিয়ম: {cr.bangla}
+              </p>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>{cr.desc}</p>
+            </div>
+          </div>
+          <button
+            onClick={startEdit}
+            className="flex items-center gap-1.5 text-xs flex-shrink-0 px-3 py-1.5 rounded font-medium"
+            style={{ color: cr.color, background: 'rgba(255,255,255,0.08)', border: `1px solid ${cr.border}` }}
+          >
+            <Edit2 size={11} /> পরিবর্তন করুন
+          </button>
+        </div>
+      ) : (
+        <div className="px-4 py-4 space-y-3">
+          <p className="text-sm font-bold" style={{ color: 'var(--c-text)' }}>⚙️ Conflict Resolution পরিবর্তন করুন</p>
+          <div className="space-y-2">
+            {(Object.entries(CR_META) as [string, typeof CR_META[string]][]).map(([value, meta]) => (
+              <label
+                key={value}
+                className="flex items-start gap-3 p-3 rounded cursor-pointer"
+                style={{
+                  border: `1px solid ${tempMode === value ? meta.border : 'var(--c-border)'}`,
+                  background: tempMode === value ? meta.bg : 'var(--c-surface)',
+                }}
+              >
+                <input
+                  type="radio" name="cr_edit" value={value}
+                  checked={tempMode === value}
+                  onChange={() => setTempMode(value)}
+                  className="mt-0.5"
+                />
+                <div>
+                  <p className="text-xs font-semibold" style={{ color: meta.color }}>{meta.label}</p>
+                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>{meta.desc}</p>
+                </div>
+              </label>
+            ))}
+          </div>
+          {tempMode === 'stack_with_cap' && (
+            <div>
+              <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Maximum Stack Cap (%)</label>
+              <div className="relative w-36">
+                <input
+                  type="number" min={1} step={1}
+                  className="w-full rounded px-3 py-1.5 text-sm pr-8"
+                  style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)', color: 'var(--c-text)' }}
+                  value={tempCap}
+                  onChange={e => setTempCap(parseFloat(e.target.value) || 30)}
+                />
+                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs pointer-events-none" style={{ color: 'var(--c-muted)' }}>%</span>
+              </div>
+            </div>
+          )}
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={handleSave} disabled={saving}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded text-sm font-semibold text-white"
+              style={{ background: saving ? 'var(--c-muted)' : 'var(--c-accent)' }}
+            >
+              {saving ? <><span className="spinner h-3.5 w-3.5" /> সংরক্ষণ...</> : <><Save size={13} /> সংরক্ষণ করুন</>}
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="px-4 py-1.5 rounded text-sm"
+              style={{ background: 'var(--c-surface2)', color: 'var(--c-muted)', border: '1px solid var(--c-border)' }}
+            >
+              বাতিল
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 const RULE_TYPE_COLORS: Record<string, string> = {
@@ -1154,26 +1279,19 @@ function ReportTab({ crMode }: { crMode: string }) {
 
   return (
     <div className="space-y-4">
-      {/* ── Conflict Resolution Banner ── */}
-      <div className="rounded-xl p-4"
+      {/* ── Conflict Resolution info row (read-only in report tab) ── */}
+      <div className="rounded-xl p-3"
            style={{ background: cr.bg, border: `1px solid ${cr.border}` }}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <Settings size={16} className="mt-0.5 flex-shrink-0" style={{ color: cr.color }} />
-            <div>
-              <p className="text-sm font-bold" style={{ color: cr.color }}>
-                ⚙️ বর্তমান নিয়ম: {cr.bangla}
-              </p>
-              <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>
-                {cr.desc}
-              </p>
-            </div>
+        <div className="flex items-center gap-3">
+          <Settings size={15} className="flex-shrink-0" style={{ color: cr.color }} />
+          <div>
+            <p className="text-sm font-bold" style={{ color: cr.color }}>
+              ⚙️ বর্তমান নিয়ম: {cr.bangla}
+            </p>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--c-muted)' }}>
+              {cr.desc}
+            </p>
           </div>
-          <a href="/dashboard/ai-config"
-             className="flex items-center gap-1 text-xs flex-shrink-0 px-2.5 py-1.5 rounded font-medium"
-             style={{ color: cr.color, background: cr.bg, border: `1px solid ${cr.border}` }}>
-            AI Settings থেকে পরিবর্তন করুন <ArrowRight size={11} />
-          </a>
         </div>
       </div>
 
@@ -1325,7 +1443,8 @@ export default function DiscountsPage() {
   const [detail,    setDetail]    = useState<Discount | null>(null)
   const [search,    setSearch]    = useState('')
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [crMode,    setCrMode]    = useState<string>('best_deal')
+  const [crMode,         setCrMode]         = useState<string>('best_deal')
+  const [discountStackCap, setDiscountStackCap] = useState<number>(30)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1338,6 +1457,7 @@ export default function DiscountsPage() {
       setDiscounts(d)
       setRules(r)
       if (cfg?.conflict_resolution) setCrMode(cfg.conflict_resolution)
+      if (cfg?.discount_stack_cap)  setDiscountStackCap(Number(cfg.discount_stack_cap))
     } finally {
       setLoading(false)
     }
@@ -1385,20 +1505,13 @@ export default function DiscountsPage() {
   )
 
   const editingDiscount = modal && modal !== 'create' ? modal : null
-  const cr = CR_META[crMode] || CR_META['best_deal']
 
   return (
     <div>
       {/* Header */}
       <div className="flex items-start justify-between mb-4">
         <div>
-          <div className="flex items-center gap-3 mb-1">
-            <h1 className="text-xl font-bold" style={{ color: 'var(--c-text)' }}>Discounts</h1>
-            <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
-                  style={{ background: cr.bg, color: cr.color, border: `1px solid ${cr.border}` }}>
-              {cr.label}
-            </span>
-          </div>
+          <h1 className="text-xl font-bold mb-1" style={{ color: 'var(--c-text)' }}>Discounts</h1>
           <p className="text-sm" style={{ color: 'var(--c-muted)' }}>
             Named discount offer তৈরি করুন এবং rules যোগ করুন।
           </p>
@@ -1418,6 +1531,13 @@ export default function DiscountsPage() {
           )}
         </div>
       </div>
+
+      {/* Conflict Resolution Banner */}
+      <ConflictResolutionBanner
+        crMode={crMode}
+        stackCap={discountStackCap}
+        onSaved={(mode, cap) => { setCrMode(mode); setDiscountStackCap(cap) }}
+      />
 
       {/* Tabs */}
       <div className="flex gap-0.5 mb-5 p-1 rounded-xl w-fit"
