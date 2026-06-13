@@ -4,8 +4,9 @@ import toast from 'react-hot-toast'
 import { returnsAPI } from '@/lib/api'
 import {
   RotateCcw, Check, XCircle, Clock, AlertTriangle,
-  Trash2, X, Loader2, Package, ChevronDown, ChevronUp,
+  Trash2, X, Loader2, Package, ChevronDown, ChevronUp, FileText,
 } from 'lucide-react'
+import PolicyDocs from '@/components/ui/PolicyDocs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface ReturnItem {
@@ -31,6 +32,7 @@ interface Return {
 }
 
 type StatusTab = 'pending' | 'approved' | 'rejected'
+type PageTab = 'list' | 'policy'
 
 interface Counts { pending: number; approved: number; rejected: number; cancelled: number }
 

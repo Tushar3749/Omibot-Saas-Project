@@ -27,6 +27,7 @@ rag    = RAGService()
 _CONTENT_TYPES = {
     "policy", "faq", "product",
     "return_policy", "bonus_policy", "company_desc",
+    "discount_policy", "delivery_policy", "order_policy",
 }
 
 # Allowed upload extensions
