@@ -11,6 +11,19 @@ logger = logging.getLogger(__name__)
 BUCKET = "product-images"
 
 
+def ensure_bucket_exists() -> None:
+    """Create the product-images Storage bucket if it doesn't exist yet."""
+    from app.database import supabase
+    try:
+        supabase.storage.get_bucket(BUCKET)
+    except Exception:
+        try:
+            supabase.storage.create_bucket(BUCKET, {"public": True})
+            logger.info(f"Created Supabase Storage bucket: {BUCKET}")
+        except Exception as exc:
+            logger.warning(f"ensure_bucket_exists: could not create bucket: {exc}")
+
+
 def upload_product_image(file_bytes: bytes, filename: str, folder: str) -> str:
     """
     Upload image bytes to Supabase Storage.

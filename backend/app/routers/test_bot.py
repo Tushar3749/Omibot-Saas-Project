@@ -203,82 +203,44 @@ async def test_bot_image(
     file: UploadFile = File(...),
     tenant: dict = Depends(get_current_tenant),
 ):
-    """Process an image sent to the test bot — runs full 2-phase image recognition."""
-    from app.services.image_search_service import (
-        analyze_customer_image,
-        search_products_by_text,
-        search_product_images,
-        get_primary_image_cached,
-        format_image_recognition_reply,
-        _enrich_with_product,
-        _embed_query,
-    )
+    """Process an image sent to the test bot using direct Gemini catalog matching."""
+    from app.services import image_search_service as img_svc
 
     tid = tenant["tenant_id"]
 
     allowed = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     if file.content_type not in allowed:
-        raise HTTPException(status_code=400, detail="Only JPEG/PNG/WebP/GIF images accepted")
+        raise HTTPException(status_code=400, detail="শুধু JPG, PNG বা WebP ছবি পাঠান।")
 
     image_bytes = await file.read()
     if len(image_bytes) > 5 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Image must be under 5MB")
+        raise HTTPException(status_code=413, detail="ছবিটি অনেক বড়। ৫MB এর কম সাইজের ছবি পাঠান।")
 
     mime_type = file.content_type or "image/jpeg"
 
-    # Vision with 8s timeout (slightly relaxed for test environment)
     try:
-        analysis: dict = await asyncio.wait_for(
-            asyncio.to_thread(analyze_customer_image, image_bytes, mime_type),
-            timeout=8.0,
+        match = await asyncio.wait_for(
+            asyncio.to_thread(img_svc.match_image_to_catalog, tid, image_bytes, mime_type),
+            timeout=20.0,
         )
     except asyncio.TimeoutError:
-        analysis = {"product_description": "", "likely_product_name": "", "category": "", "confidence": "low"}
+        match = {"matched": False, "image_description": "timeout", "_catalog": []}
     except Exception as exc:
-        logger.warning(f"test_bot image Vision error: {exc}")
-        analysis = {"product_description": "", "likely_product_name": "", "category": "", "confidence": "low"}
+        logger.warning(f"test_bot_image: match_image_to_catalog error: {exc}")
+        match = {"matched": False, "image_description": "", "_catalog": []}
 
-    description  = analysis.get("product_description", "")
-    product_name = analysis.get("likely_product_name", "")
-    category     = analysis.get("category", "")
-    confidence   = analysis.get("confidence", "low")
-    keywords     = [kw for kw in [product_name, category] if kw]
+    reply = img_svc.format_catalog_match_reply(match)
 
-    # Parallel Phase A + Phase B embed
-    async def _phase_a() -> list[dict]:
-        if not keywords:
-            return []
-        return await asyncio.to_thread(search_products_by_text, tid, keywords)
-
-    async def _phase_b() -> list[float] | None:
-        if not description:
-            return None
-        try:
-            return await asyncio.to_thread(_embed_query, description)
-        except Exception:
-            return None
-
-    text_products, query_embedding = await asyncio.gather(_phase_a(), _phase_b())
-
+    # Build product card list for frontend rendering
     products: list[dict] = []
-
-    if text_products and confidence in ("high", "medium"):
-        for p in text_products[:3]:
-            img_url = get_primary_image_cached(tid, p["product_id"])
-            products.append({**p, "image_url": img_url or p.get("image_url"), "similarity": 0.9})
-    elif query_embedding:
-        matches = await asyncio.to_thread(search_product_images, tid, query_embedding, 3)
-        products = _enrich_with_product(tid, matches)
-        if not products and text_products:
-            for p in text_products[:3]:
-                img_url = get_primary_image_cached(tid, p["product_id"])
-                products.append({**p, "image_url": img_url or p.get("image_url"), "similarity": 0.5})
-    elif text_products:
-        for p in text_products[:3]:
-            img_url = get_primary_image_cached(tid, p["product_id"])
-            products.append({**p, "image_url": img_url or p.get("image_url"), "similarity": 0.5})
-
-    reply = format_image_recognition_reply(products, analysis)
+    if match.get("matched") and match.get("product_id"):
+        products = [{
+            "product_id": match["product_id"],
+            "name":       match.get("product_name") or "",
+            "sku":        match.get("sku") or "",
+            "mrp":        float(match.get("price") or 0),
+            "image_url":  match.get("image_url") or "",
+        }]
 
     # Persist to test conversation
     conv = get_or_create_conversation(tid, f"test_{tid}", "test")
@@ -288,7 +250,12 @@ async def test_bot_image(
 
     return {
         "reply":           reply,
-        "analysis":        analysis,
+        "analysis": {
+            "likely_product_name": match.get("product_name") or "",
+            "confidence":          match.get("confidence") or "low",
+            "product_description": match.get("image_description") or "",
+            "category":            match.get("category") or "",
+        },
         "products":        products,
         "conversation_id": str(cid),
     }

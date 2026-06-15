@@ -9,6 +9,7 @@ Handles incoming Meta (Facebook / Instagram) webhook events:
   6. Normal AI reply flow
   7. Reply dispatch via Meta Graph API
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -3029,30 +3030,76 @@ async def _handle_customer_image(
     sender_id: str,
     image_url: str,
     plain_token: str,
+    order_flow_active: bool = False,
+    state: Optional[dict] = None,
 ) -> bool:
     """
-    2-phase customer image recognition:
-    Phase A (Gemini JSON + text search) and Phase B (vector search) run in parallel.
+    Direct Gemini catalog-match image handler.
+    Downloads image → Gemini matches against full catalog → reply or cart-integration.
     Returns True if handled.
     """
     logger.info(f"Processing customer image for tenant={tenant_id}")
-    products, analysis = await img_svc.recognize_and_search_customer_image(
-        tenant_id=tenant_id,
-        image_url=image_url,
-        access_token=plain_token,
-    )
-    if not products:
-        reply = "আপনার ছবিটি দেখলাম, তবে আমাদের catalog-এ কাছাকাছি পণ্য খুঁজে পাইনি। পণ্যের নাম বলুন।"
+
+    try:
+        image_bytes, mime_type = await img_svc.download_image(image_url, plain_token)
+    except Exception as exc:
+        logger.warning(f"Image download failed: {exc}")
+        reply = "ছবিটি লোড করতে পারিনি। আবার পাঠান।"
         save_message(conversation_id, tenant_id, "bot", reply)
         send_reply(sender_id, reply, plain_token)
         return True
 
-    # Send first product image first (fast visual confirmation)
-    first = products[0]
-    if first.get("image_url"):
-        send_image_attachment(sender_id, first["image_url"], plain_token)
+    try:
+        match = await asyncio.wait_for(
+            asyncio.to_thread(img_svc.match_image_to_catalog, tenant_id, image_bytes, mime_type),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("match_image_to_catalog timed out")
+        reply = "এই মুহূর্তে ছবি বিশ্লেষণ করতে পারছি না। পণ্যের নাম লিখুন।"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
+    except Exception as exc:
+        logger.warning(f"match_image_to_catalog error: {exc}")
+        reply = "ছবি প্রক্রিয়াকরণে সমস্যা হয়েছে। পণ্যের নাম লিখুন।"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
 
-    reply = img_svc.format_image_recognition_reply(products, analysis)
+    confidence = match.get("confidence", "low")
+    matched    = match.get("matched", False)
+
+    # Send matched product image before text reply (visual confirmation)
+    if matched and confidence in ("high", "medium"):
+        prod_img = match.get("image_url") or ""
+        if prod_img:
+            send_image_attachment(sender_id, prod_img, plain_token)
+
+    # Order flow integration: high/medium match → add product to cart pipeline
+    _PRODUCT_STEPS = {"selecting_products", "ask_quantity", "confirm_add"}
+    if (
+        order_flow_active
+        and matched
+        and confidence in ("high", "medium")
+        and state is not None
+        and state.get("current_step", "selecting_products") in _PRODUCT_STEPS
+    ):
+        product_id = match.get("product_id")
+        if product_id:
+            name  = match.get("product_name") or "পণ্য"
+            price = float(match.get("price") or 0)
+            _set_conv_state(conversation_id, {
+                **state,
+                "last_searched_product": product_id,
+                "current_step":          "ask_quantity",
+            })
+            reply = f"{name} (৳{price:,.0f}/পিস) কত পিস নেবেন?"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return True
+
+    reply = img_svc.format_catalog_match_reply(match)
     save_message(conversation_id, tenant_id, "bot", reply)
     send_reply(sender_id, reply, plain_token)
     return True
@@ -3066,14 +3113,45 @@ async def _handle_text_image_request(
     plain_token: str,
 ) -> bool:
     """
-    "কালো শাড়ি দেখাও" → vector search → send image + details.
+    Customer asks to see a product image (Trigger 1-3).
+    Step 1: Gemini extracts intent + product name/SKU.
+    Step 2: Direct DB lookup with primary image.
+    Step 3: Fallback to vector search if Gemini returns no product.
     Returns True if handled.
     """
+    # Gemini intent + product extraction (run in thread — sync SDK call)
+    intent_result = await asyncio.to_thread(img_svc.extract_product_image_intent, message_text)
+    if intent_result.get("intent") != "see_product_image":
+        return False
+
+    product_name = intent_result.get("product_name") or None
+    sku          = intent_result.get("sku") or None
+
+    # Direct DB lookup if Gemini found a name or SKU
+    product = None
+    if product_name or sku:
+        product = await asyncio.to_thread(
+            img_svc.get_product_with_image, tenant_id, product_name, sku
+        )
+
+    if product:
+        name      = product["name"]
+        price     = float(product.get("mrp") or 0)
+        image_url = product.get("image_url") or ""
+        if image_url:
+            send_image_attachment(sender_id, image_url, plain_token)
+            reply = f"{name} (৳{price:,.0f}) — এই হলো পণ্যের ছবি:"
+        else:
+            reply = f"দুঃখিত, {name}-এর ছবি এখন নেই।"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
+
+    # Fallback: vector search in product_images
     products = img_svc.search_by_text(tenant_id, message_text)
     if not products:
-        return False  # fall through to AI
+        return False
 
-    # Send primary image of best match
     first = products[0]
     if first.get("image_url"):
         send_image_attachment(sender_id, first["image_url"], plain_token)
@@ -3303,7 +3381,9 @@ async def process_message(
     # ── 3. Customer sent an image ─────────────────────────────────────────────
     if image_urls:
         handled = await _handle_customer_image(
-            tenant_id, conversation_id, sender_id, image_urls[0], plain_token
+            tenant_id, conversation_id, sender_id, image_urls[0], plain_token,
+            order_flow_active=state.get("order_flow") == "active",
+            state=state,
         )
         if handled:
             return

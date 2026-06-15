@@ -80,6 +80,13 @@ app.include_router(discounts.router,       prefix="/api/discounts",       tags=[
 app.include_router(notifications.router,   prefix="/api/notifications",   tags=["Notifications"])
 
 
+# ── Startup ───────────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def on_startup():
+    from app.services.supabase_storage_service import ensure_bucket_exists
+    ensure_bucket_exists()
+
+
 # ── Health Check ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():

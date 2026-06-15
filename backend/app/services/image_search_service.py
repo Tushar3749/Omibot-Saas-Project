@@ -13,6 +13,7 @@ Vision model   : gemini-2.5-flash (multimodal)
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -44,10 +45,30 @@ _CUSTOMER_IMAGE_PROMPT = (
 
 # ── Text-to-image trigger keywords ───────────────────────────────────────────
 IMAGE_SHOW_TRIGGERS = [
-    "দেখাও", "দেখান", "ছবি দাও", "ছবি দেখাও", "photo দেখাও",
-    "picture দেখাও", "show me", "show photo", "image দেখাও",
-    "কেমন দেখতে", "দেখতে চাই", "ছবি পাঠাও",
+    # Bengali
+    "দেখাও", "দেখান", "ছবি দাও", "ছবি দেখাও", "ছবি পাঠাও",
+    "photo দেখাও", "picture দেখাও", "image দেখাও",
+    "কেমন দেখতে", "দেখতে কেমন", "দেখতে চাই",
+    # Romanized / mixed
+    "chobi", "photo dao", "photo pathao",
+    "photo dekhao", "photo dekhan", "dekhao", "dekhan",
+    # English
+    "show me", "show photo", "show image",
 ]
+
+# ── Product image intent extraction prompt ─────────────────────────────────────
+_PRODUCT_IMAGE_INTENT_PROMPT = (
+    "Customer message: \"{message}\"\n\n"
+    "Does the customer want to SEE a product image/photo?\n"
+    "If yes, extract product name or SKU (if mentioned).\n"
+    "Return JSON only — no markdown:\n"
+    '{{"intent": "see_product_image", "product_name": "name in Bengali or null", "sku": "SKU or null"}}\n'
+    'If no: {{"intent": "other"}}'
+)
+
+# ── Per-tenant catalog cache (10-minute TTL) ──────────────────────────────────
+_catalog_cache: dict[str, tuple[float, list]] = {}
+_CATALOG_CACHE_TTL = 600  # seconds
 
 
 # ── Embedding helpers ─────────────────────────────────────────────────────────
@@ -516,6 +537,229 @@ def format_image_recognition_reply(products: list[dict], analysis: dict) -> str:
         lines.append(f"{i}. {p['name']} — ৳{p.get('mrp', 0):,.0f}")
     lines.append("\nকোনটি আপনার?")
     return "\n".join(lines)
+
+
+# ── Direct Catalog Match (Gemini Vision + full catalog) ───────────────────────
+
+_CATALOG_MATCH_PROMPT = (
+    "A customer sent the product image attached.\n"
+    "Our full product catalog (JSON):\n"
+    "{catalog_json}\n\n"
+    "Match the image to exactly one product from the catalog, or say not matched.\n"
+    "Return JSON only — no markdown, no extra text:\n"
+    '{{"matched": true_or_false, '
+    '"product_name": "exact name from catalog or null", '
+    '"sku": "SKU from catalog or null", '
+    '"price": price_number_or_null, '
+    '"confidence": "high or medium or low", '
+    '"image_description": "brief description of what is visible in the image", '
+    '"similar_products": ["up to 3 similar product names from catalog"]}}'
+)
+
+
+def _get_catalog_cached(tenant_id: str) -> list:
+    """Load active products for tenant; cached 10 minutes to avoid per-message DB round-trips."""
+    now = time.time()
+    ts, products = _catalog_cache.get(tenant_id, (0, []))
+    if now - ts < _CATALOG_CACHE_TTL and products:
+        return products
+    try:
+        res = (
+            supabase.table("products")
+            .select("product_id,name,sku,mrp,category,image_url")
+            .eq("tenant_id", tenant_id)
+            .eq("is_active", True)
+            .limit(200)
+            .execute()
+        )
+        products = res.data or []
+    except Exception as exc:
+        logger.warning(f"_get_catalog_cached: DB load failed: {exc}")
+        products = []
+    _catalog_cache[tenant_id] = (time.time(), products)
+    return products
+
+
+def invalidate_catalog_cache(tenant_id: str) -> None:
+    """Call after product edits so the next request sees fresh data."""
+    _catalog_cache.pop(tenant_id, None)
+
+
+def match_image_to_catalog(
+    tenant_id: str,
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+) -> dict:
+    """
+    Single-pass Gemini catalog match: image + full product catalog JSON → structured result.
+    Returns dict with keys: matched, product_name, sku, price, confidence,
+    image_description, similar_products, _catalog; and (if matched) product_id,
+    category, image_url populated from the DB row.
+    """
+    products = _get_catalog_cached(tenant_id)
+    if not products:
+        return {"matched": False, "image_description": "", "_catalog": []}
+
+    catalog = [
+        {
+            "name":     p["name"],
+            "sku":      p["sku"],
+            "price":    p.get("mrp"),
+            "category": p.get("category") or "",
+        }
+        for p in products
+    ]
+    prompt = _CATALOG_MATCH_PROMPT.format(
+        catalog_json=json.dumps(catalog, ensure_ascii=False)
+    )
+
+    try:
+        response = _client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                genai_types.Content(parts=[
+                    genai_types.Part(
+                        inline_data=genai_types.Blob(mime_type=mime_type, data=image_bytes)
+                    ),
+                    genai_types.Part(text=prompt),
+                ])
+            ],
+        )
+        text = (response.text or "").strip()
+        text = re.sub(r"^```(?:json)?\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+        result = json.loads(text)
+    except Exception as exc:
+        logger.warning(f"match_image_to_catalog: Gemini/parse failed: {exc}")
+        result = {"matched": False, "image_description": ""}
+
+    # Enrich with DB values (product_id, real price, image_url) for matched SKU
+    if result.get("matched") and result.get("sku"):
+        sku = result["sku"]
+        for p in products:
+            if p["sku"] == sku:
+                result["product_id"] = p["product_id"]
+                result["category"]   = p.get("category") or ""
+                result["image_url"]  = p.get("image_url") or ""
+                result["price"]      = p.get("mrp") or result.get("price") or 0
+                break
+
+    result["_catalog"] = products
+    return result
+
+
+def format_catalog_match_reply(match: dict) -> str:
+    """Bangla reply for a catalog-match result. Three branches: matched, similar, no match."""
+    catalog = match.get("_catalog") or []
+
+    if not match.get("matched"):
+        cats = list({p.get("category") for p in catalog if p.get("category")})[:5]
+        if cats:
+            return (
+                "❌ দুঃখিত, এই পণ্যটি আমাদের catalog-এ নেই।\n"
+                "আমাদের পণ্যের ক্যাটাগরি: " + " | ".join(cats)
+            )
+        return "❌ দুঃখিত, এই পণ্যটি আমাদের catalog-এ নেই। পণ্যের নাম লিখে জানান।"
+
+    confidence   = match.get("confidence", "low")
+    product_name = match.get("product_name") or "পণ্য"
+    sku          = match.get("sku") or ""
+    price        = float(match.get("price") or 0)
+    category     = match.get("category") or ""
+
+    if confidence in ("high", "medium"):
+        lines = [
+            f"✅ এটা *{product_name}* পাওয়া গেছে!",
+            f"SKU: {sku}",
+            f"💰 মূল্য: ৳{price:,.0f}",
+        ]
+        if category:
+            lines.append(f"📦 ক্যাটাগরি: {category}")
+        lines.append("\nএটি কি অর্ডার করতে চান?")
+        return "\n".join(lines)
+
+    # Low confidence — list similar products with SKU + price
+    similar_names = set(match.get("similar_products") or [])
+    similar_rows = [p for p in catalog if p.get("name") in similar_names][:3]
+    if not similar_rows:
+        similar_rows = catalog[:3]
+
+    lines = ["🔍 নিচের পণ্যগুলোর মধ্যে কোনটি খুঁজছেন?"]
+    for i, p in enumerate(similar_rows, 1):
+        p_price = float(p.get("mrp") or 0)
+        lines.append(f"{i}. {p['name']} ({p.get('sku', '')}) — ৳{p_price:,.0f}")
+    lines.append("\nপণ্যের নাম বা নম্বর বলুন।")
+    return "\n".join(lines)
+
+
+def extract_product_image_intent(text: str) -> dict:
+    """
+    Gemini detects if the customer wants to see a product image and extracts product name/SKU.
+    Returns {"intent": "see_product_image", "product_name": ..., "sku": ...} or {"intent": "other"}.
+    """
+    prompt = _PRODUCT_IMAGE_INTENT_PROMPT.format(message=text)
+    try:
+        response = _client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=prompt,
+        )
+        raw = (response.text or "").strip()
+        raw = re.sub(r"^```(?:json)?\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw).strip()
+        return json.loads(raw)
+    except Exception as exc:
+        logger.warning(f"extract_product_image_intent failed: {exc}")
+        return {"intent": "other"}
+
+
+def get_product_with_image(
+    tenant_id: str,
+    product_name: Optional[str] = None,
+    sku: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Find a product by SKU (exact) or name (ILIKE) with its primary image URL.
+    Checks product_images.is_primary first, falls back to products.image_url.
+    """
+    if not product_name and not sku:
+        return None
+
+    query = (
+        supabase.table("products")
+        .select("product_id,name,sku,mrp,category,image_url")
+        .eq("tenant_id", tenant_id)
+        .eq("is_active", True)
+    )
+    try:
+        if sku:
+            res = query.ilike("sku", sku.strip()).limit(1).execute()
+        else:
+            res = query.ilike("name", f"%{product_name.strip()}%").limit(1).execute()
+        product = (res.data or [None])[0]
+    except Exception as exc:
+        logger.warning(f"get_product_with_image: DB error: {exc}")
+        return None
+
+    if not product:
+        return None
+
+    # Get primary image from product_images table (overrides products.image_url)
+    try:
+        img_res = (
+            supabase.table("product_images")
+            .select("image_url")
+            .eq("tenant_id", tenant_id)
+            .eq("product_id", product["product_id"])
+            .eq("is_primary", True)
+            .limit(1)
+            .execute()
+        )
+        if img_res.data:
+            product = {**product, "image_url": img_res.data[0]["image_url"]}
+    except Exception:
+        pass
+
+    return product
 
 
 def should_trigger_image_search(text: str) -> bool:
