@@ -95,12 +95,12 @@ async def list_products(tenant: dict = Depends(get_current_tenant)):
 
         stock_res = (
             supabase.table("stock")
-            .select("product_id, current_stock")
+            .select("product_id, current_stock, physical_stock, issued_stock")
             .eq("tenant_id", tid)
             .in_("product_id", pids)
             .execute()
         )
-        stock_map = {s["product_id"]: s["current_stock"] for s in (stock_res.data or [])}
+        stock_map = {s["product_id"]: s for s in (stock_res.data or [])}
 
         img_res = (
             supabase.table("product_images")
@@ -115,8 +115,14 @@ async def list_products(tenant: dict = Depends(get_current_tenant)):
             img_count_map[pid] = img_count_map.get(pid, 0) + 1
 
         for p in products:
-            p["current_stock"] = stock_map.get(p["product_id"], 0)
-            p["image_count"]   = img_count_map.get(p["product_id"], 0)
+            s      = stock_map.get(p["product_id"], {})
+            phys   = int(s.get("physical_stock") or 0)
+            issued = int(s.get("issued_stock") or 0)
+            if phys > 0 or issued > 0:
+                p["current_stock"] = max(0, phys - issued)
+            else:
+                p["current_stock"] = int(s.get("current_stock") or 0)
+            p["image_count"] = img_count_map.get(p["product_id"], 0)
 
     return products
 
@@ -482,6 +488,7 @@ async def import_csv(
                 product_data["tenant_id"]  = tid
                 supabase.table("products").insert(product_data).execute()
                 existing_map[sku] = pid
+                _upsert_stock(tid, pid, 0)
 
             imported += 1
 
