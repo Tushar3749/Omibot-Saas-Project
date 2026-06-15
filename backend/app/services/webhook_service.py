@@ -1467,8 +1467,27 @@ async def _build_order_summary_v2(
     tenant_id: str = "",
     sender_id: str = "",
     conversation_id: str = "",
+    plain_token: str = "",
 ) -> str:
     cart  = state.get("cart") or []
+
+    # Send one product image per cart item before the text summary
+    if sender_id and plain_token:
+        for item in cart:
+            pid = item.get("product_id")
+            if not pid:
+                continue
+            try:
+                img_url = img_svc.get_primary_image_cached(tenant_id, pid)
+                if not img_url:
+                    # fallback: check products.image_url
+                    pr = supabase.table("products").select("image_url").eq("product_id", pid).maybe_single().execute()
+                    img_url = (pr.data or {}).get("image_url") or ""
+                if img_url:
+                    send_image_attachment(sender_id, img_url, plain_token)
+            except Exception as _e:
+                logger.debug(f"order summary image skip for {pid}: {_e}")
+
     total = 0.0
     rows  = []
     for item in cart:
@@ -2197,7 +2216,7 @@ async def _step_ask_name(
                 new_state = {**state, "customer_name": name, "customer_phone": phone,
                              "delivery_address": address, "completed_states": cs, "current_step": "show_summary"}
                 _set_conv_state(conversation_id, new_state)
-                return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+                return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id, plain_token)
             new_state = {**state, "customer_name": name, "customer_phone": phone,
                          "completed_states": cs, "current_step": "ask_address"}
             _set_conv_state(conversation_id, new_state)
@@ -2236,7 +2255,7 @@ async def _step_ask_phone(
             new_state = {**state, "customer_phone": phone, "delivery_address": address,
                          "completed_states": cs, "current_step": "show_summary"}
             _set_conv_state(conversation_id, new_state)
-            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id, plain_token)
         new_state = {**state, "customer_phone": phone, "completed_states": cs, "current_step": "ask_address"}
         _set_conv_state(conversation_id, new_state)
         return "📍 ডেলিভারি ঠিকানা দিন (বাড়ি/এলাকা/জেলা):"
@@ -2274,7 +2293,7 @@ async def _step_ask_address(
                          "delivery_charge": delivery_charge, "completed_states": cs,
                          "current_step": "show_summary"}
             _set_conv_state(conversation_id, new_state)
-            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+            return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id, plain_token)
         # District not yet found — save address and ask for district
         new_state = {**state, "delivery_address": address,
                      "completed_states": cs, "current_step": "ask_district"}
@@ -2313,7 +2332,7 @@ async def _step_ask_district(
                  "completed_states": cs,
                  "current_step":     "show_summary"}
     _set_conv_state(conversation_id, new_state)
-    return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+    return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id, plain_token)
 
 
 async def _step_show_summary(
@@ -2352,7 +2371,7 @@ async def _step_show_summary(
         if phone_val:   new_state["customer_phone"]   = phone_val
         if address_val: new_state["delivery_address"] = address_val
         _set_conv_state(conversation_id, new_state)
-        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id, plain_token)
 
     if intent == "modify_cart":
         cart_changes = (classified.get("modifications") or {}).get("cart_changes") or []
@@ -2380,7 +2399,7 @@ async def _step_show_summary(
                         c["quantity"] = qty
         new_state = {**state, "cart": cart}
         _set_conv_state(conversation_id, new_state)
-        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id)
+        return await _build_order_summary_v2(new_state, tenant_id, sender_id, conversation_id, plain_token)
 
     if intent == "go_back":
         new_state = {**state, "current_step": "ask_address"}
@@ -2399,7 +2418,7 @@ async def _step_show_summary(
         _clear_order_state(conversation_id, state)
         return "❌ অর্ডার বাতিল করা হয়েছে।"
 
-    return await _build_order_summary_v2(state, tenant_id, sender_id, conversation_id)
+    return await _build_order_summary_v2(state, tenant_id, sender_id, conversation_id, plain_token)
 
 
 async def _step_abandoned_check(
