@@ -187,6 +187,44 @@ def _enrich_with_product(tenant_id: str, matches: list[dict]) -> list[dict]:
     return enriched
 
 
+# ── Return photo validation ───────────────────────────────────────────────────
+
+_RETURN_PHOTO_PROMPT = (
+    "This image was sent by a customer as evidence for a product return/complaint.\n"
+    "Analyze the image and return ONLY valid JSON (no markdown):\n"
+    '{"is_product_photo": true, "damage_visible": false, "analysis": "brief description"}\n\n'
+    "is_product_photo: true if image clearly shows a physical product (any packaged or unpackaged item)\n"
+    "damage_visible: true if damage, defect, wrong product, or quality issue is clearly visible\n"
+    "analysis: 1-2 sentence description of what you see\n"
+    "Set is_product_photo=false for selfies, landscapes, screenshots, memes, or anything that is clearly not a product photo."
+)
+
+
+def validate_return_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+    """Validate a customer return photo using Gemini Vision."""
+    try:
+        response = _client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                genai_types.Content(parts=[
+                    genai_types.Part(
+                        inline_data=genai_types.Blob(mime_type=mime_type, data=image_bytes)
+                    ),
+                    genai_types.Part(text=_RETURN_PHOTO_PROMPT),
+                ])
+            ],
+        )
+        text = (response.text or "").strip()
+        if text.startswith("```"):
+            import re
+            text = re.sub(r"^```(?:json)?\n?", "", text)
+            text = re.sub(r"\n?```$", "", text.strip())
+        return json.loads(text)
+    except Exception as exc:
+        logger.warning(f"validate_return_photo failed: {exc}")
+        return {"is_product_photo": True, "damage_visible": False, "analysis": "validation unavailable"}
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def search_by_customer_image(

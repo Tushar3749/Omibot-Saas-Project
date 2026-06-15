@@ -71,8 +71,10 @@ _RETURN_TRIGGERS = [
 _RETURN_STATE_KEYS = frozenset({
     "return_flow", "return_step", "return_phone", "return_orders",
     "selected_order", "return_type", "return_items", "return_reason",
-    "return_photo_url", "return_timeout", "return_window_days",
+    "return_photo_url", "return_photo_verified", "return_photo_analysis",
+    "return_timeout", "return_window_days",
     "return_pending_item_idx", "last_return_bot_message",
+    "return_conversation_id",
 })
 
 
@@ -92,10 +94,13 @@ def _new_return_state(window_days: int = 7) -> dict:
         "return_items":             [],
         "return_reason":            None,
         "return_photo_url":         None,
+        "return_photo_verified":    False,
+        "return_photo_analysis":    None,
         "return_timeout":           (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
         "return_window_days":       window_days,
         "return_pending_item_idx":  None,
         "last_return_bot_message":  "",
+        "return_conversation_id":   None,
     }
 
 
@@ -222,9 +227,13 @@ def _save_return_request_v2(
     tenant_id: str, order_id: str, phone: str,
     return_type: str, items: list,
     reason: str = "", photo_url: str = "",
+    photo_verified: bool = False, photo_analysis: Optional[dict] = None,
+    conversation_id: str = "",
 ) -> str:
-    return_id = str(uuid.uuid4())
-    short_id  = return_id.replace("-", "")[:8].upper()
+    return_id  = str(uuid.uuid4())
+    date_part  = datetime.now(timezone.utc).strftime("%Y%m%d")
+    rand_part  = return_id.replace("-", "")[:4].upper()
+    label      = f"RET-{date_part}-{rand_part}"
     row: dict = {
         "return_id":      return_id,
         "tenant_id":      tenant_id,
@@ -233,13 +242,18 @@ def _save_return_request_v2(
         "return_type":    return_type,
         "status":         "pending",
         "items":          items,
+        "photo_verified": photo_verified,
     }
     if reason:
         row["reason"] = reason
     if photo_url:
         row["photo_url"] = photo_url
+    if photo_analysis:
+        row["gemini_analysis"] = photo_analysis
+    if conversation_id:
+        row["conversation_id"] = conversation_id
     supabase.table("returns").insert(row).execute()
-    return f"RET-{short_id}"
+    return label
 
 
 def _fmt_order_date(created_at: str) -> str:
@@ -323,20 +337,35 @@ def _fmt_selected_items(return_items: list[dict]) -> str:
 def _fmt_return_summary(state: dict) -> str:
     order  = state.get("selected_order") or {}
     ref    = order.get("order_ref") or order.get("order_id", "")[:12]
-    rtype  = "সম্পূর্ণ" if state.get("return_type") == "full" else "আংশিক"
+    rtype  = "সম্পূর্ণ ফেরত" if state.get("return_type") == "full" else "আংশিক ফেরত"
     reason = state.get("return_reason") or ""
-    photo  = "✅ ছবি পাঠানো হয়েছে" if state.get("return_photo_url") else "📷 ছবি ছাড়া"
-    lines  = [
-        "📋 রিটার্ন সারসংক্ষেপ:",
+    photo  = "✅" if state.get("return_photo_url") else "❌ (নেই)"
+
+    item_lines = []
+    for it in (state.get("return_items") or []):
+        name  = it.get("product_name") or it.get("name", "পণ্য")
+        rqty  = it.get("return_qty", it.get("quantity", 1))
+        price = float(it.get("unit_price") or 0)
+        price_str = f" (৳{price * rqty:,.0f})" if price else ""
+        item_lines.append(f"   • {name} ×{rqty}{price_str}")
+
+    lines = [
+        "📦 রিটার্ন রিকোয়েস্ট:",
         "━" * 23,
-        f"📦 অর্ডার: #{ref}",
-        f"🔄 ফেরতের ধরন: {rtype}",
-        "পণ্য:",
-        _fmt_selected_items(state.get("return_items") or []),
+        f"📋 অর্ডার: #{ref}",
+        f"🔄 ধরন: {rtype}",
+        "📦 পণ্য:",
+        *item_lines,
     ]
     if reason:
         lines.append(f"📝 কারণ: {reason}")
-    lines += [photo, "━" * 23, "এটি সঠিক হলে 'হ্যাঁ' বলুন, বাতিল করতে 'না' বলুন।"]
+    lines.append(f"📷 ছবি: {photo}")
+    lines += [
+        "━" * 23,
+        "✏️ পরিবর্তন করতে চাইলে বলুন",
+        "✅ 'হ্যাঁ' — নিশ্চিত করুন",
+        "❌ 'না' — বাতিল করুন",
+    ]
     return "\n".join(lines)
 
 
@@ -380,8 +409,9 @@ def _gemini_return_classify(
         "VALID INTENTS (pick exactly one):\n"
         "provide_order_id, dont_know_order, provide_phone, select_order,\n"
         "select_full_return, select_partial, select_item, done_adding_items,\n"
-        "specify_qty, provide_reason, skip_photo, confirm_return, cancel_return,\n"
-        "modify_return, ask_question, frustrated, unclear\n\n"
+        "specify_qty, provide_reason, send_photo, skip_photo,\n"
+        "confirm_return, cancel_return, modify_reason, modify_items,\n"
+        "ask_question, frustrated, unclear\n\n"
         "RULES:\n"
         "1. Order ref like 'ORD-...' → provide_order_id, data.order_id=value\n"
         "2. 'জানি না'/'মনে নেই' when asked order ID → dont_know_order\n"
@@ -392,12 +422,17 @@ def _gemini_return_classify(
         "7. '1'/'2'/'3' when bot showed item list → select_item, data.item_number=N\n"
         "8. Pure number (1-10) when bot asked quantity → specify_qty, data.quantity=N\n"
         "9. 'না'/'no'/'আর নেই' when bot asked 'আরো পণ্য?' AND items already selected → done_adding_items\n"
-        "10. 'skip'/'পাঠাব না'/'দরকার নেই' at photo step → skip_photo\n"
-        "11. 'হ্যাঁ'/'confirm'/'yes' at summary step → confirm_return\n"
-        "12. 'না'/'cancel'/'বাতিল' at summary/cancel → cancel_return\n"
-        "13. Descriptive reason sentence (e.g. 'নষ্ট ছিল') → provide_reason, data.reason=value\n"
-        "14. 'পরিবর্তন করতে চাই' at summary step → modify_return\n"
-        "15. General question → ask_question\n"
+        "10. 'হ্যাঁ'/'yes'/'পাঠাব'/'পাঠাবো' when step=collecting_photo (bot asked about photo) → send_photo\n"
+        "11. 'skip'/'পাঠাব না'/'দরকার নেই'/'না' when step=collecting_photo or awaiting_photo → skip_photo\n"
+        "12. 'হ্যাঁ'/'confirm'/'yes' when step=return_summary → confirm_return\n"
+        "13. 'না'/'cancel'/'বাতিল' when step=return_summary → cancel_return\n"
+        "14. 'না'/'cancel'/'বাতিল' NOT at return_summary (no items selected yet) → cancel_return\n"
+        "15. Reason text (e.g. 'নষ্ট ছিল', 'ভুল পণ্য', 'kharap chilo') → provide_reason, data.reason=value\n"
+        "16. 'কারণ পরিবর্তন'/'reason change'/'কারণ বদলাও' at summary step → modify_reason\n"
+        "17. 'পণ্য পরিবর্তন'/'item change'/'পণ্য বদলাও' at summary step → modify_items\n"
+        "18. 'পরিবর্তন করতে চাই' at summary (ambiguous) → modify_items\n"
+        "19. 'রাগ'/'very frustrated'/'keno'/'কেন'/'কতক্ষণ' + negative tone → frustrated\n"
+        "20. General product/store question unrelated to return → ask_question\n"
         "Return ONLY the JSON."
     )
 
@@ -413,13 +448,14 @@ def _gemini_return_classify(
         return {"intent": "unclear", "data": {}, "natural_reply": "দুঃখিত, আবার বলুন।"}
 
 
-def _handle_return_flow_v2(
+async def _handle_return_flow_v2(
     tenant_id: str,
     conversation_id: str,
     message_text: str,
     image_urls: Optional[list],
     state: dict,
     ai_config: dict,
+    plain_token: str = "",
 ) -> Optional[str]:
     """
     Return-request state machine v2 (Gemini-powered).
@@ -452,14 +488,32 @@ def _handle_return_flow_v2(
         except Exception:
             pass
 
-    # ── Photo step: image attachment received ────────────────────────────────
+    # ── awaiting_photo: image received — validate then proceed ──────────────
+    if return_step == "awaiting_photo" and image_urls:
+        try:
+            img_bytes, mime = await img_svc.download_image(image_urls[0], plain_token)
+            validation      = img_svc.validate_return_photo(img_bytes, mime)
+        except Exception as _ve:
+            logger.warning(f"Return photo download/validate failed: {_ve}")
+            validation = {"is_product_photo": True, "damage_visible": False, "analysis": ""}
+        if not validation.get("is_product_photo", True):
+            return "সঠিক পণ্যের ছবি পাঠান। ছবিতে পণ্যটি স্পষ্ট দেখা যাওয়া দরকার।"
+        photo_url = image_urls[0]
+        summary   = _fmt_return_summary({**state, "return_photo_url": photo_url})
+        return _step(summary, "return_summary", {
+            "return_photo_url":      photo_url,
+            "return_photo_verified": validation.get("is_product_photo", True),
+            "return_photo_analysis": validation,
+        })
+
+    # ── collecting_photo: image sent without asking (accept directly) ────────
     if return_step == "collecting_photo" and image_urls:
         photo_url = image_urls[0]
         summary   = _fmt_return_summary({**state, "return_photo_url": photo_url})
         return _step(summary, "return_summary", {"return_photo_url": photo_url})
 
-    # At non-photo steps, if only an image was sent (no text), ask for text
-    if not msg and image_urls and return_step != "collecting_photo":
+    # At non-photo steps, image only (no text): repeat last prompt
+    if not msg and image_urls:
         last = state.get("last_return_bot_message", "")
         return last if last else "দয়া করে টেক্সট বার্তায় উত্তর দিন।"
 
@@ -481,6 +535,12 @@ def _handle_return_flow_v2(
     if intent == "ask_question" and nat:
         last = state.get("last_return_bot_message", "")
         return f"{nat}\n\n{last}" if last else nat
+
+    # ── Universal: frustrated customer ────────────────────────────────────────
+    if intent == "frustrated":
+        last = state.get("last_return_bot_message", "")
+        ack  = nat or "দুঃখিত, আপনাকে সাহায্য করতে চাই।"
+        return f"{ack}\n\n{last}" if last else ack
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 1: asking_order_id
@@ -733,30 +793,72 @@ def _handle_return_flow_v2(
     # ─────────────────────────────────────────────────────────────────────────
     if return_step == "collecting_reason":
         reason = data.get("reason") if intent == "provide_reason" else None
-        if not reason and len(msg) >= 2:
+        if not reason and len(msg) >= 3:
             reason = msg.strip()
         if not reason:
-            return "অনুগ্রহ করে ফেরতের কারণটি বলুন (যেমন: নষ্ট ছিল / ভুল পণ্য এসেছে):"
-        reply = "ধন্যবাদ। পণ্যের একটি ছবি পাঠান (না চাইলে 'skip' লিখুন):"
+            prompt = (
+                "ফেরতের কারণ কী?\n"
+                "- পণ্য নষ্ট/ক্ষতিগ্রস্ত\n"
+                "- ভুল পণ্য এসেছে\n"
+                "- মান খারাপ\n"
+                "- সাইজ/পরিমাণ ভুল\n"
+                "- অন্য কারণ\n"
+                "কারণ বলুন বা লিখুন:"
+            )
+            return prompt
+        reply = (
+            "📷 পণ্যের ছবি পাঠালে দ্রুত অনুমোদন হবে।\n"
+            "ছবি পাঠাবেন? (হ্যাঁ/না)"
+        )
         return _step(reply, "collecting_photo", {"return_reason": reason})
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STEP 8: collecting_photo (text branch — image handled above)
+    # STEP 8a: collecting_photo — ask yes/no (image handled at top)
     # ─────────────────────────────────────────────────────────────────────────
     if return_step == "collecting_photo":
+        if intent == "send_photo":
+            return _step("পণ্যের ছবি পাঠান:", "awaiting_photo")
         if intent == "skip_photo":
             summary = _fmt_return_summary(state)
             return _step(summary, "return_summary")
-        return "পণ্যের ছবি পাঠান বা 'skip' লিখুন।"
+        # Ambiguous: repeat the question
+        return (
+            "📷 পণ্যের ছবি পাঠালে দ্রুত অনুমোদন হবে।\n"
+            "ছবি পাঠাবেন? (হ্যাঁ/না)"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 8b: awaiting_photo — waiting for image (image handled at top)
+    # ─────────────────────────────────────────────────────────────────────────
+    if return_step == "awaiting_photo":
+        if intent == "skip_photo":
+            summary = _fmt_return_summary(state)
+            return _step(summary, "return_summary")
+        return "পণ্যের ছবি পাঠান (বা 'skip' লিখুন ছবি ছাড়া এগিয়ে যেতে):"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 9: return_summary (confirm / modify / cancel)
     # ─────────────────────────────────────────────────────────────────────────
     if return_step == "return_summary":
-        if intent == "modify_return":
+        if intent == "modify_reason":
+            prompt = (
+                "ফেরতের কারণ কী?\n"
+                "- পণ্য নষ্ট/ক্ষতিগ্রস্ত\n"
+                "- ভুল পণ্য এসেছে\n"
+                "- মান খারাপ\n"
+                "- সাইজ/পরিমাণ ভুল\n"
+                "- অন্য কারণ\n"
+                "নতুন কারণ বলুন:"
+            )
+            return _step(prompt, "collecting_reason", {"return_reason": None})
+
+        if intent == "modify_items":
             order = state.get("selected_order") or {}
             reply = _fmt_order_items_for_return(order)
-            return _step(reply, "select_return_type", {"return_items": [], "return_type": None})
+            return _step(reply, "select_return_type", {
+                "return_items": [], "return_type": None,
+                "return_photo_url": None, "return_photo_verified": False,
+            })
 
         if intent == "confirm_return":
             order       = state.get("selected_order") or {}
@@ -766,20 +868,34 @@ def _handle_return_flow_v2(
             phone       = state.get("return_phone") or order.get("customer_phone", "")
             photo_url   = state.get("return_photo_url") or ""
             order_id    = order.get("order_id", "")
+            conv_id     = state.get("return_conversation_id") or conversation_id
 
             try:
                 ret_label = _save_return_request_v2(
-                    tenant_id, order_id, phone, return_type, ret_items, reason, photo_url
+                    tenant_id, order_id, phone, return_type, ret_items, reason, photo_url,
+                    photo_verified=bool(state.get("return_photo_verified")),
+                    photo_analysis=state.get("return_photo_analysis"),
+                    conversation_id=conv_id,
                 )
             except Exception as exc:
                 logger.error(f"Return save v2 failed: {exc}")
                 _clear()
                 return "দুঃখিত, রিটার্ন সংরক্ষণে সমস্যা হয়েছে। একটু পরে চেষ্টা করুন।"
 
+            # Build confirmation message
+            item_lines = "\n".join(
+                f"📦 পণ্য: {it.get('product_name','পণ্য')} ×{it.get('return_qty', it.get('quantity',1))}"
+                for it in ret_items
+            )
             _clear()
             return (
-                f"✅ আপনার রিটার্ন রিকোয়েস্ট ({ret_label}) গ্রহণ করা হয়েছে!\n"
-                "আমরা শীঘ্রই যোগাযোগ করব। ধন্যবাদ।"
+                f"✅ রিটার্ন রিকোয়েস্ট সফলভাবে নেওয়া হয়েছে!\n"
+                f"━" * 23 + "\n"
+                f"📋 রিটার্ন ID: #{ret_label}\n"
+                f"{item_lines}\n"
+                f"📝 কারণ: {reason or '—'}\n"
+                f"━" * 23 + "\n"
+                "আমরা যাচাই করে শীঘ্রই জানাব। ধন্যবাদ! 🙏"
             )
 
         # Anything else: show summary again
@@ -3130,8 +3246,12 @@ async def process_message(
 
     # ── 2. Return Flow (active) ───────────────────────────────────────────────
     if return_flow == "active" and (message_text or image_urls):
-        reply = _handle_return_flow_v2(
-            tenant_id, conversation_id, message_text, image_urls, state, ai_config
+        # Ensure conversation_id is saved in return state for later notifications
+        if not state.get("return_conversation_id"):
+            _set_conv_state(conversation_id, {**state, "return_conversation_id": conversation_id})
+            state = {**state, "return_conversation_id": conversation_id}
+        reply = await _handle_return_flow_v2(
+            tenant_id, conversation_id, message_text, image_urls, state, ai_config, plain_token
         )
         if reply is not None:
             save_message(conversation_id, tenant_id, "bot", reply)
@@ -3201,10 +3321,33 @@ async def process_message(
 
     # ── 5. Return trigger (start new flow) ───────────────────────────────────
     if message_text and _is_return_trigger(message_text) and return_flow != "active":
+        # Block if order flow is currently active
+        if state.get("order_flow") == "active":
+            reply = "আপনার অর্ডার প্রক্রিয়া চলছে। আগে অর্ডার সম্পন্ন বা বাতিল করুন।"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
+
+        # Check max_returns_per_month
+        max_returns = ai_config.get("max_returns_per_month")
+        if max_returns:
+            try:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+                cnt = supabase.table("returns").select("return_id", count="exact") \
+                    .eq("tenant_id", tenant_id).gte("created_at", cutoff).execute()
+                if (cnt.count or 0) >= int(max_returns):
+                    reply = f"দুঃখিত, এই মাসে সর্বোচ্চ রিটার্ন সীমা ({max_returns}) পূর্ণ হয়ে গেছে।"
+                    save_message(conversation_id, tenant_id, "bot", reply)
+                    send_reply(sender_id, reply, plain_token)
+                    return
+            except Exception:
+                pass
+
         window_days = int(ai_config.get("return_window_days") or 7)
         new_state   = {
             **_clear_return_state(state),
             **_new_return_state(window_days),
+            "return_conversation_id": conversation_id,
         }
         _set_conv_state(conversation_id, new_state)
         reply = "আপনার Order ID জানা আছে? (যেমন: ORD-20260609-A1B2)\nজানা না থাকলে 'জানি না' বলুন।"
@@ -3214,6 +3357,11 @@ async def process_message(
 
     # ── 5.5 Order trigger — keyword fast path (no extra API call) ───────────────
     if message_text and _is_order_trigger(message_text) and not state.get("order_flow"):
+        if state.get("return_flow") == "active":
+            reply = "আপনার রিটার্ন প্রক্রিয়া চলছে। আগে রিটার্ন সম্পন্ন বা বাতিল করুন।"
+            save_message(conversation_id, tenant_id, "bot", reply)
+            send_reply(sender_id, reply, plain_token)
+            return
         new_flow = {**{k: v for k, v in state.items() if k not in _ORDER_STATE_KEYS}, **_new_order_state()}
         cart_item = _extract_product_for_order(tenant_id, message_text, state)
         if cart_item and cart_item.get("product_id"):
