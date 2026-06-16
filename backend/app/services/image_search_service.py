@@ -542,10 +542,22 @@ def format_image_recognition_reply(products: list[dict], analysis: dict) -> str:
 # ── Direct Catalog Match (Gemini Vision + full catalog) ───────────────────────
 
 _CATALOG_MATCH_PROMPT = (
-    "A customer sent the product image attached.\n"
-    "Our full product catalog (JSON):\n"
+    "A customer sent the attached product image to a Bangladeshi grocery/FMCG shop's chatbot.\n"
+    "Our full product catalog (JSON) — names are mostly in Bangla:\n"
     "{catalog_json}\n\n"
-    "Match the image to exactly one product from the catalog, or say not matched.\n"
+    "Common English/Romanized ↔ Bangla grocery equivalents (use these to bridge language gaps):\n"
+    "honey=মধু, oil/tel=তেল, rice/chal=চাল, lentil/dal/dal=ডাল, flour/atta=আটা, "
+    "sugar/chini=চিনি, salt/lobon=লবণ, ghee=ঘি, milk/dudh=দুধ, egg/dim=ডিম, "
+    "spice/moshla=মসলা, tea/cha=চা, biscuit=বিস্কুট, soap/shaban=সাবান.\n\n"
+    "Be GENEROUS and visual: identify the product category/type from the image "
+    "(jar, bottle, packet, box shape, color, label) and match it to the closest catalog "
+    "product even if the brand or exact label text isn't fully readable. Only return "
+    "matched=false if the image is clearly NOT any kind of product the catalog could "
+    "plausibly contain (e.g. a person, animal, landscape, screenshot, unrelated object).\n"
+    "If you're not fully certain but the image plausibly resembles a catalog item, still "
+    "return matched=true with confidence=\"low\" and your best-guess product, plus 2-3 "
+    "alternates in similar_products — never leave the customer with no suggestion at all "
+    "when the image is some kind of product.\n\n"
     "Return JSON only — no markdown, no extra text:\n"
     '{{"matched": true_or_false, '
     '"product_name": "exact name from catalog or null", '
@@ -555,6 +567,49 @@ _CATALOG_MATCH_PROMPT = (
     '"image_description": "brief description of what is visible in the image", '
     '"similar_products": ["up to 3 similar product names from catalog"]}}'
 )
+
+# ── Keyword fallback for when Gemini is overly conservative ──────────────────
+_GROCERY_TERM_MAP = {
+    "honey": "মধু", "tel": "তেল", "oil": "তেল", "dal": "ডাল", "lentil": "ডাল",
+    "chal": "চাল", "rice": "চাল", "atta": "আটা", "flour": "আটা",
+    "chini": "চিনি", "sugar": "চিনি", "lobon": "লবণ", "salt": "লবণ",
+    "ghee": "ঘি", "dudh": "দুধ", "milk": "দুধ", "dim": "ডিম", "egg": "ডিম",
+    "moshla": "মসলা", "spice": "মসলা", "cha": "চা", "tea": "চা",
+    "biscuit": "বিস্কুট", "shaban": "সাবান", "soap": "সাবান",
+}
+
+
+def _keyword_fallback_match(products: list[dict], text: str) -> list[dict]:
+    """
+    Last-resort match when Gemini returns matched=false: look for any catalog
+    product whose name appears in (or shares a translated grocery term with)
+    the description/guess text Gemini already gave us. Returns scored matches.
+    """
+    if not text:
+        return []
+    t = text.lower()
+    # Expand text with Bangla equivalents of any English/Romanized grocery terms found
+    expanded_terms = set()
+    for en, bn in _GROCERY_TERM_MAP.items():
+        if en in t:
+            expanded_terms.add(bn)
+
+    hits = []
+    for p in products:
+        name = (p.get("name") or "")
+        name_lower = name.lower()
+        score = 0
+        if name_lower and name_lower in t:
+            score = 3
+        elif any(term in name for term in expanded_terms):
+            score = 2
+        elif any(tok and tok in name for tok in t.split() if len(tok) > 2):
+            score = 1
+        if score:
+            hits.append((score, p))
+
+    hits.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in hits[:3]]
 
 
 def _get_catalog_cached(tenant_id: str) -> list:
@@ -598,6 +653,7 @@ def match_image_to_catalog(
     """
     products = _get_catalog_cached(tenant_id)
     if not products:
+        logger.warning(f"match_image_to_catalog: empty catalog for tenant={tenant_id}")
         return {"matched": False, "image_description": "", "_catalog": []}
 
     catalog = [
@@ -613,6 +669,11 @@ def match_image_to_catalog(
         catalog_json=json.dumps(catalog, ensure_ascii=False)
     )
 
+    logger.info(
+        f"match_image_to_catalog: tenant={tenant_id} catalog_size={len(products)} "
+        f"names={[p['name'] for p in products][:10]}"
+    )
+
     try:
         response = _client.models.generate_content(
             model=settings.GEMINI_MODEL,
@@ -626,12 +687,40 @@ def match_image_to_catalog(
             ],
         )
         text = (response.text or "").strip()
+        logger.info(f"match_image_to_catalog: raw Gemini response={text[:500]!r}")
         text = re.sub(r"^```(?:json)?\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
         result = json.loads(text)
     except Exception as exc:
         logger.warning(f"match_image_to_catalog: Gemini/parse failed: {exc}")
         result = {"matched": False, "image_description": ""}
+
+    logger.info(
+        f"match_image_to_catalog: parsed matched={result.get('matched')} "
+        f"product_name={result.get('product_name')!r} sku={result.get('sku')!r} "
+        f"confidence={result.get('confidence')}"
+    )
+
+    # Gemini was too conservative (matched=false) — try a deterministic keyword
+    # fallback against the catalog before giving up entirely.
+    if not result.get("matched"):
+        guess_text = " ".join(filter(None, [
+            result.get("image_description") or "",
+            result.get("product_name") or "",
+        ]))
+        fallback_hits = _keyword_fallback_match(products, guess_text)
+        if fallback_hits:
+            best = fallback_hits[0]
+            logger.info(
+                f"match_image_to_catalog: keyword fallback matched "
+                f"{[p['name'] for p in fallback_hits]} for guess_text={guess_text!r}"
+            )
+            result["matched"]          = True
+            result["confidence"]       = "low"
+            result["product_name"]     = best["name"]
+            result["sku"]              = best["sku"]
+            result["price"]            = best.get("mrp")
+            result["similar_products"] = [p["name"] for p in fallback_hits]
 
     # Enrich with DB values (product_id, real price, image_url) for matched SKU
     if result.get("matched") and result.get("sku"):

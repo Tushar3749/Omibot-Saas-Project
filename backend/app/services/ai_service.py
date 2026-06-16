@@ -238,15 +238,17 @@ class AIService:
             try:
                 return fn()
             except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
                 err_str = str(e).lower()
                 if any(k in err_str for k in ("rate", "quota", "429", "resource_exhausted")):
                     wait = 2 ** (attempt + 1)
-                    logger.warning(f"Gemini rate limit — retrying in {wait}s (attempt {attempt + 1})")
-                    time.sleep(wait)
-                    if attempt == max_retries - 1:
-                        raise
                 else:
-                    raise
+                    # Transient errors (cold-start connection blips, DNS, momentary
+                    # 5xx) — retry quickly instead of failing the very first message.
+                    wait = 1
+                logger.warning(f"Gemini call failed — retrying in {wait}s (attempt {attempt + 1}): {e}")
+                time.sleep(wait)
 
     # ── Main Entry Point ──────────────────────────────────────────────────────
 
