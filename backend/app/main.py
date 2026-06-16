@@ -80,11 +80,51 @@ app.include_router(discounts.router,       prefix="/api/discounts",       tags=[
 app.include_router(notifications.router,   prefix="/api/notifications",   tags=["Notifications"])
 
 
+def _check_required_env() -> None:
+    """Log which critical environment variables are missing so Render Logs show the
+    real cause instead of a downstream Supabase/Gemini error with no context."""
+    required = {
+        "SUPABASE_URL":              settings.SUPABASE_URL,
+        "SUPABASE_SERVICE_ROLE_KEY": settings.SUPABASE_SERVICE_ROLE_KEY,
+        "JWT_SECRET_KEY":            settings.JWT_SECRET_KEY,
+        "GEMINI_API_KEY":            settings.GEMINI_API_KEY,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+    else:
+        logger.info("All required environment variables are set.")
+
+
+def _check_database_connection() -> None:
+    """Run a trivial Supabase query at startup so connection failures (bad URL/key,
+    network block) show up immediately and clearly in Render Logs."""
+    try:
+        from app.database import supabase
+        supabase.table("tenants").select("tenant_id").limit(1).execute()
+        logger.info("Supabase connection OK")
+    except Exception as exc:
+        logger.error(f"Supabase connection FAILED: {exc}", exc_info=True)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
+    _check_required_env()
+    _check_database_connection()
     from app.services.supabase_storage_service import ensure_bucket_exists
     ensure_bucket_exists()
+
+
+# ── Root ──────────────────────────────────────────────────────────────────────
+@app.get("/")
+async def root():
+    return {
+        "status":  "healthy",
+        "message": "Omibot SaaS Backend is running successfully",
+        "version": settings.APP_VERSION,
+        "docs":    "/docs" if settings.DEBUG else None,
+    }
 
 
 # ── Health Check ──────────────────────────────────────────────────────────────
