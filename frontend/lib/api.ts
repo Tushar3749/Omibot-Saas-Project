@@ -285,6 +285,37 @@ export const campaignsAPI = {
   },
 }
 
+// ── Policy Documents (thin wrapper around knowledgeAPI, filters by content_type) ─
+export const policyAPI = {
+  list: (contentType: string) =>
+    api.get('/api/knowledge/').then(r =>
+      (r.data as Array<{ content_type: string; file_name: string | null }>)
+        .filter(d => d.content_type === contentType && d.file_name)
+    ),
+  upload: (file: File, contentType: string) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('content_type', contentType)
+    return api.post('/api/knowledge/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
+  deleteFile: (fileName: string) =>
+    api.delete(`/api/knowledge/file/${encodeURIComponent(fileName)}`).then(r => r.data),
+}
+
+// ── AI Instructions ───────────────────────────────────────────────────────────
+export const aiInstructionsAPI = {
+  list: (): Promise<Array<{ id: string; title: string; body: string; sort_order: number; is_active: boolean; created_at: string }>> =>
+    api.get('/api/ai-instructions/').then(r => r.data),
+  create: (data: { title: string; body: string; sort_order?: number; is_active?: boolean }) =>
+    api.post('/api/ai-instructions/', data).then(r => r.data),
+  update: (id: string, data: { title?: string; body?: string; sort_order?: number; is_active?: boolean }) =>
+    api.put(`/api/ai-instructions/${id}`, data).then(r => r.data),
+  delete: (id: string) =>
+    api.delete(`/api/ai-instructions/${id}`).then(r => r.data),
+}
+
 // ── Knowledge Base ────────────────────────────────────────────────────────────
 export const knowledgeAPI = {
   list:   () => api.get('/api/knowledge/').then(r => r.data),
@@ -317,6 +348,19 @@ export const testBotAPI = {
 
   reset: (): Promise<{ ok: boolean; conversation_id: string }> =>
     api.post('/api/test-bot/reset').then(r => r.data),
+
+  sendImage: (file: File): Promise<{
+    reply:           string
+    analysis:        { likely_product_name: string; confidence: string; product_description: string; category: string }
+    products:        Array<{ product_id: string; name: string; sku: string; mrp: number; image_url?: string }>
+    conversation_id: string
+  }> => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post('/api/test-bot/image', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
 }
 
 // ── Product Image Upload ──────────────────────────────────────────────────────

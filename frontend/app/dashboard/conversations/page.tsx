@@ -4,7 +4,7 @@ import toast from 'react-hot-toast'
 import { conversationsAPI } from '@/lib/api'
 import type { Conversation, Message } from '@/types'
 import { formatDateTime } from '@/lib/utils'
-import { MessageSquare, Zap, ZapOff, User, Bot, Briefcase } from 'lucide-react'
+import { MessageSquare, Zap, ZapOff, User, Bot, Briefcase, ArrowLeft } from 'lucide-react'
 
 export default function ConversationsPage() {
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -12,6 +12,7 @@ export default function ConversationsPage() {
   const [messages,      setMessages]      = useState<Message[]>([])
   const [loading,       setLoading]       = useState(true)
   const [msgLoading,    setMsgLoading]    = useState(false)
+  const [mobileView,    setMobileView]    = useState<'list' | 'chat'>('list')
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { loadConversations() }, [])
@@ -27,10 +28,16 @@ export default function ConversationsPage() {
 
   async function openConversation(conv: Conversation) {
     setSelected(conv)
+    setMobileView('chat')
     setMsgLoading(true)
     try { setMessages(await conversationsAPI.messages(conv.conversation_id)) }
     catch { toast.error('Messages লোড হয়নি') }
     finally { setMsgLoading(false) }
+  }
+
+  function handleBack() {
+    setMobileView('list')
+    setSelected(null)
   }
 
   async function toggleAI(conv: Conversation) {
@@ -62,7 +69,14 @@ export default function ConversationsPage() {
     <div className="h-[calc(100vh-3.5rem-2.5rem)] flex gap-4">
 
       {/* ── Left: conversation list ──────────────────────────────────────── */}
-      <div className="w-72 flex-shrink-0 card flex flex-col overflow-hidden">
+      {/* Mobile: hidden when chat is open. Desktop: always visible. */}
+      <div
+        className={`
+          flex-shrink-0 card flex flex-col overflow-hidden
+          w-full md:w-72
+          ${mobileView === 'chat' ? 'hidden md:flex' : 'flex'}
+        `}
+      >
         <div className="px-4 py-3 border-b flex items-center gap-2 flex-shrink-0"
              style={{ borderColor: '#E0E0E0' }}>
           <MessageSquare size={16} style={{ color: '#9E9E9E' }} />
@@ -124,7 +138,13 @@ export default function ConversationsPage() {
       </div>
 
       {/* ── Right: message thread ───────────────────────────────────────── */}
-      <div className="flex-1 card flex flex-col overflow-hidden min-w-0">
+      {/* Mobile: hidden when list is shown. Desktop: always visible. */}
+      <div
+        className={`
+          flex-1 card flex flex-col overflow-hidden min-w-0
+          ${mobileView === 'list' ? 'hidden md:flex' : 'flex'}
+        `}
+      >
         {!selected ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3">
             <div className="w-14 h-14 rounded flex items-center justify-center"
@@ -136,17 +156,27 @@ export default function ConversationsPage() {
         ) : (
           <>
             {/* Header */}
-            <div className="px-5 py-3 border-b flex items-center justify-between gap-4 flex-shrink-0"
+            <div className="px-4 md:px-5 py-3 border-b flex items-center justify-between gap-3 flex-shrink-0"
                  style={{ borderColor: '#E0E0E0' }}>
-              <div>
-                <p className="font-semibold text-sm" style={{ color: '#282A35' }}>
+              {/* Back button — mobile only */}
+              <button
+                onClick={handleBack}
+                className="md:hidden flex items-center gap-1.5 text-sm flex-shrink-0"
+                style={{ color: '#04AA6D' }}
+              >
+                <ArrowLeft size={16} />
+                <span>ফিরে যান</span>
+              </button>
+
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-sm truncate" style={{ color: '#282A35' }}>
                   {selected.customer_platform_id}
                 </p>
                 <p className="text-xs capitalize" style={{ color: '#9E9E9E' }}>{selected.platform}</p>
               </div>
               <button
                 onClick={() => toggleAI(selected)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium transition-colors"
+                className="flex items-center gap-1.5 px-2.5 md:px-3 py-1.5 rounded text-xs font-medium transition-colors flex-shrink-0"
                 style={selected.is_ai_active
                   ? { backgroundColor: '#E8F5E9', color: '#2E7D32', border: '1px solid #A5D6A7' }
                   : { backgroundColor: '#F5F5F5', color: '#757575', border: '1px solid #E0E0E0' }
@@ -157,7 +187,7 @@ export default function ConversationsPage() {
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-4"
+            <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-4"
                  style={{ backgroundColor: '#F9F9F9' }}>
               {msgLoading ? (
                 <div className="flex justify-center py-10">
@@ -174,7 +204,8 @@ export default function ConversationsPage() {
                       {ROLE_ICON[msg.role]}
                       <span>{ROLE_LABEL[msg.role] || msg.role}</span>
                     </div>
-                    <div className={`max-w-[68%] flex flex-col gap-1 ${msg.role !== 'customer' ? 'items-end' : 'items-start'}`}>
+                    {/* Bubble: 85% on mobile, 68% on desktop */}
+                    <div className={`max-w-[85%] md:max-w-[68%] flex flex-col gap-1 ${msg.role !== 'customer' ? 'items-end' : 'items-start'}`}>
                       <div className="px-3.5 py-2.5 rounded text-sm leading-relaxed"
                            style={
                              msg.role === 'customer'
@@ -196,7 +227,7 @@ export default function ConversationsPage() {
             </div>
 
             {/* Context bar */}
-            <div className="px-5 py-2.5 border-t text-xs flex items-center gap-4"
+            <div className="px-4 md:px-5 py-2.5 border-t text-xs flex items-center gap-4"
                  style={{ borderColor: '#E0E0E0', backgroundColor: '#FAFAFA', color: '#9E9E9E' }}>
               <span>{messages.length} messages</span>
               <span>·</span>

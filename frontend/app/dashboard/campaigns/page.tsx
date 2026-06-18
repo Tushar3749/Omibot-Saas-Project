@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState, useRef } from 'react'
 import toast from 'react-hot-toast'
-import { campaignsAPI, discountCategoriesAPI, productsAPI } from '@/lib/api'
+import { campaignsAPI, productsAPI } from '@/lib/api'
 import {
   Megaphone, Plus, X, Edit2, Trash2,
   CheckCircle, Clock, AlertCircle, XCircle, Package, Search, Gift,
@@ -25,7 +25,6 @@ interface Campaign {
   reward: Reward
   type?: string
   amount?: number
-  discount_category_id: string | null
   start_date: string | null
   end_date: string | null
   apply_to: 'all' | 'specific'
@@ -33,12 +32,6 @@ interface Campaign {
   is_active: boolean
   status: 'active' | 'inactive' | 'scheduled' | 'expired'
   created_at: string
-}
-
-interface DiscountCategory {
-  category_id: string
-  category_name: string
-  is_active: boolean
 }
 
 interface Product { product_id: string; sku: string; name: string; category?: string }
@@ -49,7 +42,6 @@ type FormData = {
   name: string
   description: string
   reward: Reward
-  discount_category_id: string
   start_date: string
   end_date: string
   apply_to: 'all' | 'specific'
@@ -59,7 +51,6 @@ type FormData = {
 const EMPTY_FORM: FormData = {
   name: '', description: '',
   reward: EMPTY_REWARD,
-  discount_category_id: '',
   start_date: '', end_date: '',
   apply_to: 'all', is_active: true,
 }
@@ -261,7 +252,6 @@ function RewardSelector({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function CampaignsPage() {
   const [campaigns, setCampaigns]       = useState<Campaign[]>([])
-  const [categories, setCategories]     = useState<DiscountCategory[]>([])
   const [products, setProducts]         = useState<Product[]>([])
   const [loading, setLoading]           = useState(true)
   const [showModal, setShowModal]       = useState(false)
@@ -274,13 +264,11 @@ export default function CampaignsPage() {
 
   async function load() {
     try {
-      const [campData, catData, prodData] = await Promise.all([
+      const [campData, prodData] = await Promise.all([
         campaignsAPI.list(),
-        discountCategoriesAPI.list().catch(() => []),
         productsAPI.list().catch(() => []),
       ])
       setCampaigns(campData)
-      setCategories(catData.filter((c: DiscountCategory) => c.is_active))
       setProducts(prodData)
     } catch {
       toast.error('Data লোড করা যায়নি')
@@ -311,7 +299,6 @@ export default function CampaignsPage() {
       name:                 c.name,
       description:          c.description || '',
       reward,
-      discount_category_id: c.discount_category_id || '',
       start_date:           c.start_date ? c.start_date.slice(0, 10) : '',
       end_date:             c.end_date   ? c.end_date.slice(0, 10)   : '',
       apply_to:             c.apply_to,
@@ -347,7 +334,6 @@ export default function CampaignsPage() {
         name:                 form.name.trim(),
         description:          form.description || null,
         reward:               form.reward,
-        discount_category_id: form.discount_category_id || null,
         start_date:           form.start_date || null,
         end_date:             form.end_date   || null,
         apply_to:             form.apply_to,
@@ -394,9 +380,6 @@ export default function CampaignsPage() {
       toast.error('আপডেট ব্যর্থ')
     }
   }
-
-  const catMap: Record<string, string> = {}
-  categories.forEach(c => { catMap[c.category_id] = c.category_name })
 
   return (
     <div className="space-y-5">
@@ -450,17 +433,9 @@ export default function CampaignsPage() {
                         {c.description}
                       </p>
                     )}
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <p className="text-xs" style={{ color: '#9E9E9E' }}>
-                        {c.apply_to === 'all' ? 'সব পণ্যে প্রযোজ্য' : `${c.product_ids?.length || 0} পণ্যে`}
-                      </p>
-                      {c.discount_category_id && catMap[c.discount_category_id] && (
-                        <span className="text-xs px-1.5 py-0.5 rounded-full"
-                              style={{ backgroundColor: '#EDE7F6', color: '#4527A0' }}>
-                          {catMap[c.discount_category_id]}
-                        </span>
-                      )}
-                    </div>
+                    <p className="text-xs mt-0.5" style={{ color: '#9E9E9E' }}>
+                      {c.apply_to === 'all' ? 'সব পণ্যে প্রযোজ্য' : `${c.product_ids?.length || 0} পণ্যে`}
+                    </p>
                   </td>
                   <td className="px-4 py-3">
                     <span className="font-semibold" style={{ color: '#04AA6D' }}>
@@ -571,25 +546,6 @@ export default function CampaignsPage() {
                   />
                 </div>
               </div>
-
-              {/* Discount Category */}
-              {categories.length > 0 && (
-                <div>
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: '#282A35' }}>
-                    Discount Category (ঐচ্ছিক)
-                  </label>
-                  <select
-                    className="input"
-                    value={form.discount_category_id}
-                    onChange={e => setForm(f => ({ ...f, discount_category_id: e.target.value }))}
-                  >
-                    <option value="">— কোনো category নেই —</option>
-                    {categories.map(c => (
-                      <option key={c.category_id} value={c.category_id}>{c.category_name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
 
               {/* Dates */}
               <div className="grid grid-cols-2 gap-3">

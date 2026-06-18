@@ -57,7 +57,8 @@ const NAV_GROUPS = [
     items: [
       { href: '/dashboard/channels',       icon: LinkIcon,     label: 'Channels' },
       { href: '/dashboard/settings',       icon: Settings,     label: 'AI Settings' },
-      { href: '/dashboard/order-process',  icon: GitBranch,    label: 'Order Process' },
+      { href: '/dashboard/order-process',   icon: GitBranch,    label: 'Order Process' },
+      { href: '/dashboard/return-process',  icon: RotateCcw,    label: 'Return Process' },
       { href: '/dashboard/subscription',   icon: CreditCard,   label: 'Subscription' },
     ],
   },

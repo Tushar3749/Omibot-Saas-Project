@@ -12,15 +12,20 @@ export interface Tenant {
 export interface AIConfig {
   config_id: string
   tenant_id: string
+  // Identity
   store_name: string | null
   bot_name: string
   system_prompt: string | null
   language: 'bangla' | 'english' | 'banglish'
+  greeting_message: string | null
+  // Security
   conflict_resolution?: 'priority_wins' | 'best_deal' | 'stack_all' | 'stack_with_cap'
+  discount_stack_cap?: number
   escalation_keywords: string[]
   forbidden_topics: string[]
   prompt_injection_guard: boolean
   // Order management
+  return_window_days: number
   min_order_amount: number
   max_order_qty_per_customer: number
   preorder_enabled: boolean
@@ -29,7 +34,6 @@ export interface AIConfig {
   partial_payment_advance_pct: number
   payment_deadline_hours: number
   installment_enabled: boolean
-  return_window_days: number
   // Message templates
   tpl_shipping_confirm: string | null
   tpl_delay_notify: string | null
@@ -37,20 +41,25 @@ export interface AIConfig {
   tpl_wrong_item: string | null
   tpl_review_request: string | null
   tpl_referral: string | null
-  // Smart AI
+  // AI behaviour
   product_image_auto_send: boolean
-  // Bangladesh
+  use_emoji: boolean
+  response_length: 'short' | 'medium' | 'long'
+  suggest_products: boolean
+  answer_general: boolean
+  // Bangladesh — integrations
   pathao_store_id: string | null
   pathao_client_id: string | null
   pathao_client_secret: string | null
   steadfast_api_key: string | null
   steadfast_api_secret: string | null
   sundarban_enabled: boolean
+  // Bangladesh — local settings
   hartal_mode: boolean
   hartal_message: string | null
   friday_offline_enabled: boolean
-  friday_start_hour: number
-  friday_end_hour: number
+  friday_offline_start: string
+  friday_offline_end: string
   ramadan_mode: boolean
   ramadan_start_time: string
   ramadan_end_time: string
@@ -75,6 +84,16 @@ export interface AIConfig {
   referral_reward_pct: number
 }
 
+export interface AIInstruction {
+  id: string
+  tenant_id: string
+  title: string
+  body: string
+  sort_order: number
+  is_active: boolean
+  created_at: string
+}
+
 // ─── Products ────────────────────────────────────────────────────────────────
 
 export interface Product {
@@ -84,6 +103,7 @@ export interface Product {
   name: string
   mrp: number
   current_stock: number
+  image_count?: number
   category: string | null
   image_url: string | null
   extra_fields: Record<string, unknown>
@@ -297,7 +317,7 @@ export interface DiscountMonthDetail {
 
 export interface DiscountBreakdown {
   discount_code: string | null
-  rows: DiscountRow[]
+  rows: DiscountReportRow[]
   total_discount: number
   original_amount: number | null
   net_amount: number | null

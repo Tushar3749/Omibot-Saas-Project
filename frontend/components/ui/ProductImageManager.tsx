@@ -33,6 +33,38 @@ export default function ProductImageManager({ productId, productName, onClose }:
 
   const fileRef = useRef<HTMLInputElement>(null)
 
+  // ── Client-side image compression ────────────────────────────────────────
+  async function compressImage(file: File): Promise<File> {
+    const MAX_SIDE = 800
+    return new Promise((resolve) => {
+      const img = new window.Image()
+      const url = URL.createObjectURL(file)
+      img.onload = () => {
+        URL.revokeObjectURL(url)
+        let { width, height } = img
+        if (width <= MAX_SIDE && height <= MAX_SIDE) { resolve(file); return }
+        const ratio = Math.min(MAX_SIDE / width, MAX_SIDE / height)
+        width  = Math.round(width  * ratio)
+        height = Math.round(height * ratio)
+        const canvas = document.createElement('canvas')
+        canvas.width  = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')!
+        ctx.drawImage(img, 0, 0, width, height)
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) { resolve(file); return }
+            resolve(new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }))
+          },
+          'image/jpeg',
+          0.85,
+        )
+      }
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(file) }
+      img.src = url
+    })
+  }
+
   // ── Load ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     productImagesAPI.list(productId)
@@ -53,13 +85,17 @@ export default function ProductImageManager({ productId, productName, onClose }:
     if (!files?.length) return
     const file = files[0]
     if (!file.type.startsWith('image/')) { toast.error('শুধু image file আপলোড করুন'); return }
-    if (file.size > 8 * 1024 * 1024)    { toast.error('8MB-এর কম file বেছে নিন');      return }
+    if (file.size > 5 * 1024 * 1024)    { toast.error('5MB-এর কম file বেছে নিন');      return }
+
+    const isFirst      = images.length === 0
+    const finalPrimary = isPrimary || isFirst
 
     setUploading(true)
     try {
-      const uploaded = await productImagesAPI.upload(productId, file, description, isPrimary, autoDescribe)
+      const compressed = await compressImage(file)
+      const uploaded = await productImagesAPI.upload(productId, compressed, description, finalPrimary, autoDescribe)
       setImages(prev => {
-        const updated = isPrimary ? prev.map(i => ({ ...i, is_primary: false })) : [...prev]
+        const updated = finalPrimary ? prev.map(i => ({ ...i, is_primary: false })) : [...prev]
         return [...updated, uploaded]
       })
       setDescription('')
@@ -201,7 +237,7 @@ export default function ProductImageManager({ productId, productName, onClose }:
                 {uploading ? 'আপলোড হচ্ছে...' : 'ছবি drag করুন বা ক্লিক করুন'}
               </p>
               <p className="text-xs" style={{ color: 'var(--c-muted)' }}>
-                JPG, PNG, WebP — সর্বোচ্চ 8MB
+                JPG, PNG, WebP — সর্বোচ্চ 5MB · স্বয়ংক্রিয় 800px compression
               </p>
             </div>
           </div>

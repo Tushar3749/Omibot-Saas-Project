@@ -126,6 +126,8 @@ export default function StockPage() {
   const [thresholdInput, setThresholdInput] = useState<number>(5)
   const [savingThreshold, setSavingThreshold] = useState(false)
 
+  const [search, setSearch] = useState('')
+
   const [showImportModal, setShowImportModal] = useState(false)
   const [importing,       setImporting]       = useState(false)
   const [importResult,    setImportResult]    = useState<CSVImportResult | null>(null)
@@ -203,15 +205,10 @@ export default function StockPage() {
   async function saveEdit(product_id: string) {
     setSavingId(product_id)
     try {
-      const result = await stockAPI.update({ product_id, quantity: editQty, note: editNote || undefined })
-      setProducts(ps => ps.map(p => {
-        if (p.product_id !== product_id) return p
-        const avail = result.stock
-        return { ...p, stock: avail, available: avail,
-                 low_stock: avail <= threshold && avail > 0, out_of_stock: avail === 0 }
-      }))
+      await stockAPI.update({ product_id, quantity: editQty, note: editNote || undefined })
       toast.success('Stock আপডেট হয়েছে')
       setEditingId(null)
+      await loadStock()
     } catch {
       toast.error('Stock আপডেট ব্যর্থ')
     } finally {
@@ -280,6 +277,14 @@ export default function StockPage() {
   const outOfStock    = products.filter(p => p.out_of_stock).length
   const totalItems    = products.reduce((sum, p) => sum + (p.available || p.stock || 0), 0)
   const hasAlert      = lowStockCount > 0 || outOfStock > 0
+
+  const filtered = search.trim()
+    ? products.filter(p =>
+        p.name.toLowerCase().includes(search.toLowerCase()) ||
+        p.sku.toLowerCase().includes(search.toLowerCase()) ||
+        (p.category || '').toLowerCase().includes(search.toLowerCase())
+      )
+    : products
 
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     { key: 'stock',   label: 'Stock তালিকা',       icon: <Package size={13} /> },
@@ -378,7 +383,26 @@ export default function StockPage() {
       ) : tab === 'stock' ? (
 
         /* ── Stock list ─────────────────────────────────────────────────────── */
-        <div className="card overflow-hidden">
+        <div className="space-y-3">
+          {/* Search */}
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+                    style={{ color: 'var(--c-muted)' }} />
+            <input
+              className="input pl-9 w-full max-w-xs"
+              placeholder="SKU, নাম বা বিভাগ দিয়ে খুঁজুন..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+            {search && (
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs"
+                    style={{ color: 'var(--c-muted)' }}>
+                {filtered.length} / {products.length}
+              </span>
+            )}
+          </div>
+
+          <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead style={{ borderBottom: '1px solid var(--c-border)' }}>
               <tr>
@@ -393,13 +417,13 @@ export default function StockPage() {
               </tr>
             </thead>
             <tbody>
-              {products.length === 0 ? (
+              {filtered.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="td text-center py-12" style={{ color: 'var(--c-muted)' }}>
-                    কোনো পণ্য নেই
+                    {search ? `"${search}" এর জন্য কোনো পণ্য পাওয়া যায়নি` : 'কোনো পণ্য নেই'}
                   </td>
                 </tr>
-              ) : products.map((p, i) => (
+              ) : filtered.map((p, i) => (
                 <tr key={p.product_id}
                     style={{
                       borderTop: i > 0 ? '1px solid var(--c-border)' : 'none',
@@ -483,6 +507,7 @@ export default function StockPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
 
       ) : tab === 'history' ? (

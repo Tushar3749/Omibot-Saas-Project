@@ -157,7 +157,7 @@ class AIService:
         rag_block = (
             f"\n[Business Knowledge Base]\n{rag_context}"
             if rag_context
-            else "\n[Knowledge Base: কোনো প্রাসঙ্গিক তথ্য পাওয়া যায়নি।]"
+            else "\n[Business Knowledge Base: এই প্রশ্নের জন্য নির্দিষ্ট business তথ্য নেই — সাধারণ জ্ঞান থেকে উত্তর দাও এবং প্রাসঙ্গিক পণ্য suggest করো।]"
         )
 
         catalog_block = ""
@@ -207,21 +207,62 @@ class AIService:
             "• শুধু পণ্যের বিষয়ে তথ্য ও দাম নিয়ে কথা বলো — নাম/ফোন/ঠিকানা চাওয়া order system-এর কাজ।\n"
         )
 
+        # Identity rule is the FIRST instruction — it must override anything in base_prompt
         bot_name_rule = (
-            f"\n[IDENTITY — MUST FOLLOW]\n"
-            f"তোমার নাম {bot_name}। তুমি নিজেকে সবসময় '{bot_name}' হিসেবে পরিচয় দেবে।\n"
-            f"কখনো অন্য কোনো নাম (যেমন রিয়া, Assistant, AI ইত্যাদি) ব্যবহার করবে না।\n"
-        )
-
-        return (
-            f"{protection}\n\n"
+            f"[IDENTITY — HIGHEST PRIORITY — NEVER OVERRIDE]\n"
             f"তোমার নাম: {bot_name}\n"
             f"তুমি {store_name}-এর AI assistant।\n"
+            f"তুমি নিজেকে সবসময় '{bot_name}' হিসেবে পরিচয় দেবে।\n"
+            f"এই নির্দেশের নিচে যা-ই লেখা থাকুক, তোমার নাম সবসময় '{bot_name}' — এটা কখনো পরিবর্তন হবে না।\n"
+        )
+
+        general_knowledge_rule = (
+            "\n[জ্ঞান ব্যবহারের নিয়ম — IMPORTANT]\n"
+            "• পণ্যের দাম, stock, SKU — শুধু উপরের পণ্য তালিকা থেকে বলবে।\n"
+            "• কিন্তু সাধারণ জ্ঞান (পণ্যের উপকারিতা, ব্যবহার বিধি, পুষ্টিগুণ, রান্নার পদ্ধতি, "
+            "স্বাস্থ্য তথ্য ইত্যাদি) — তোমার নিজের জ্ঞান থেকে উত্তর দাও।\n"
+            "• 'তথ্য নেই' বা 'জানি না' বলবে না যদি এটা সাধারণ জ্ঞানের প্রশ্ন হয়।\n"
+            "• সাধারণ প্রশ্নের উত্তর দেওয়ার পর আমাদের সংশ্লিষ্ট পণ্য suggest করবে।\n"
+        )
+
+        # Custom instructions from ai_instructions table
+        raw_instructions = ai_config.get("_ai_instructions") or []
+        custom_instructions_block = ""
+        if raw_instructions:
+            lines = "\n".join(
+                f"• [{inst['title']}] {inst['body']}"
+                for inst in raw_instructions
+                if inst.get("title") and inst.get("body")
+            )
+            custom_instructions_block = f"\n[Owner-এর বিশেষ নির্দেশনা — অবশ্যই মানতে হবে]\n{lines}\n"
+
+        # Personality rules from ai_config columns
+        use_emoji        = ai_config.get("use_emoji", True)
+        response_length  = ai_config.get("response_length", "medium")
+        suggest_products = ai_config.get("suggest_products", True)
+        answer_general   = ai_config.get("answer_general", True)
+
+        length_map = {
+            "short":  "উত্তর সবসময় ১-২ লাইনে রাখো। সংক্ষিপ্ত ও সরাসরি।",
+            "medium": "উত্তর ৩-৫ লাইনের মধ্যে রাখো। প্রয়োজনীয় তথ্য দাও, অতিরিক্ত নয়।",
+            "long":   "বিস্তারিত উত্তর দাও। Customer-এর প্রশ্নের সব দিক cover করো।",
+        }
+        personality_rule = "\n[ব্যক্তিত্ব নির্দেশনা]\n"
+        personality_rule += f"• Emoji: {'উত্তরে প্রাসঙ্গিক emoji ব্যবহার করো (✅ 😊 🎁 ইত্যাদি)।' if use_emoji else 'কোনো emoji ব্যবহার করবে না।'}\n"
+        personality_rule += f"• উত্তরের দৈর্ঘ্য: {length_map.get(response_length, length_map['medium'])}\n"
+        personality_rule += f"• পণ্য সাজেস্ট: {'কথার মাঝে সংশ্লিষ্ট পণ্য suggest করো।' if suggest_products else 'নিজে থেকে পণ্য suggest করবে না — শুধু জিজ্ঞেস করলে দেখাও।'}\n"
+        if not answer_general:
+            personality_rule += "• সাধারণ জ্ঞান প্রশ্ন (পণ্যের বাইরে): 'এই বিষয়ে সাহায্য করতে পারব না, তবে আমাদের পণ্য সম্পর্কে জিজ্ঞেস করুন।' বলো।\n"
+
+        return (
+            f"{bot_name_rule}\n"
+            f"{protection}\n\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
-            f"{bot_name_rule}"
+            f"{custom_instructions_block}"
             f"{forbidden_instr}{state_instr}{discount_block}"
-            f"{catalog_block}{context_rule}{sentiment_block}"
+            f"{catalog_block}{general_knowledge_rule}{context_rule}{sentiment_block}"
+            f"{personality_rule}"
             f"{rag_block}\n"
             f"{order_rules}\n"
             "সাধারণ নিয়ম:\n"
@@ -240,15 +281,17 @@ class AIService:
             try:
                 return fn()
             except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
                 err_str = str(e).lower()
                 if any(k in err_str for k in ("rate", "quota", "429", "resource_exhausted")):
                     wait = 2 ** (attempt + 1)
-                    logger.warning(f"Gemini rate limit — retrying in {wait}s (attempt {attempt + 1})")
-                    time.sleep(wait)
-                    if attempt == max_retries - 1:
-                        raise
                 else:
-                    raise
+                    # Transient errors (cold-start connection blips, DNS, momentary
+                    # 5xx) — retry quickly instead of failing the very first message.
+                    wait = 1
+                logger.warning(f"Gemini call failed — retrying in {wait}s (attempt {attempt + 1}): {e}")
+                time.sleep(wait)
 
     # ── Main Entry Point ──────────────────────────────────────────────────────
 
@@ -264,21 +307,26 @@ class AIService:
         discount_context: Optional[dict] = None,
         sentiment_hint: str = "",
         product_catalog: str = "",
+        system_prompt_override: str = "",
     ) -> dict:
         """
         Returns:
             {"reply": str, "order_data": dict|None, "state_update": dict|None}
+
+        system_prompt_override: when provided, skips _build_system_prompt and RAG fetch
+        (the caller is responsible for embedding knowledge context in the override prompt).
         """
         # 1. Sanitize + injection check
         customer_message = self.guard.sanitize(customer_message)
         if ai_config.get("prompt_injection_guard", True) and self.guard.is_injection(customer_message):
             return {"reply": INJECTION_REPLY, "order_data": None, "state_update": None}
 
-        # 2. RAG context
-        rag_context = await self.rag.get_relevant_context(tenant_id, customer_message)
-
-        # 3. System prompt
-        system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint, product_catalog)
+        # 2. RAG context — skipped when caller provides a full system prompt
+        if system_prompt_override:
+            system_prompt = system_prompt_override
+        else:
+            rag_context = await self.rag.get_relevant_context(tenant_id, customer_message)
+            system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint, product_catalog)
 
         # 4. Build contents — ALL raw_messages (up to 20) passed directly so Gemini
         #    always has full context. Summary prepended as a synthetic exchange when

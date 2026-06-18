@@ -76,7 +76,7 @@ async def list_stock(tenant: dict = Depends(get_current_tenant)):
 
     products_res = (
         supabase.table("products")
-        .select("product_id, sku, name, category, mrp, is_active")
+        .select("product_id, sku, name, category, mrp, is_active, extra_fields")
         .eq("tenant_id", tid)
         .eq("is_active", True)
         .order("name")
@@ -103,6 +103,18 @@ async def list_stock(tenant: dict = Depends(get_current_tenant)):
         phys      = int(s.get("physical_stock") or 0)
         issued    = int(s.get("issued_stock") or 0)
         available = _compute_available(s)
+
+        # Fallback: if stock table has no data, check extra_fields.stock
+        # (products imported via CSV with a "stock" column land here)
+        if available == 0 and phys == 0 and issued == 0:
+            ef_stock = (p.get("extra_fields") or {}).get("stock")
+            if ef_stock is not None:
+                try:
+                    available = int(float(str(ef_stock)))
+                    phys      = available
+                except (ValueError, TypeError):
+                    pass
+
         threshold = s.get("low_stock_threshold") or default_threshold
 
         p["stock"]          = available
@@ -111,6 +123,7 @@ async def list_stock(tenant: dict = Depends(get_current_tenant)):
         p["available"]      = available
         p["low_stock"]      = 0 < available <= threshold
         p["out_of_stock"]   = available == 0
+        p.pop("extra_fields", None)  # don't send to frontend
 
     return {"products": products, "threshold": default_threshold}
 

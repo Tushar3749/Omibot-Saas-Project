@@ -2,13 +2,23 @@
 import { useState, useRef, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { testBotAPI } from '@/lib/api'
-import { FlaskConical, Send, Bot, User, Loader2, ChevronDown, ChevronRight, Percent, ShoppingCart, Plus } from 'lucide-react'
+import { FlaskConical, Send, Bot, User, Loader2, ChevronDown, ChevronRight, Percent, ShoppingCart, Plus, Camera, X } from 'lucide-react'
+
+interface ProductMatch {
+  product_id: string
+  name:       string
+  sku:        string
+  mrp:        number
+  image_url?: string
+}
 
 interface ChatMessage {
-  role: 'user' | 'bot'
-  text: string
-  ts: Date
+  role:        'user' | 'bot'
+  text:        string
+  ts:          Date
   isOrderFlow?: boolean
+  imageUrl?:   string       // user-sent image preview
+  products?:   ProductMatch[] // bot product match cards
 }
 
 interface DiscountCtx {
@@ -47,7 +57,6 @@ function isOrderFlowMessage(text: string): boolean {
 function Bubble({ msg }: { msg: ChatMessage }) {
   const isUser    = msg.role === 'user'
   const isOrder   = !isUser && msg.isOrderFlow
-
   const botBg     = isOrder ? '#2563eb' : '#fff'
   const botColor  = isOrder ? '#fff'    : '#282A35'
   const botBorder = isOrder ? 'none'    : '1px solid #E0E0E0'
@@ -59,19 +68,61 @@ function Bubble({ msg }: { msg: ChatMessage }) {
         className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
         style={{ backgroundColor: isUser ? '#04AA6D' : iconBg }}
       >
-        {isUser
-          ? <User size={13} className="text-white" />
-          : <Bot  size={13} className="text-white" />
-        }
+        {isUser ? <User size={13} className="text-white" /> : <Bot size={13} className="text-white" />}
       </div>
-      <div
-        className="max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
-        style={isUser
-          ? { backgroundColor: '#04AA6D', color: '#fff', borderBottomRightRadius: 4 }
-          : { backgroundColor: botBg, color: botColor, border: botBorder, borderBottomLeftRadius: 4 }
-        }
-      >
-        {msg.text}
+
+      <div className="max-w-[75%] flex flex-col gap-1.5">
+        {/* User-sent image preview */}
+        {isUser && msg.imageUrl && (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img
+            src={msg.imageUrl}
+            alt="sent image"
+            className="rounded-xl object-cover"
+            style={{ maxWidth: 180, maxHeight: 180, border: '2px solid #04AA6D' }}
+          />
+        )}
+
+        {/* Text bubble */}
+        {msg.text && (
+          <div
+            className="px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
+            style={isUser
+              ? { backgroundColor: '#04AA6D', color: '#fff', borderBottomRightRadius: 4 }
+              : { backgroundColor: botBg, color: botColor, border: botBorder, borderBottomLeftRadius: 4 }
+            }
+          >
+            {msg.text}
+          </div>
+        )}
+
+        {/* Bot product match cards */}
+        {!isUser && msg.products && msg.products.length > 0 && (
+          <div className="flex flex-col gap-1.5 mt-1">
+            {msg.products.map(p => (
+              <div
+                key={p.product_id}
+                className="flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs"
+                style={{ backgroundColor: '#fff', border: '1px solid #E0E0E0' }}
+              >
+                {p.image_url ? (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img src={p.image_url} alt={p.name}
+                    className="w-10 h-10 object-cover rounded-lg flex-shrink-0 border border-slate-100" />
+                ) : (
+                  <div className="w-10 h-10 rounded-lg flex-shrink-0 flex items-center justify-center"
+                    style={{ backgroundColor: '#F5F5F5' }}>
+                    <Camera size={14} style={{ color: '#BDBDBD' }} />
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="font-semibold truncate" style={{ color: '#282A35' }}>{p.name}</p>
+                  <p style={{ color: '#9E9E9E' }}>{p.sku} · ৳{p.mrp.toLocaleString()}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -213,8 +264,11 @@ export default function TestBotPage() {
   const [customerPhone, setCustomerPhone] = useState('')
   const [discountCtx, setDiscountCtx]     = useState<DiscountCtx | null>(null)
   const [orderFlow, setOrderFlow]         = useState<string | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const inputRef  = useRef<HTMLInputElement>(null)
+  const [pendingImage, setPendingImage]   = useState<File | null>(null)
+  const [imagePreview, setImagePreview]   = useState<string | null>(null)
+  const bottomRef  = useRef<HTMLDivElement>(null)
+  const inputRef   = useRef<HTMLInputElement>(null)
+  const imgInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, typing])
 
@@ -273,6 +327,39 @@ export default function TestBotPage() {
       toast.error('রিসেট ব্যর্থ হয়েছে')
     } finally {
       setResetting(false)
+    }
+  }
+
+  function handleImagePick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) { toast.error('শুধু image file বেছে নিন'); return }
+    if (file.size > 5 * 1024 * 1024)    { toast.error('5MB-এর বেশি image দেওয়া যাবে না'); return }
+    setPendingImage(file)
+    setImagePreview(URL.createObjectURL(file))
+    if (imgInputRef.current) imgInputRef.current.value = ''
+  }
+
+  async function sendImage() {
+    if (!pendingImage || typing) return
+    const preview = imagePreview!
+    setPendingImage(null)
+    setImagePreview(null)
+    setMessages(prev => [...prev, { role: 'user', text: '', imageUrl: preview, ts: new Date() }])
+    setTyping(true)
+    try {
+      const res = await testBotAPI.sendImage(pendingImage)
+      setMessages(prev => [...prev, {
+        role:     'bot',
+        text:     res.reply,
+        ts:       new Date(),
+        products: res.products.length > 0 ? res.products : undefined,
+      }])
+    } catch {
+      setMessages(prev => [...prev, { role: 'bot', text: 'দুঃখিত, ছবি প্রসেস করতে পারিনি।', ts: new Date() }])
+      toast.error('Image recognition ব্যর্থ হয়েছে')
+    } finally {
+      setTyping(false)
     }
   }
 
@@ -353,10 +440,54 @@ export default function TestBotPage() {
           <div ref={bottomRef} />
         </div>
 
-        {/* Input */}
+        {/* Image preview bar */}
+        {imagePreview && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-xl"
+               style={{ backgroundColor: '#fff', border: '1px solid #04AA6D' }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={imagePreview} alt="preview"
+                 className="w-12 h-12 object-cover rounded-lg border border-slate-200 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium truncate" style={{ color: '#282A35' }}>{pendingImage?.name}</p>
+              <p className="text-2xs" style={{ color: '#9E9E9E' }}>
+                {pendingImage ? (pendingImage.size / 1024).toFixed(0) + ' KB' : ''}
+              </p>
+            </div>
+            <button
+              onClick={() => { setPendingImage(null); setImagePreview(null) }}
+              className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
+              style={{ backgroundColor: '#FEE2E2', color: '#DC2626' }}
+            >
+              <X size={11} />
+            </button>
+            <button
+              onClick={sendImage}
+              disabled={typing}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 flex-shrink-0"
+              style={{ backgroundColor: '#04AA6D', color: '#fff' }}
+            >
+              {typing ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
+              পাঠান
+            </button>
+          </div>
+        )}
+
+        {/* Text input + camera button */}
+        <input ref={imgInputRef} type="file" accept="image/*" className="hidden" onChange={handleImagePick} />
         <div className="mt-3 flex gap-2 p-2 rounded-xl" style={{ backgroundColor: '#fff', border: '1px solid #E0E0E0' }}>
+          {/* Camera button */}
+          <button
+            onClick={() => imgInputRef.current?.click()}
+            disabled={typing}
+            title="ছবি পাঠান"
+            className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 transition-all"
+            style={{ backgroundColor: pendingImage ? 'rgba(4,170,109,0.12)' : 'transparent', color: pendingImage ? '#04AA6D' : '#9E9E9E' }}
+          >
+            <Camera size={16} />
+          </button>
+
           <input ref={inputRef} type="text"
-            className="flex-1 px-3 py-2 text-sm outline-none bg-transparent"
+            className="flex-1 px-2 py-2 text-sm outline-none bg-transparent"
             style={{ color: '#282A35' }}
             placeholder={inOrderFlow ? 'অর্ডার তথ্য লিখুন...' : 'বার্তা লিখুন... (Enter পাঠাতে)'}
             value={input} onChange={e => setInput(e.target.value)}

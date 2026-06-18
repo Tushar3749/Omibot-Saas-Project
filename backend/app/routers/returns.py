@@ -9,6 +9,7 @@ PATCH  /{return_id}/reject      reject with optional owner_note
 DELETE /{return_id}             hard delete (admin only)
 """
 import logging
+import requests as req_lib
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,6 +21,48 @@ from app.models.schemas import ReturnRejectRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _notify_customer(tid: str, conversation_id: str, message: str) -> None:
+    """Send bot message to customer using stored conversation_id."""
+    if not conversation_id:
+        return
+    try:
+        conv = (
+            supabase.table("conversations")
+            .select("external_id")
+            .eq("conversation_id", conversation_id)
+            .maybe_single()
+            .execute()
+        )
+        if not conv or not conv.data:
+            return
+        sender_id = conv.data.get("external_id")
+        if not sender_id:
+            return
+
+        from app.services.webhook_service import get_ai_config, save_message  # noqa: PLC0415
+        from app.utils.security import decrypt_token  # noqa: PLC0415
+
+        ai_config = get_ai_config(tid)
+        enc_token = ai_config.get("access_token", "")
+        token     = decrypt_token(enc_token) if enc_token else ""
+        if not token:
+            return
+
+        save_message(conversation_id, tid, "bot", message)
+        req_lib.post(
+            "https://graph.facebook.com/v19.0/me/messages",
+            params={"access_token": token},
+            json={
+                "recipient":      {"id": sender_id},
+                "message":        {"text": message},
+                "messaging_type": "RESPONSE",
+            },
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.warning(f"Customer notification failed: {exc}")
 
 
 @router.get("/")
@@ -183,6 +226,19 @@ async def approve_return(return_id: str, tenant: dict = Depends(get_current_tena
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("return_id", return_id).execute()
 
+    # ── Notify customer ───────────────────────────────────────────────────────
+    item_lines = "\n".join(
+        f"📦 {it.get('product_name') or it.get('name', 'পণ্য')} ×{it.get('quantity', 1)}"
+        for it in (ret.get("items") or [])
+    )
+    notif = (
+        f"✅ আপনার রিটার্ন অনুমোদিত হয়েছে!\n"
+        f"━" * 23 + "\n"
+        f"{item_lines}\n"
+        "স্টক পুনরুদ্ধার করা হয়েছে। ধন্যবাদ! 🙏"
+    )
+    _notify_customer(tid, ret.get("conversation_id", ""), notif)
+
     return result.data[0]
 
 
@@ -215,6 +271,20 @@ async def reject_return(
         update_data["owner_note"] = body.owner_note
 
     result = supabase.table("returns").update(update_data).eq("return_id", return_id).execute()
+
+    # ── Notify customer ───────────────────────────────────────────────────────
+    reject_reason = body.owner_note or "অনুরোধটি অনুমোদন করা সম্ভব হয়নি।"
+    notif = f"দুঃখিত, আপনার রিটার্ন প্রত্যাখ্যান করা হয়েছে।\nকারণ: {reject_reason}"
+    ret_full = (
+        supabase.table("returns")
+        .select("conversation_id")
+        .eq("return_id", return_id)
+        .maybe_single()
+        .execute()
+    )
+    conv_id = (ret_full.data or {}).get("conversation_id", "") if ret_full else ""
+    _notify_customer(tid, conv_id, notif)
+
     return result.data[0]
 
 
