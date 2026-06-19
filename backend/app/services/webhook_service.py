@@ -1244,9 +1244,20 @@ def build_idle_system_prompt(
 
     # 4. Product catalog
     product_block = (
-        f"\n=== পণ্য তালিকা ===\n"
-        "⚠️ পণ্যের দাম, stock, SKU — শুধু এই তালিকা থেকে বলবে। তালিকায় নেই এমন পণ্য নেই বলো।\n"
-        f"{product_catalog}\n"
+        "\n=== পণ্য তালিকা ===\n"
+        "⚠️ শুধুমাত্র নিচের তালিকার পণ্য সম্পর্কে কথা বলবে। তালিকায় নেই এমন পণ্য নেই বলো।\n"
+        "SKU code ([SKU:...]) কখনো customer-কে দেখাবে না — order extract করতে নিজে ব্যবহার করো।\n\n"
+        f"{product_catalog}\n\n"
+        "[পণ্য তালিকা দেখানোর নিয়ম]\n"
+        "Customer সব পণ্য বা কোনো category জিজ্ঞেস করলে এই format-এ দেখাবে:\n"
+        "  🛒 আমাদের পণ্য তালিকা:\n"
+        "  [emoji] [category]:\n"
+        "    • [পণ্যের নাম] — ৳[দাম]\n"
+        "  কোনটি নেবেন? 😊\n"
+        "• প্রতি category-তে তালিকার emoji ব্যবহার করো\n"
+        "• একটি category-তে ৫+ পণ্য থাকলে: প্রথম ৩টি + '...আরো X টি আছে, জানতে চান?'\n"
+        "• শেষে সবসময় 'কোনটি নেবেন? 😊' লিখবে\n"
+        "• Single category জিজ্ঞেস করলে শুধু সেই category দেখাবে\n"
     ) if product_catalog else ""
 
     # 5. Active discounts
@@ -1498,16 +1509,52 @@ def _query_product_list(tenant_id: str, category: Optional[str] = None) -> list[
         return []
 
 
+_CATEGORY_EMOJI: list[tuple[list[str], str]] = [
+    (["তেল", "oil", "tel"],                                          "🫒"),
+    (["ডাল", "dal", "daal", "lentil"],                              "🫘"),
+    (["চাল", "rice", "chal"],                                        "🌾"),
+    (["আটা", "ময়দা", "flour", "ata"],                               "🫓"),
+    (["মধু", "honey", "modhu"],                                      "🍯"),
+    (["ঘি", "ghee", "ghi"],                                          "🧈"),
+    (["মশলা", "spice", "masala", "হলুদ", "মরিচ", "ধনে", "জিরা"],   "🌶️"),
+    (["চিনি", "sugar", "chini"],                                     "🍬"),
+    (["লবণ", "salt", "lobон", "lobon"],                              "🧂"),
+    (["দুধ", "milk", "dudh"],                                        "🥛"),
+    (["ডিম", "egg", "dim"],                                          "🥚"),
+    (["মাছ", "fish", "mach"],                                        "🐟"),
+    (["মাংস", "meat", "mangsho", "chicken", "beef", "mutton"],      "🥩"),
+    (["সবজি", "vegetable", "shobji"],                                "🥦"),
+    (["ফল", "fruit", "fol", "fol"],                                  "🍎"),
+    (["চা", "tea", "cha"],                                           "🍵"),
+    (["কফি", "coffee", "kofi"],                                      "☕"),
+    (["বিস্কুট", "snack", "biskut", "চিপস", "chips"],               "🍪"),
+    (["জুস", "juice", "drink", "পানি", "water"],                     "🧃"),
+    (["সাবান", "soap", "shampoo", "শ্যাম্পু", "beauty", "care"],    "🧴"),
+    (["পোশাক", "clothing", "dress", "garment"],                      "👗"),
+    (["ইলেকট্রনিক্স", "electronics", "phone", "gadget"],            "📱"),
+    (["বই", "book", "stationery"],                                   "📚"),
+    (["খেলনা", "toy", "kids"],                                       "🧸"),
+]
+
+def _category_emoji(cat: str) -> str:
+    c = cat.lower()
+    for keywords, emoji in _CATEGORY_EMOJI:
+        if any(k in c for k in keywords):
+            return emoji
+    return "📦"
+
+
 def _build_product_catalog_for_ai(tenant_id: str) -> str:
     """
-    Fetches all active products and returns a compact catalog string for
-    injection into the Gemini system prompt. Gemini is then forbidden from
-    mentioning any product not in this list.
+    Fetches all active products and returns a catalog string for the Gemini
+    system prompt. Format: category headers with emoji + product lines.
+    SKU is included as an internal reference tag so Gemini can use it for
+    order extraction but knows not to show it to customers.
     """
     try:
         rows = (
             supabase.table("products")
-            .select("name, sku, mrp, category")
+            .select("name, sku, mrp, category, current_stock")
             .eq("tenant_id", tenant_id)
             .eq("is_active", True)
             .order("category")
@@ -1519,15 +1566,19 @@ def _build_product_catalog_for_ai(tenant_id: str) -> str:
             return ""
         by_cat: dict = {}
         for p in rows:
-            cat = p.get("category") or "অন্যান্য"
+            cat = (p.get("category") or "অন্যান্য").strip()
             by_cat.setdefault(cat, []).append(p)
         lines = []
         for cat, prods in by_cat.items():
-            lines.append(f"[{cat}]")
+            emoji = _category_emoji(cat)
+            lines.append(f"{emoji} {cat}:")
             for p in prods:
-                sku = p.get("sku") or ""
-                sku_part = f" ({sku})" if sku else ""
-                lines.append(f"  • {p['name']}{sku_part} — ৳{float(p['mrp']):.0f}")
+                sku  = p.get("sku") or ""
+                name = p.get("name") or ""
+                price = float(p.get("mrp") or 0)
+                # SKU in brackets — AI uses internally for order extraction, never shows customer
+                sku_ref = f" [SKU:{sku}]" if sku else ""
+                lines.append(f"  • {name}{sku_ref} — ৳{price:.0f}")
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"_build_product_catalog_for_ai error: {e}")
