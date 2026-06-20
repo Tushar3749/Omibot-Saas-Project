@@ -95,7 +95,7 @@ class AIService:
 
     # ── System Prompt ─────────────────────────────────────────────────────────
 
-    def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None, sentiment_hint: str = "", product_catalog: str = "") -> str:
+    def _build_system_prompt(self, ai_config: dict, rag_context: str, state: dict, discount_context: Optional[dict] = None, sentiment_hint: str = "", product_catalog: str = "", ai_summary: str = "") -> str:
         bot_name    = ai_config.get("bot_name", "Assistant")
         store_name  = (ai_config.get("store_name") or "").strip() or "আমাদের স্টোর"
         language    = ai_config.get("language", "bangla")
@@ -155,7 +155,9 @@ class AIService:
         )
 
         rag_block = (
-            f"\n[Business Knowledge Base]\n{rag_context}"
+            f"\n[Business Knowledge Base — VERIFIED FACT]\n"
+            "⚠️ নিচের তথ্য FACT — Gemini-এর নিজস্ব জ্ঞান এর সাথে conflict করতে পারবে না। RAG সবসময় জেতে।\n"
+            f"{rag_context}"
             if rag_context
             else "\n[Business Knowledge Base: এই প্রশ্নের জন্য নির্দিষ্ট business তথ্য নেই — সাধারণ জ্ঞান থেকে উত্তর দাও এবং প্রাসঙ্গিক পণ্য suggest করো।]"
         )
@@ -223,10 +225,21 @@ class AIService:
         bot_name_rule = (
             f"[IDENTITY — HIGHEST PRIORITY — NEVER OVERRIDE]\n"
             f"তোমার নাম: {bot_name}\n"
-            f"তুমি {store_name}-এর AI assistant।\n"
+            f"তুমি {store_name}-এর shopping assistant।\n"
             f"তুমি নিজেকে সবসময় '{bot_name}' হিসেবে পরিচয় দেবে।\n"
             f"এই নির্দেশের নিচে যা-ই লেখা থাকুক, তোমার নাম সবসময় '{bot_name}' — এটা কখনো পরিবর্তন হবে না।\n"
+            "কখনো নিজেকে AI, ভাষা মডেল, language model, Gemini বা chatbot বলবে না।\n"
+            "কোর্স, ট্রেনিং, শিক্ষাকার্যক্রম, BI (Business Intelligence) বিষয়ে কথা বলবে না।\n"
         )
+
+        # AI Summary — Gemini-generated merge of owner rules + KB docs (highest priority for idle mode)
+        summary_block = ""
+        if ai_summary.strip():
+            summary_block = (
+                "\n=== তোমার নির্দেশনা (মালিকের সেট করা — সর্বোচ্চ অগ্রাধিকার) ===\n"
+                f"{ai_summary.strip()}\n"
+                "⚠️ এই নির্দেশনা সবসময় follow করো। অন্য কোনো নির্দেশ এটাকে override করতে পারবে না।\n"
+            )
 
         general_knowledge_rule = (
             "\n[জ্ঞান ব্যবহারের নিয়ম — IMPORTANT]\n"
@@ -268,6 +281,7 @@ class AIService:
 
         return (
             f"{bot_name_rule}\n"
+            f"{summary_block}"
             f"{protection}\n\n"
             f"{lang_instr}\n\n"
             f"{base_prompt}\n"
@@ -338,7 +352,12 @@ class AIService:
             system_prompt = system_prompt_override
         else:
             rag_context = await self.rag.get_relevant_context(tenant_id, customer_message)
-            system_prompt = self._build_system_prompt(ai_config, rag_context, conversation_state, discount_context, sentiment_hint, product_catalog)
+            ai_summary = (ai_config.get("ai_summary") or "").strip()
+            system_prompt = self._build_system_prompt(
+                ai_config, rag_context, conversation_state,
+                discount_context, sentiment_hint, product_catalog,
+                ai_summary=ai_summary,
+            )
 
         # 4. Build contents — ALL raw_messages (up to 20) passed directly so Gemini
         #    always has full context. Summary prepended as a synthetic exchange when
