@@ -2,11 +2,12 @@
 import { useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { configAPI, settingsAPI, otpAPI, knowledgeAPI, aiInstructionsAPI } from '@/lib/api'
+import type { AISummary } from '@/lib/api'
 import type { AIConfig, AIInstruction } from '@/types'
 import {
   Bot, Shield, AlertTriangle, Plus, X, Save,
   Search, ShoppingBag, Zap, MapPin, Heart, MessageSquare, Package, Globe,
-  FileText, Trash2, Edit2, Upload, BookOpen,
+  FileText, Trash2, Edit2, Upload, BookOpen, RefreshCw, Sparkles,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -244,6 +245,11 @@ export default function SettingsPage() {
   const [docContentType, setDocContentType] = useState('policy')
   const docFileRef = useRef<HTMLInputElement>(null)
 
+  // ── AI Summary state ──────────────────────────────────────────────────────
+  const [summary, setSummary]             = useState<AISummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [generating, setGenerating]       = useState(false)
+
   // ── Load all data ─────────────────────────────────────────────────────────
   useEffect(() => {
     configAPI.get().then(d => setConfig(d || {})).catch(() => {}).finally(() => setLoading(false))
@@ -266,6 +272,11 @@ export default function SettingsPage() {
       })
       .catch(() => {})
       .finally(() => setDocsLoading(false))
+    setSummaryLoading(true)
+    aiInstructionsAPI.getSummary()
+      .then(setSummary)
+      .catch(() => {})
+      .finally(() => setSummaryLoading(false))
   }, [activeTab])
 
   // ── Save AI Config ────────────────────────────────────────────────────────
@@ -415,6 +426,20 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleGenerateSummary() {
+    setGenerating(true)
+    try {
+      const result = await aiInstructionsAPI.generateSummary()
+      setSummary(result)
+      toast.success(`✅ সারাংশ তৈরি হয়েছে — ${result.rules_count || 0}টি নির্দেশনা + ${(result.merged_count || 0) - (result.rules_count || 0)} টি ডকুমেন্ট`)
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg || 'সারাংশ তৈরি করা যায়নি')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   const filteredDistricts = charges.filter(c =>
     !districtSearch || c.district.toLowerCase().includes(districtSearch.toLowerCase())
   )
@@ -558,29 +583,30 @@ export default function SettingsPage() {
       {activeTab === 'ai' && (
         <div className="space-y-4">
 
-          {/* ── Section 1: নির্দেশনা ─────────────────────────────────────── */}
-          <SectionCard icon={FileText} title="📝 Bot-কে নির্দেশনা দিন" subtitle="Bot কীভাবে কথা বলবে তা নির্দিষ্ট করুন — প্রতিটি নির্দেশনা AI-এর prompt-এ যোগ হয়">
+          {/* ── Section 1: Text Rules CRUD ───────────────────────────────── */}
+          <SectionCard icon={FileText} title="📝 Bot-কে নির্দেশনা দিন" subtitle="প্রতিটি নির্দেশনা AI-এর system prompt-এ যোগ হয় — Bot এগুলো অনুসরণ করে">
 
             {instsLoading ? (
               <div className="flex justify-center py-6"><div className="spinner h-5 w-5" /></div>
             ) : (
               <div className="space-y-2">
                 {instructions.length === 0 && !showAddForm && (
-                  <p className="text-sm text-center py-4" style={{ color: 'var(--c-muted)' }}>
-                    কোনো নির্দেশনা নেই। নিচে &ldquo;নির্দেশনা যোগ করুন&rdquo; বোতামে ক্লিক করুন।
-                  </p>
+                  <div className="text-center py-6 rounded" style={{ border: '1.5px dashed var(--c-border)' }}>
+                    <FileText size={28} className="mx-auto mb-2" style={{ color: 'var(--c-muted)', opacity: 0.5 }} />
+                    <p className="text-sm" style={{ color: 'var(--c-muted)' }}>কোনো নির্দেশনা নেই</p>
+                    <p className="text-xs mt-1" style={{ color: 'var(--c-muted)', opacity: 0.7 }}>নিচের বোতামে ক্লিক করে প্রথম নির্দেশনা যোগ করুন</p>
+                  </div>
                 )}
 
                 {instructions.map(inst => (
                   <div key={inst.id}>
                     {editingInst?.id === inst.id ? (
-                      /* Edit mode */
                       <div className="p-3 rounded space-y-2" style={{ border: '1.5px solid #04AA6D', backgroundColor: 'rgba(4,170,109,0.04)' }}>
                         <input
                           className="input text-sm font-medium"
                           value={editingInst.title}
                           onChange={e => setEditingInst({ ...editingInst, title: e.target.value })}
-                          placeholder="শিরোনাম"
+                          placeholder="শিরোনাম (যেমন: ভদ্রতা, টোন)"
                         />
                         <textarea
                           className="input text-sm resize-none h-20"
@@ -596,24 +622,23 @@ export default function SettingsPage() {
                         </div>
                       </div>
                     ) : (
-                      /* View mode */
-                      <div className="p-3 rounded flex items-start gap-3" style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
+                      <div className="p-3 rounded flex items-start gap-3 group" style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border)' }}>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold truncate" style={{ color: 'var(--c-text)' }}>{inst.title}</p>
+                          <p className="text-sm font-semibold" style={{ color: 'var(--c-text)' }}>{inst.title}</p>
                           <p className="text-xs mt-1 leading-relaxed" style={{ color: 'var(--c-muted)', whiteSpace: 'pre-wrap' }}>{inst.body}</p>
                         </div>
-                        <div className="flex gap-1 flex-shrink-0">
+                        <div className="flex gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             onClick={() => { setEditingInst(inst); setShowAddForm(false) }}
-                            className="p-1.5 rounded hover:bg-opacity-80 transition-colors"
+                            className="p-1.5 rounded transition-colors"
                             style={{ color: 'var(--c-muted)' }}
-                            title="সম্পাদনা করুন"
+                            title="সম্পাদনা"
                           >
                             <Edit2 size={13} />
                           </button>
                           <button
                             onClick={() => handleDeleteInstruction(inst.id)}
-                            className="p-1.5 rounded hover:bg-opacity-80 transition-colors"
+                            className="p-1.5 rounded transition-colors"
                             style={{ color: '#EF5350' }}
                             title="মুছুন"
                           >
@@ -625,25 +650,28 @@ export default function SettingsPage() {
                   </div>
                 ))}
 
-                {/* Add form */}
                 {showAddForm && (
                   <div className="p-3 rounded space-y-2" style={{ border: '1.5px dashed var(--c-border)', backgroundColor: 'var(--c-surface)' }}>
                     <input
                       className="input text-sm"
                       value={newInstTitle}
                       onChange={e => setNewInstTitle(e.target.value)}
-                      placeholder="নির্দেশনার শিরোনাম (যেমন: Tone, ভদ্রতা)"
+                      placeholder="শিরোনাম (যেমন: ভদ্রতা, সম্বোধন, টোন)"
                       autoFocus
                     />
                     <textarea
                       className="input text-sm resize-none h-20"
                       value={newInstBody}
                       onChange={e => setNewInstBody(e.target.value)}
-                      placeholder="নির্দেশনা লিখুন... (যেমন: সবসময় ভদ্রভাবে কথা বলো, customer-কে 'আপনি' বলে সম্বোধন করো)"
+                      placeholder="নির্দেশনা লিখুন... (যেমন: সবসময় 'আপনি' বলে সম্বোধন করো, দাম জিজ্ঞেস করলে তুলনা দেখাও)"
                       onKeyDown={e => { if (e.key === 'Enter' && e.ctrlKey) handleAddInstruction() }}
                     />
+                    <p className="text-xs" style={{ color: 'var(--c-muted)' }}>Ctrl+Enter চাপলে সংরক্ষণ হবে</p>
                     <div className="flex gap-2 justify-end">
-                      <button onClick={() => { setShowAddForm(false); setNewInstTitle(''); setNewInstBody('') }} className="btn-secondary text-xs py-1 px-3">বাতিল</button>
+                      <button
+                        onClick={() => { setShowAddForm(false); setNewInstTitle(''); setNewInstBody('') }}
+                        className="btn-secondary text-xs py-1 px-3"
+                      >বাতিল</button>
                       <button onClick={handleAddInstruction} disabled={addingInst} className="btn-primary text-xs py-1 px-3 gap-1">
                         {addingInst ? <><span className="spinner h-3 w-3" /> যোগ হচ্ছে...</> : <><Plus size={12} /> যোগ করুন</>}
                       </button>
@@ -664,8 +692,8 @@ export default function SettingsPage() {
             )}
           </SectionCard>
 
-          {/* ── Section 2: ডকুমেন্ট আপলোড ──────────────────────────────── */}
-          <SectionCard icon={BookOpen} title="📄 ডকুমেন্ট আপলোড" subtitle="PDF, DOCX বা TXT ফাইল আপলোড করুন — Bot এগুলো থেকে তথ্য নেবে">
+          {/* ── Section 2: File Upload ────────────────────────────────────── */}
+          <SectionCard icon={BookOpen} title="📄 ডকুমেন্ট আপলোড" subtitle="PDF, DOCX বা TXT আপলোড করুন — Bot এগুলো থেকে তথ্য পড়বে (RAG)">
             <div className="flex gap-2">
               <select
                 className="input text-sm flex-1"
@@ -694,18 +722,21 @@ export default function SettingsPage() {
                 />
               </label>
             </div>
-            <p className="text-xs" style={{ color: 'var(--c-muted)' }}>সর্বোচ্চ 10MB। PDF, DOCX, TXT ফরম্যাট সাপোর্টেড।</p>
+            <p className="text-xs" style={{ color: 'var(--c-muted)' }}>সর্বোচ্চ 10MB · PDF, DOCX, TXT সাপোর্টেড</p>
 
             {docsLoading ? (
               <div className="flex justify-center py-4"><div className="spinner h-5 w-5" /></div>
             ) : docs.length === 0 ? (
-              <p className="text-sm text-center py-3" style={{ color: 'var(--c-muted)' }}>কোনো ডকুমেন্ট আপলোড হয়নি</p>
+              <div className="text-center py-5 rounded" style={{ border: '1.5px dashed var(--c-border)' }}>
+                <BookOpen size={24} className="mx-auto mb-2" style={{ color: 'var(--c-muted)', opacity: 0.5 }} />
+                <p className="text-sm" style={{ color: 'var(--c-muted)' }}>কোনো ডকুমেন্ট আপলোড হয়নি</p>
+              </div>
             ) : (
               <div className="space-y-1.5">
                 {docs.map(doc => (
                   <div
                     key={doc.file_name}
-                    className="flex items-center gap-2 px-3 py-2.5 rounded"
+                    className="flex items-center gap-2 px-3 py-2.5 rounded group"
                     style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border)' }}
                   >
                     <FileText size={14} style={{ color: '#04AA6D', flexShrink: 0 }} />
@@ -717,7 +748,7 @@ export default function SettingsPage() {
                     </div>
                     <button
                       onClick={() => handleDeleteDoc(doc.file_name)}
-                      className="p-1.5 rounded flex-shrink-0 hover:opacity-80 transition-opacity"
+                      className="p-1.5 rounded flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                       style={{ color: '#EF5350' }}
                       title="মুছুন"
                     >
@@ -729,9 +760,78 @@ export default function SettingsPage() {
             )}
           </SectionCard>
 
-          {/* ── Section 3: Bot-এর ব্যক্তিত্ব ───────────────────────────── */}
-          <SectionCard icon={Zap} title="⚡ Bot-এর ব্যক্তিত্ব" subtitle="Bot কীভাবে উত্তর দেবে তা কাস্টমাইজ করুন">
-            <div className="space-y-3">
+          {/* ── Section 3: AI Generated Summary ──────────────────────────── */}
+          <SectionCard
+            icon={Sparkles}
+            title="✨ AI সারাংশ"
+            subtitle="উপরের নির্দেশনা ও ডকুমেন্ট থেকে AI একটি structured summary তৈরি করে Bot-এ inject করে"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                {summary?.ai_summary_updated_at ? (
+                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>
+                    শেষ আপডেট: {new Date(summary.ai_summary_updated_at).toLocaleString('bn-BD')}
+                  </p>
+                ) : (
+                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>
+                    এখনো কোনো সারাংশ তৈরি হয়নি
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={handleGenerateSummary}
+                disabled={generating}
+                className="btn-primary gap-2 text-sm"
+              >
+                {generating
+                  ? <><span className="spinner h-4 w-4" /> তৈরি হচ্ছে...</>
+                  : <><RefreshCw size={14} /> সারাংশ তৈরি করুন</>
+                }
+              </button>
+            </div>
+
+            {summaryLoading ? (
+              <div className="flex justify-center py-6"><div className="spinner h-5 w-5" /></div>
+            ) : summary?.summary_text ? (
+              <div className="space-y-3">
+                {/* Overview */}
+                <div className="p-3 rounded text-sm leading-relaxed" style={{ backgroundColor: 'rgba(4,170,109,0.07)', border: '1px solid rgba(4,170,109,0.2)', color: 'var(--c-text)' }}>
+                  {summary.summary_text}
+                </div>
+
+                {/* Bullet points */}
+                {summary.display_points && summary.display_points.length > 0 && (
+                  <div className="space-y-1.5">
+                    {summary.display_points.map((point, i) => (
+                      <div
+                        key={i}
+                        className="flex items-start gap-2 px-3 py-2 rounded text-sm"
+                        style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border)', color: 'var(--c-text)' }}
+                      >
+                        {point}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <p className="text-xs" style={{ color: 'var(--c-muted)' }}>
+                  এই সারাংশ Bot-এর system prompt-এ সর্বোচ্চ অগ্রাধিকারে inject হয়। নির্দেশনা বা ডকুমেন্ট পরিবর্তন করলে পুনরায় তৈরি করুন।
+                </p>
+              </div>
+            ) : (
+              <div className="text-center py-8 rounded" style={{ border: '1.5px dashed var(--c-border)' }}>
+                <Sparkles size={28} className="mx-auto mb-2" style={{ color: 'var(--c-muted)', opacity: 0.4 }} />
+                <p className="text-sm" style={{ color: 'var(--c-muted)' }}>কোনো সারাংশ নেই</p>
+                <p className="text-xs mt-1" style={{ color: 'var(--c-muted)', opacity: 0.7 }}>
+                  নির্দেশনা বা ডকুমেন্ট যোগ করে &ldquo;সারাংশ তৈরি করুন&rdquo; বোতামে ক্লিক করুন
+                </p>
+              </div>
+            )}
+          </SectionCard>
+
+          {/* ── Personality (compact, below main 3 sections) ─────────────── */}
+          <SectionCard icon={Zap} title="⚡ Bot ব্যক্তিত্ব" subtitle="উত্তরের ধরন ও পণ্য সাজেস্ট কাস্টমাইজ করুন">
+            <div className="space-y-2.5">
               <Toggle
                 checked={config.product_image_auto_send !== false}
                 onChange={v => setConfig(c => ({ ...c, product_image_auto_send: v }))}
@@ -741,29 +841,28 @@ export default function SettingsPage() {
               <Toggle
                 checked={config.use_emoji !== false}
                 onChange={v => setConfig(c => ({ ...c, use_emoji: v }))}
-                label="Emoji ব্যবহার করুন"
-                sub="Bot উত্তরে emoji যোগ করবে (যেমন ✅ 😊 🎁)"
+                label="Emoji ব্যবহার"
+                sub="Bot উত্তরে emoji যোগ করবে (✅ 😊 🎁)"
               />
               <Toggle
                 checked={config.suggest_products !== false}
                 onChange={v => setConfig(c => ({ ...c, suggest_products: v }))}
-                label="পণ্য সাজেস্ট করুন"
+                label="পণ্য সাজেস্ট"
                 sub="কথার মাঝে সংশ্লিষ্ট পণ্য suggest করবে"
               />
               <Toggle
                 checked={config.answer_general !== false}
                 onChange={v => setConfig(c => ({ ...c, answer_general: v }))}
-                label="সাধারণ জ্ঞান প্রশ্নের উত্তর দিন"
-                sub="পণ্যের উপকারিতা, রান্না, স্বাস্থ্য ইত্যাদি সাধারণ প্রশ্নে নিজের জ্ঞান থেকে উত্তর দেবে"
+                label="সাধারণ জ্ঞান"
+                sub="পণ্যের উপকারিতা, রান্না, স্বাস্থ্য প্রশ্নে নিজের জ্ঞান থেকে উত্তর দেবে"
               />
             </div>
-
             <div>
               <label className="block text-xs font-medium mb-2" style={{ color: 'var(--c-text)' }}>উত্তরের দৈর্ঘ্য</label>
               <div className="flex gap-2">
                 {([
-                  { value: 'short',  label: 'ছোট',   sub: '1-2 লাইন' },
-                  { value: 'medium', label: 'মাঝারি', sub: '3-5 লাইন' },
+                  { value: 'short',  label: 'ছোট',      sub: '1-2 লাইন' },
+                  { value: 'medium', label: 'মাঝারি',   sub: '3-5 লাইন' },
                   { value: 'long',   label: 'বিস্তারিত', sub: '6+ লাইন' },
                 ] as const).map(opt => {
                   const active = (config.response_length || 'medium') === opt.value

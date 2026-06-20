@@ -305,6 +305,14 @@ export const policyAPI = {
 }
 
 // ── AI Instructions ───────────────────────────────────────────────────────────
+export interface AISummary {
+  summary_text: string
+  display_points: string[]
+  ai_summary_updated_at: string | null
+  rules_count?: number
+  merged_count?: number
+}
+
 export const aiInstructionsAPI = {
   list: (): Promise<Array<{ id: string; title: string; body: string; sort_order: number; is_active: boolean; created_at: string }>> =>
     api.get('/api/ai-instructions/').then(r => r.data),
@@ -314,6 +322,10 @@ export const aiInstructionsAPI = {
     api.put(`/api/ai-instructions/${id}`, data).then(r => r.data),
   delete: (id: string) =>
     api.delete(`/api/ai-instructions/${id}`).then(r => r.data),
+  getSummary: (): Promise<AISummary> =>
+    api.get('/api/ai-instructions/summary').then(r => r.data),
+  generateSummary: (): Promise<AISummary> =>
+    api.post('/api/ai-instructions/generate-summary').then(r => r.data),
 }
 
 // ── Knowledge Base ────────────────────────────────────────────────────────────
