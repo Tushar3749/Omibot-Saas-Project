@@ -232,6 +232,7 @@ export default function SettingsPage() {
   // ── AI Instructions state ─────────────────────────────────────────────────
   const [instructions, setInstructions]   = useState<AIInstruction[]>([])
   const [instsLoading, setInstsLoading]   = useState(false)
+  const [instsLoaded, setInstsLoaded]     = useState(false)
   const [editingInst, setEditingInst]     = useState<AIInstruction | null>(null)
   const [newInstTitle, setNewInstTitle]   = useState('')
   const [newInstBody, setNewInstBody]     = useState('')
@@ -241,6 +242,7 @@ export default function SettingsPage() {
   // ── Knowledge docs state ──────────────────────────────────────────────────
   const [docs, setDocs]             = useState<KnowledgeFile[]>([])
   const [docsLoading, setDocsLoading] = useState(false)
+  const [docsLoaded, setDocsLoaded]   = useState(false)
   const [docUploading, setDocUploading] = useState(false)
   const [docContentType, setDocContentType] = useState('policy')
   const docFileRef = useRef<HTMLInputElement>(null)
@@ -248,6 +250,7 @@ export default function SettingsPage() {
   // ── AI Summary state ──────────────────────────────────────────────────────
   const [summary, setSummary]             = useState<AISummary | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryLoaded, setSummaryLoaded] = useState(false)
   const [generating, setGenerating]       = useState(false)
 
   // ── Load all data ─────────────────────────────────────────────────────────
@@ -256,28 +259,34 @@ export default function SettingsPage() {
     settingsAPI.getDeliveryCharges().then(d => setCharges(d)).catch(() => {}).finally(() => setChargesLoading(false))
   }, [])
 
-  // Load AI tab data when switching to it
+  // Load AI tab data when switching to it (only once per session)
   useEffect(() => {
     if (activeTab !== 'ai') return
-    setInstsLoading(true)
-    aiInstructionsAPI.list()
-      .then(setInstructions)
-      .catch(() => toast.error('Instructions লোড হয়নি'))
-      .finally(() => setInstsLoading(false))
-    setDocsLoading(true)
-    knowledgeAPI.list()
-      .then((all: unknown[]) => {
-        const files = (all as KnowledgeFile[]).filter(d => d.file_name)
-        setDocs(files)
-      })
-      .catch(() => {})
-      .finally(() => setDocsLoading(false))
-    setSummaryLoading(true)
-    aiInstructionsAPI.getSummary()
-      .then(setSummary)
-      .catch(() => {})
-      .finally(() => setSummaryLoading(false))
-  }, [activeTab])
+    if (!instsLoaded) {
+      setInstsLoading(true)
+      aiInstructionsAPI.list()
+        .then(d => { setInstructions(d); setInstsLoaded(true) })
+        .catch(() => toast.error('Instructions লোড হয়নি'))
+        .finally(() => setInstsLoading(false))
+    }
+    if (!docsLoaded) {
+      setDocsLoading(true)
+      knowledgeAPI.list()
+        .then((all: unknown[]) => {
+          setDocs((all as KnowledgeFile[]).filter(d => d.file_name))
+          setDocsLoaded(true)
+        })
+        .catch(() => {})
+        .finally(() => setDocsLoading(false))
+    }
+    if (!summaryLoaded) {
+      setSummaryLoading(true)
+      aiInstructionsAPI.getSummary()
+        .then(d => { setSummary(d); setSummaryLoaded(true) })
+        .catch(() => { setSummaryLoaded(true) })
+        .finally(() => setSummaryLoading(false))
+    }
+  }, [activeTab, instsLoaded, docsLoaded, summaryLoaded])
 
   // ── Save AI Config ────────────────────────────────────────────────────────
   async function handleSave() {
@@ -582,6 +591,13 @@ export default function SettingsPage() {
       {/* ══ TAB: AI আচরণ ══════════════════════════════════════════════════════ */}
       {activeTab === 'ai' && (
         <div className="space-y-4">
+
+          {/* version marker — confirms new build is live */}
+          <div className="rounded px-3 py-2 text-xs flex items-center gap-2"
+               style={{ backgroundColor: 'rgba(4,170,109,0.1)', border: '1px solid rgba(4,170,109,0.3)', color: '#04AA6D' }}>
+            <Sparkles size={13} />
+            AI আচরণ v2 — ৩টি সেকশন সক্রিয়
+          </div>
 
           {/* ── Section 1: Text Rules CRUD ───────────────────────────────── */}
           <SectionCard icon={FileText} title="📝 Bot-কে নির্দেশনা দিন" subtitle="প্রতিটি নির্দেশনা AI-এর system prompt-এ যোগ হয় — Bot এগুলো অনুসরণ করে">
