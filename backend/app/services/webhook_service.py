@@ -3435,14 +3435,12 @@ async def _handle_text_image_request(
     Step 4: Vector search fallback.
     Returns True if handled (whether or not image was found).
     """
-    # Gemini intent + product extraction
-    intent_result = await asyncio.to_thread(img_svc.extract_product_image_intent, message_text)
-    if intent_result.get("intent") != "see_product_image":
-        return False
-
-    product_name = intent_result.get("product_name") or None
-    sku          = intent_result.get("sku") or None
-    keywords     = intent_result.get("keywords") or []
+    # Caller already confirmed intent via should_trigger_image_search keyword match.
+    # Use Gemini only to extract/translate product name — no intent gate here.
+    extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, message_text)
+    product_name = extraction.get("product_name") or None
+    sku          = extraction.get("sku") or None
+    keywords     = extraction.get("keywords") or []
 
     # Step 2: Direct DB lookup if Gemini extracted a name or SKU
     product = None

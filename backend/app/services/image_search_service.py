@@ -58,18 +58,22 @@ IMAGE_SHOW_TRIGGERS = [
     "send photo", "send image", "send pic",
 ]
 
-# ── Product image intent extraction prompt ─────────────────────────────────────
-_PRODUCT_IMAGE_INTENT_PROMPT = (
-    "Customer message: \"{message}\"\n\n"
-    "Does the customer want to SEE a product image/photo/picture?\n"
-    "Words that signal this: chobi, chobita, photo, picture, image, dekhao, dekhan, দেখাও, ছবি\n"
-    "If yes, extract the product name or SKU they mentioned (if any).\n"
-    "For product name: translate to Bengali if possible, include weight/size if mentioned "
-    "(e.g. '500 gram er modhu' → 'মধু ৫০০', 'sorisar tel' → 'সরিষার তেল').\n"
+# ── Product name extraction prompt (caller already confirmed it's an image request) ──
+_PRODUCT_NAME_EXTRACT_PROMPT = (
+    "The customer wants to see a product image. Extract the product name from their message.\n"
+    "Message: \"{message}\"\n\n"
+    "Rules:\n"
+    "- Bengali genitive suffix '-r'/'-er' means 'of X' → remove it: 'MODHUR' → 'মধু', 'teler' → 'তেল'\n"
+    "- Romanized → Bengali: modhu=মধু, tel=তেল, sorisar=সরিষা, chini=চিনি, lobon=লবণ, dal=ডাল, atta=আটা\n"
+    "- Include weight/size if mentioned: '500 gram er modhu' → product_name='মধু', keywords=['500','gram']\n"
+    "- SKU pattern (letters+digits+hyphen like FMCG-016): return as sku field\n"
+    "- If no product is mentioned, return null for both fields\n\n"
     "Return JSON only — no markdown:\n"
-    '{{"intent": "see_product_image", "product_name": "Bengali name with weight or null", "sku": "SKU or null", "keywords": ["kw1","kw2"]}}\n'
-    'If no image request: {{"intent": "other"}}'
+    '{{\"product_name\": \"Bengali name or null\", \"sku\": \"SKU or null\", \"keywords\": [\"raw word1\", \"word2\"]}}'
 )
+
+# ── Legacy intent prompt — kept for backward compat, prefer extract_product_from_image_request ──
+_PRODUCT_IMAGE_INTENT_PROMPT = _PRODUCT_NAME_EXTRACT_PROMPT
 
 # ── Per-tenant catalog cache (10-minute TTL) ──────────────────────────────────
 _catalog_cache: dict[str, tuple[float, list]] = {}
@@ -786,12 +790,13 @@ def format_catalog_match_reply(match: dict) -> str:
     return "\n".join(lines)
 
 
-def extract_product_image_intent(text: str) -> dict:
+def extract_product_from_image_request(text: str) -> dict:
     """
-    Gemini detects if the customer wants to see a product image and extracts product name/SKU.
-    Returns {"intent": "see_product_image", "product_name": ..., "sku": ...} or {"intent": "other"}.
+    Extract product name/SKU from a message already confirmed as an image request.
+    Caller has already verified intent via should_trigger_image_search — no intent check here.
+    Returns {"product_name": ..., "sku": ..., "keywords": [...]}.
     """
-    prompt = _PRODUCT_IMAGE_INTENT_PROMPT.format(message=text)
+    prompt = _PRODUCT_NAME_EXTRACT_PROMPT.format(message=text)
     try:
         response = _client.models.generate_content(
             model=settings.GEMINI_MODEL,
@@ -800,10 +805,23 @@ def extract_product_image_intent(text: str) -> dict:
         raw = (response.text or "").strip()
         raw = re.sub(r"^```(?:json)?\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw).strip()
-        return json.loads(raw)
+        result = json.loads(raw)
+        # Normalise — ensure expected keys exist
+        return {
+            "product_name": result.get("product_name") or None,
+            "sku":          result.get("sku") or None,
+            "keywords":     result.get("keywords") or [],
+        }
     except Exception as exc:
-        logger.warning(f"extract_product_image_intent failed: {exc}")
-        return {"intent": "other"}
+        logger.warning(f"extract_product_from_image_request failed: {exc}")
+        return {"product_name": None, "sku": None, "keywords": []}
+
+
+def extract_product_image_intent(text: str) -> dict:
+    """Legacy wrapper — prefer extract_product_from_image_request."""
+    result = extract_product_from_image_request(text)
+    # Always returns see_product_image since caller confirmed intent via keyword match
+    return {"intent": "see_product_image", **result}
 
 
 def _attach_primary_image(tenant_id: str, product: dict) -> dict:

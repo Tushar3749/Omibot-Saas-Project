@@ -138,35 +138,36 @@ async def test_bot_chat(
     reply = await _run_order_flow(msg, payload, state, conversation_id, tid)
 
     # 2. No active flow → check for product image request BEFORE calling Gemini
+    # Keyword detection is the definitive trigger — no second Gemini intent check
     image_url: Optional[str] = None
     if reply is None:
         ai_cfg = get_ai_config(tid)
         if ai_cfg.get("product_image_auto_send", True) and img_svc.should_trigger_image_search(msg):
-            intent = await asyncio.to_thread(img_svc.extract_product_image_intent, msg)
-            if intent.get("intent") == "see_product_image":
-                product_name = intent.get("product_name") or None
-                sku          = intent.get("sku") or None
-                extra_kw     = intent.get("keywords") or []
-                product = await asyncio.to_thread(
-                    img_svc.get_product_with_image, tid, product_name, sku, extra_kw or None
-                )
-                # Context fallback: last product the customer was discussing
-                if not product:
-                    last_pid = state.get("last_searched_product") or state.get("last_mentioned_product")
-                    if last_pid:
-                        product = await asyncio.to_thread(
-                            img_svc.get_product_with_image_by_id, tid, last_pid
-                        )
-                if product:
-                    image_url = product.get("image_url") or None
-                    name  = product["name"]
-                    price = float(product.get("mrp") or 0)
-                    if image_url:
-                        reply = f"এই হলো {name}-এর ছবি: (৳{price:,.0f})"
-                    else:
-                        reply = f"দুঃখিত, {name}-এর ছবি এখন নেই।"
+            # Extract product name/SKU from the message (Gemini for translation/parsing only)
+            extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, msg)
+            product_name = extraction.get("product_name") or None
+            sku          = extraction.get("sku") or None
+            extra_kw     = extraction.get("keywords") or []
+            product = await asyncio.to_thread(
+                img_svc.get_product_with_image, tid, product_name, sku, extra_kw or None
+            )
+            # Context fallback: last product the customer was discussing
+            if not product:
+                last_pid = state.get("last_searched_product") or state.get("last_mentioned_product")
+                if last_pid:
+                    product = await asyncio.to_thread(
+                        img_svc.get_product_with_image_by_id, tid, last_pid
+                    )
+            if product:
+                image_url = product.get("image_url") or None
+                name  = product["name"]
+                price = float(product.get("mrp") or 0)
+                if image_url:
+                    reply = f"এই হলো {name}-এর ছবি: (৳{price:,.0f})"
                 else:
-                    reply = "কোন পণ্যের ছবি দেখতে চান? পণ্যের নাম বলুন।"
+                    reply = f"দুঃখিত, {name}-এর ছবি এখন নেই।"
+            else:
+                reply = "কোন পণ্যের ছবি দেখতে চান? পণ্যের নাম বলুন।"
 
     # 3. Normal AI + check for order intent
     if reply is None:
