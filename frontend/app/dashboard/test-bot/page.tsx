@@ -17,8 +17,8 @@ interface ChatMessage {
   text:        string
   ts:          Date
   isOrderFlow?: boolean
-  imageUrl?:   string       // user-sent image preview
-  products?:   ProductMatch[] // bot product match cards
+  imageUrl?:   string       // user-sent image preview OR bot product image
+  products?:   ProductMatch[] // bot product match cards (image upload flow)
 }
 
 interface DiscountCtx {
@@ -94,6 +94,17 @@ function Bubble({ msg }: { msg: ChatMessage }) {
           >
             {msg.text}
           </div>
+        )}
+
+        {/* Bot product image (response to "chobi dao" / "dekhao") */}
+        {!isUser && msg.imageUrl && (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img
+            src={msg.imageUrl}
+            alt="product"
+            className="rounded-xl object-contain"
+            style={{ maxWidth: 220, maxHeight: 220, border: '1px solid #E0E0E0', background: '#fafafa' }}
+          />
         )}
 
         {/* Bot product match cards */}
@@ -292,7 +303,13 @@ export default function TestBotPage() {
       setOrderFlow(newFlow)
 
       const isOrderMsg = isOrderFlowMessage(res.reply) || (newFlow !== null && newFlow !== 'idle')
-      setMessages(prev => [...prev, { role: 'bot', text: res.reply, ts: new Date(), isOrderFlow: isOrderMsg }])
+      setMessages(prev => [...prev, {
+        role:        'bot',
+        text:        res.reply,
+        ts:          new Date(),
+        isOrderFlow: isOrderMsg,
+        imageUrl:    res.image_url || undefined,   // product image from "chobi dao" requests
+      }])
       if (res.discount_context) setDiscountCtx(res.discount_context as unknown as DiscountCtx)
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail

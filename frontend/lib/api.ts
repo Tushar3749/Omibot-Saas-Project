@@ -351,6 +351,7 @@ export const knowledgeAPI = {
 export const testBotAPI = {
   chat: (message: string, customer_phone?: string, quick_reply_payload?: string): Promise<{
     message: string; reply: string; model: string
+    image_url: string | null
     order_flow: string | null
     conversation_id: string
     state: Record<string, unknown>

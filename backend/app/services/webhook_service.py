@@ -3425,28 +3425,39 @@ async def _handle_text_image_request(
     sender_id: str,
     message_text: str,
     plain_token: str,
+    state: dict | None = None,
 ) -> bool:
     """
-    Customer asks to see a product image (Trigger 1-3).
+    Customer asks to see a product image.
     Step 1: Gemini extracts intent + product name/SKU.
-    Step 2: Direct DB lookup with primary image.
-    Step 3: Fallback to vector search if Gemini returns no product.
-    Returns True if handled.
+    Step 2: Direct DB lookup → primary image.
+    Step 3: Context fallback → last_searched_product from conversation state.
+    Step 4: Vector search fallback.
+    Returns True if handled (whether or not image was found).
     """
-    # Gemini intent + product extraction (run in thread — sync SDK call)
+    # Gemini intent + product extraction
     intent_result = await asyncio.to_thread(img_svc.extract_product_image_intent, message_text)
     if intent_result.get("intent") != "see_product_image":
         return False
 
     product_name = intent_result.get("product_name") or None
     sku          = intent_result.get("sku") or None
+    keywords     = intent_result.get("keywords") or []
 
-    # Direct DB lookup if Gemini found a name or SKU
+    # Step 2: Direct DB lookup if Gemini extracted a name or SKU
     product = None
     if product_name or sku:
         product = await asyncio.to_thread(
-            img_svc.get_product_with_image, tenant_id, product_name, sku
+            img_svc.get_product_with_image, tenant_id, product_name, sku, keywords or None
         )
+
+    # Step 3: Context fallback — last product the customer was discussing
+    if not product and state:
+        last_pid = state.get("last_searched_product") or state.get("last_mentioned_product")
+        if last_pid:
+            product = await asyncio.to_thread(
+                img_svc.get_product_with_image_by_id, tenant_id, last_pid
+            )
 
     if product:
         name      = product["name"]
@@ -3454,17 +3465,21 @@ async def _handle_text_image_request(
         image_url = product.get("image_url") or ""
         if image_url:
             send_image_attachment(sender_id, image_url, plain_token)
-            reply = f"{name} (৳{price:,.0f}) — এই হলো পণ্যের ছবি:"
+            reply = f"এই হলো {name}-এর ছবি: (৳{price:,.0f})"
         else:
             reply = f"দুঃখিত, {name}-এর ছবি এখন নেই।"
         save_message(conversation_id, tenant_id, "bot", reply)
         send_reply(sender_id, reply, plain_token)
         return True
 
-    # Fallback: vector search in product_images
+    # Step 4: Vector search fallback
     products = img_svc.search_by_text(tenant_id, message_text)
     if not products:
-        return False
+        # Confirmed image intent but no product found — reply so customer isn't left hanging
+        reply = "কোন পণ্যের ছবি দেখতে চান? পণ্যের নাম বলুন।"
+        save_message(conversation_id, tenant_id, "bot", reply)
+        send_reply(sender_id, reply, plain_token)
+        return True
 
     first = products[0]
     if first.get("image_url"):
@@ -3754,9 +3769,10 @@ async def process_message(
         return
 
     # ── 4. Text "দেখাও" → image search ───────────────────────────────────────
-    if ai_config.get("product_image_auto_send") and img_svc.should_trigger_image_search(message_text):
+    # Default True so feature works even before migration 031 adds the column
+    if ai_config.get("product_image_auto_send", True) and img_svc.should_trigger_image_search(message_text):
         handled = await _handle_text_image_request(
-            tenant_id, conversation_id, sender_id, message_text, plain_token
+            tenant_id, conversation_id, sender_id, message_text, plain_token, state
         )
         if handled:
             return

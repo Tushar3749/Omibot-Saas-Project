@@ -49,21 +49,26 @@ IMAGE_SHOW_TRIGGERS = [
     "দেখাও", "দেখান", "ছবি দাও", "ছবি দেখাও", "ছবি পাঠাও",
     "photo দেখাও", "picture দেখাও", "image দেখাও",
     "কেমন দেখতে", "দেখতে কেমন", "দেখতে চাই",
-    # Romanized / mixed
-    "chobi", "photo dao", "photo pathao",
+    # Romanized / mixed — "chobi" catches "chobita" as substring
+    "chobi", "chobita", "photo dao", "photo pathao", "photo daw",
     "photo dekhao", "photo dekhan", "dekhao", "dekhan",
+    "pic dao", "pic dekhao", "picture dao",
     # English
-    "show me", "show photo", "show image",
+    "show me", "show photo", "show image", "show picture",
+    "send photo", "send image", "send pic",
 ]
 
 # ── Product image intent extraction prompt ─────────────────────────────────────
 _PRODUCT_IMAGE_INTENT_PROMPT = (
     "Customer message: \"{message}\"\n\n"
-    "Does the customer want to SEE a product image/photo?\n"
-    "If yes, extract product name or SKU (if mentioned).\n"
+    "Does the customer want to SEE a product image/photo/picture?\n"
+    "Words that signal this: chobi, chobita, photo, picture, image, dekhao, dekhan, দেখাও, ছবি\n"
+    "If yes, extract the product name or SKU they mentioned (if any).\n"
+    "For product name: translate to Bengali if possible, include weight/size if mentioned "
+    "(e.g. '500 gram er modhu' → 'মধু ৫০০', 'sorisar tel' → 'সরিষার তেল').\n"
     "Return JSON only — no markdown:\n"
-    '{{"intent": "see_product_image", "product_name": "name in Bengali or null", "sku": "SKU or null"}}\n'
-    'If no: {{"intent": "other"}}'
+    '{{"intent": "see_product_image", "product_name": "Bengali name with weight or null", "sku": "SKU or null", "keywords": ["kw1","kw2"]}}\n'
+    'If no image request: {{"intent": "other"}}'
 )
 
 # ── Per-tenant catalog cache (10-minute TTL) ──────────────────────────────────
@@ -801,38 +806,8 @@ def extract_product_image_intent(text: str) -> dict:
         return {"intent": "other"}
 
 
-def get_product_with_image(
-    tenant_id: str,
-    product_name: Optional[str] = None,
-    sku: Optional[str] = None,
-) -> Optional[dict]:
-    """
-    Find a product by SKU (exact) or name (ILIKE) with its primary image URL.
-    Checks product_images.is_primary first, falls back to products.image_url.
-    """
-    if not product_name and not sku:
-        return None
-
-    query = (
-        supabase.table("products")
-        .select("product_id,name,sku,mrp,category,image_url")
-        .eq("tenant_id", tenant_id)
-        .eq("is_active", True)
-    )
-    try:
-        if sku:
-            res = query.ilike("sku", sku.strip()).limit(1).execute()
-        else:
-            res = query.ilike("name", f"%{product_name.strip()}%").limit(1).execute()
-        product = (res.data or [None])[0]
-    except Exception as exc:
-        logger.warning(f"get_product_with_image: DB error: {exc}")
-        return None
-
-    if not product:
-        return None
-
-    # Get primary image from product_images table (overrides products.image_url)
+def _attach_primary_image(tenant_id: str, product: dict) -> dict:
+    """Overlay primary image URL from product_images onto a product dict."""
     try:
         img_res = (
             supabase.table("product_images")
@@ -844,11 +819,98 @@ def get_product_with_image(
             .execute()
         )
         if img_res.data:
-            product = {**product, "image_url": img_res.data[0]["image_url"]}
+            return {**product, "image_url": img_res.data[0]["image_url"]}
     except Exception:
         pass
-
     return product
+
+
+def get_product_with_image(
+    tenant_id: str,
+    product_name: Optional[str] = None,
+    sku: Optional[str] = None,
+    keywords: Optional[list[str]] = None,
+) -> Optional[dict]:
+    """
+    Find a product by SKU (exact) or name with its primary image URL.
+    Search order:
+      1. SKU exact match (if sku provided)
+      2. Full name ILIKE substring match
+      3. Multi-keyword AND search (splits name on spaces, matches all parts)
+    Checks product_images.is_primary, falls back to products.image_url.
+    """
+    if not product_name and not sku:
+        return None
+
+    base_q = (
+        supabase.table("products")
+        .select("product_id,name,sku,mrp,category,image_url")
+        .eq("tenant_id", tenant_id)
+        .eq("is_active", True)
+    )
+
+    product = None
+    try:
+        if sku:
+            res = base_q.ilike("sku", sku.strip()).limit(1).execute()
+            product = (res.data or [None])[0]
+
+        if not product and product_name:
+            # Try exact substring match first
+            res = base_q.ilike("name", f"%{product_name.strip()}%").limit(1).execute()
+            product = (res.data or [None])[0]
+
+        if not product and product_name:
+            # Multi-keyword AND: split product_name into tokens, require each in name
+            tokens = [t for t in product_name.strip().split() if len(t) >= 2]
+            if len(tokens) > 1:
+                conditions = ",".join(f"name.ilike.%{t}%" for t in tokens[:4])
+                res = base_q.or_(conditions).limit(10).execute()
+                # Score rows: most token matches wins
+                best, best_score = None, 0
+                for row in (res.data or []):
+                    n = (row.get("name") or "").lower()
+                    score = sum(1 for t in tokens if t.lower() in n)
+                    if score > best_score:
+                        best, best_score = row, score
+                if best_score > 0:
+                    product = best
+
+        if not product and keywords:
+            # Extra keywords extracted by Gemini (e.g. from mixed-language input)
+            conditions = ",".join(f"name.ilike.%{kw}%" for kw in keywords[:4] if kw)
+            if conditions:
+                res = base_q.or_(conditions).limit(1).execute()
+                product = (res.data or [None])[0]
+
+    except Exception as exc:
+        logger.warning(f"get_product_with_image: DB error: {exc}")
+        return None
+
+    if not product:
+        return None
+
+    return _attach_primary_image(tenant_id, product)
+
+
+def get_product_with_image_by_id(tenant_id: str, product_id: str) -> Optional[dict]:
+    """Find a product by its ID with primary image — used for context-based lookup."""
+    try:
+        res = (
+            supabase.table("products")
+            .select("product_id,name,sku,mrp,category,image_url")
+            .eq("tenant_id", tenant_id)
+            .eq("product_id", product_id)
+            .eq("is_active", True)
+            .maybe_single()
+            .execute()
+        )
+        if not res.data:
+            return None
+        return _attach_primary_image(tenant_id, res.data)
+    except Exception as exc:
+        logger.warning(f"get_product_with_image_by_id: DB error: {exc}")
+        return None
 
 
 def should_trigger_image_search(text: str) -> bool:
