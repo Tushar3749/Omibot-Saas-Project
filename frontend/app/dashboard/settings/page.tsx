@@ -534,16 +534,9 @@ export default function SettingsPage() {
                 onChange={e => setConfig(c => ({ ...c, system_prompt: e.target.value }))}
                 placeholder="আপনার bot-এর instructions এখানে লিখুন..."
               />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1" style={{ color: 'var(--c-text)' }}>Greeting Message</label>
-              <p className="text-xs mb-2" style={{ color: 'var(--c-muted)' }}>নতুন conversation শুরুতে bot এই message দেবে</p>
-              <textarea
-                className="input h-20 resize-none text-sm"
-                value={String(config.greeting_message || '')}
-                onChange={e => setConfig(c => ({ ...c, greeting_message: e.target.value }))}
-                placeholder="স্বাগতম! আমি OmniBot, আপনাকে কীভাবে সাহায্য করতে পারি?"
-              />
+              <p className="text-xs mt-1.5" style={{ color: '#F57F17' }}>
+                ⚠️ AI আচরণ tab-এর নির্দেশনা ও সারাংশ এই prompt-এর উপরে priority পাবে
+              </p>
             </div>
           </SectionCard>
         </div>
@@ -585,6 +578,50 @@ export default function SettingsPage() {
               </ComingSoon>
             </div>
           </SectionCard>
+
+          {/* ── Delivery Charges (moved from স্থানীয় সেটিংস) ─────────────────── */}
+          <div className="card p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded flex items-center justify-center" style={{ backgroundColor: 'rgba(4,170,109,0.12)' }}>
+                  <MapPin size={16} style={{ color: '#04AA6D' }} />
+                </div>
+                <div>
+                  <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>জেলা-ভিত্তিক ডেলিভারি চার্জ</h2>
+                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>৬৪ জেলার জন্য ডেলিভারি চার্জ নির্ধারণ করুন</p>
+                </div>
+              </div>
+              <button onClick={handleSaveCharges} disabled={savingCharges} className="btn-primary gap-1.5 text-xs py-1.5 px-3">
+                {savingCharges ? <><span className="spinner h-3 w-3" /> সংরক্ষণ...</> : <><Save size={12} /> Save Charges</>}
+              </button>
+            </div>
+
+            <div className="relative">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--c-muted)' }} />
+              <input className="input pl-9 text-sm" placeholder="জেলার নাম খুঁজুন..." value={districtSearch} onChange={e => setDistrictSearch(e.target.value)} />
+            </div>
+
+            {chargesLoading ? (
+              <div className="flex justify-center py-8"><div className="spinner h-5 w-5" /></div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2 max-h-96 overflow-y-auto pr-1">
+                {filteredDistricts.map(c => (
+                  <div key={c.district} className="flex items-center gap-2">
+                    <span className="text-xs flex-1 truncate" style={{ color: 'var(--c-text)' }}>{c.district}</span>
+                    <div className="relative w-24 flex-shrink-0">
+                      <input
+                        type="number" min="0" step="10"
+                        className="input text-xs pr-5 py-1.5 h-auto"
+                        value={c.charge}
+                        onChange={e => setCharge(c.district, e.target.value)}
+                      />
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs pointer-events-none" style={{ color: 'var(--c-muted)' }}>৳</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -845,62 +882,14 @@ export default function SettingsPage() {
             )}
           </SectionCard>
 
-          {/* ── Personality (compact, below main 3 sections) ─────────────── */}
-          <SectionCard icon={Zap} title="⚡ Bot ব্যক্তিত্ব" subtitle="উত্তরের ধরন ও পণ্য সাজেস্ট কাস্টমাইজ করুন">
-            <div className="space-y-2.5">
-              <Toggle
-                checked={config.product_image_auto_send !== false}
-                onChange={v => setConfig(c => ({ ...c, product_image_auto_send: v }))}
-                label="Product Image Auto-Send"
-                sub="পণ্যের নাম উল্লেখ হলে image স্বয়ংক্রিয়ভাবে পাঠাবে"
-              />
-              <Toggle
-                checked={config.use_emoji !== false}
-                onChange={v => setConfig(c => ({ ...c, use_emoji: v }))}
-                label="Emoji ব্যবহার"
-                sub="Bot উত্তরে emoji যোগ করবে (✅ 😊 🎁)"
-              />
-              <Toggle
-                checked={config.suggest_products !== false}
-                onChange={v => setConfig(c => ({ ...c, suggest_products: v }))}
-                label="পণ্য সাজেস্ট"
-                sub="কথার মাঝে সংশ্লিষ্ট পণ্য suggest করবে"
-              />
-              <Toggle
-                checked={config.answer_general !== false}
-                onChange={v => setConfig(c => ({ ...c, answer_general: v }))}
-                label="সাধারণ জ্ঞান"
-                sub="পণ্যের উপকারিতা, রান্না, স্বাস্থ্য প্রশ্নে নিজের জ্ঞান থেকে উত্তর দেবে"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium mb-2" style={{ color: 'var(--c-text)' }}>উত্তরের দৈর্ঘ্য</label>
-              <div className="flex gap-2">
-                {([
-                  { value: 'short',  label: 'ছোট',      sub: '1-2 লাইন' },
-                  { value: 'medium', label: 'মাঝারি',   sub: '3-5 লাইন' },
-                  { value: 'long',   label: 'বিস্তারিত', sub: '6+ লাইন' },
-                ] as const).map(opt => {
-                  const active = (config.response_length || 'medium') === opt.value
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => setConfig(c => ({ ...c, response_length: opt.value }))}
-                      className="flex-1 py-2.5 px-3 rounded text-center transition-all"
-                      style={{
-                        border: active ? '1.5px solid #04AA6D' : '1px solid var(--c-border)',
-                        backgroundColor: active ? 'rgba(4,170,109,0.08)' : 'var(--c-surface)',
-                        color: active ? '#04AA6D' : 'var(--c-muted)',
-                      }}
-                    >
-                      <p className="text-xs font-semibold">{opt.label}</p>
-                      <p className="text-2xs mt-0.5">{opt.sub}</p>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
+          {/* ── Product Image Auto-Send ────────────────────────────────────── */}
+          <SectionCard icon={Zap} title="⚡ Product Image" subtitle="পণ্যের নাম উল্লেখ হলে image স্বয়ংক্রিয়ভাবে পাঠানো নিয়ন্ত্রণ করুন">
+            <Toggle
+              checked={config.product_image_auto_send !== false}
+              onChange={v => setConfig(c => ({ ...c, product_image_auto_send: v }))}
+              label="Product Image Auto-Send"
+              sub="পণ্যের নাম উল্লেখ হলে image স্বয়ংক্রিয়ভাবে পাঠাবে"
+            />
           </SectionCard>
         </div>
       )}
@@ -909,8 +898,288 @@ export default function SettingsPage() {
       {activeTab === 'integrations' && (
         <div className="space-y-4">
 
-          {/* SMS / OTP Settings */}
-          <SectionCard icon={MessageSquare} title="SMS OTP Settings" subtitle="Order tracking-এ customer-এর পরিচয় নিশ্চিত করুন">
+          {/* Courier Integration */}
+          <SectionCard icon={Package} title="Courier Integration" subtitle="Pathao, Steadfast ও Sundarban API credentials">
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--c-muted)' }}>Pathao</p>
+              <div className="grid grid-cols-1 gap-3">
+                <ComingSoon>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Store ID</label>
+                    <input className="input" type="number" value={String(config.pathao_store_id || '')} onChange={e => setConfig(c => ({ ...c, pathao_store_id: e.target.value }))} placeholder="Pathao Store ID" />
+                  </div>
+                </ComingSoon>
+                <div className="grid grid-cols-2 gap-3">
+                  <ComingSoon>
+                    <div>
+                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Client ID</label>
+                      <input className="input" value={String(config.pathao_client_id || '')} onChange={e => setConfig(c => ({ ...c, pathao_client_id: e.target.value }))} placeholder="Client ID" />
+                    </div>
+                  </ComingSoon>
+                  <ComingSoon>
+                    <div>
+                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Client Secret</label>
+                      <input className="input" type="password" value={String(config.pathao_client_secret || '')} onChange={e => setConfig(c => ({ ...c, pathao_client_secret: e.target.value }))} placeholder="••••••" />
+                    </div>
+                  </ComingSoon>
+                </div>
+              </div>
+
+              <div style={{ borderTop: '1px solid var(--c-border-subtle)', paddingTop: 12, marginTop: 4 }}>
+                <p className="text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: 'var(--c-muted)' }}>Steadfast</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <ComingSoon>
+                    <div>
+                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Key</label>
+                      <input className="input" value={String(config.steadfast_api_key || '')} onChange={e => setConfig(c => ({ ...c, steadfast_api_key: e.target.value }))} placeholder="API Key" />
+                    </div>
+                  </ComingSoon>
+                  <ComingSoon>
+                    <div>
+                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Secret</label>
+                      <input className="input" type="password" value={String(config.steadfast_api_secret || '')} onChange={e => setConfig(c => ({ ...c, steadfast_api_secret: e.target.value }))} placeholder="••••••" />
+                    </div>
+                  </ComingSoon>
+                </div>
+              </div>
+
+              <div style={{ borderTop: '1px solid var(--c-border-subtle)', paddingTop: 12, marginTop: 4 }}>
+                <p className="text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: 'var(--c-muted)' }}>Sundarban</p>
+                <ComingSoon>
+                  <Toggle
+                    checked={Boolean(config.sundarban_enabled)}
+                    onChange={v => setConfig(c => ({ ...c, sundarban_enabled: v }))}
+                    label="সুন্দরবন Courier"
+                    sub="সুন্দরবন Courier সার্ভিস ব্যবহার করুন"
+                  />
+                </ComingSoon>
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+      )}
+
+      {/* ══ TAB: স্থানীয় সেটিংস ════════════════════════════════════════════ */}
+      {activeTab === 'local' && (
+        <div className="space-y-4">
+          <SectionCard icon={MapPin} title="স্থানীয় সেটিংস" subtitle="হরতাল, শুক্রবার, রমজান ও ঈদ কনফিগারেশন">
+            <div className="space-y-3">
+              {/* Hartal */}
+              <Toggle
+                checked={Boolean(config.hartal_mode)}
+                onChange={v => setConfig(c => ({ ...c, hartal_mode: v }))}
+                label="হরতাল/ধর্মঘট Mode"
+                sub="চালু করলে AI ডেলিভারি বন্ধের message দেবে — বার্তা টেমপ্লেট tab-এ সেট করুন"
+              />
+
+              {/* Friday */}
+              <Toggle
+                checked={Boolean(config.friday_offline_enabled)}
+                onChange={v => setConfig(c => ({ ...c, friday_offline_enabled: v }))}
+                label="শুক্রবার Offline"
+                sub={`শুক্রবার ${String(config.friday_offline_start || '13:00')}–${String(config.friday_offline_end || '15:00')} সময় bot অফলাইন থাকবে`}
+              />
+              {config.friday_offline_enabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শুরু (HH:MM)</label>
+                    <input
+                      className="input" type="time"
+                      value={String(config.friday_offline_start || '13:00')}
+                      onChange={e => setConfig(c => ({ ...c, friday_offline_start: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শেষ (HH:MM)</label>
+                    <input
+                      className="input" type="time"
+                      value={String(config.friday_offline_end || '15:00')}
+                      onChange={e => setConfig(c => ({ ...c, friday_offline_end: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Ramadan */}
+              <Toggle
+                checked={Boolean(config.ramadan_mode)}
+                onChange={v => setConfig(c => ({ ...c, ramadan_mode: v }))}
+                label="রমজান Mode"
+                sub="রমজান মাসে বিশেষ greeting ও নির্ধারিত সময়ে service"
+              />
+              {config.ramadan_mode && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শুরু (HH:MM)</label>
+                    <input className="input" type="time" value={String(config.ramadan_start_time || '09:00')} onChange={e => setConfig(c => ({ ...c, ramadan_start_time: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শেষ (HH:MM)</label>
+                    <input className="input" type="time" value={String(config.ramadan_end_time || '17:00')} onChange={e => setConfig(c => ({ ...c, ramadan_end_time: e.target.value }))} />
+                  </div>
+                </div>
+              )}
+
+              {/* Eid */}
+              <Toggle
+                checked={Boolean(config.eid_greeting_enabled)}
+                onChange={v => setConfig(c => ({ ...c, eid_greeting_enabled: v }))}
+                label="ঈদ Greeting"
+                sub="ঈদের দিনে স্বয়ংক্রিয় শুভেচ্ছা বার্তা"
+              />
+              {config.eid_greeting_enabled && (
+                <div>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>ঈদের তারিখ</label>
+                  <input className="input" type="date" value={String(config.eid_greeting_date || '')} onChange={e => setConfig(c => ({ ...c, eid_greeting_date: e.target.value }))} />
+                  <p className="text-xs mt-1" style={{ color: 'var(--c-muted)' }}>ঈদের বার্তা টেমপ্লেট tab-এ সেট করুন</p>
+                </div>
+              )}
+            </div>
+          </SectionCard>
+
+        </div>
+      )}
+
+      {/* ══ TAB: লয়ালটি ══════════════════════════════════════════════════════ */}
+      {activeTab === 'loyalty' && (
+        <FullTabComingSoon feature="Loyalty Program">
+          <div className="space-y-4">
+            <SectionCard icon={Heart} title="Loyalty Points" subtitle="গ্রাহকদের কেনাকাটায় পয়েন্ট দিন">
+              <Toggle checked={false} onChange={() => {}} label="Loyalty Points চালু করুন" sub="প্রতিটি কেনাকাটায় পয়েন্ট অর্জন করতে পারবে" />
+              <div className="grid grid-cols-2 gap-4">
+                <NumField label="পয়েন্ট / ১ টাকা" value="1" onChange={() => {}} suffix="pts" />
+                <NumField label="১ পয়েন্ট = কত টাকা" value="1" onChange={() => {}} suffix="৳" />
+                <NumField label="Minimum Redeem Points" value="100" onChange={() => {}} suffix="pts" />
+              </div>
+            </SectionCard>
+            <SectionCard icon={Heart} title="Referral Program" subtitle="রেফারেল করলে উভয়পক্ষ পুরস্কার পাবে">
+              <Toggle checked={false} onChange={() => {}} label="Referral Program চালু করুন" sub="বন্ধুকে রেফার করলে ছাড় পাবে" />
+              <div className="grid grid-cols-2 gap-4">
+                <NumField label="Referee Discount (%)" value="10" onChange={() => {}} suffix="%" />
+                <NumField label="Referrer Reward (%)" value="5" onChange={() => {}} suffix="%" />
+              </div>
+            </SectionCard>
+          </div>
+        </FullTabComingSoon>
+      )}
+
+      {/* ══ TAB: টেমপ্লেট ════════════════════════════════════════════════════ */}
+      {activeTab === 'templates' && (
+        <div className="space-y-4">
+
+          {/* ── 🎉 অভিবাদন ──────────────────────────────────────────────────── */}
+          <SectionCard icon={MessageSquare} title="🎉 অভিবাদন" subtitle="নতুন গ্রাহক বা বিশেষ উপলক্ষে স্বাগত বার্তা">
+            <div className="grid grid-cols-1 gap-4">
+              <TemplateField
+                label="👋 Greeting Message"
+                value={String(config.greeting_message || '')}
+                onChange={v => setConfig(c => ({ ...c, greeting_message: v }))}
+                placeholder="স্বাগতম! আমি OmniBot, আপনাকে কীভাবে সাহায্য করতে পারি?"
+              />
+              <TemplateField
+                label="🌙 ঈদ Greeting Message"
+                value={String(config.eid_greeting_message || '')}
+                onChange={v => setConfig(c => ({ ...c, eid_greeting_message: v }))}
+                placeholder="ঈদ মোবারক! 🌙 আমাদের স্টোরে স্বাগতম।"
+              />
+            </div>
+          </SectionCard>
+
+          {/* ── ⚠️ সমস্যা ────────────────────────────────────────────────────── */}
+          <SectionCard icon={AlertTriangle} title="⚠️ সমস্যা" subtitle="সমস্যা বা বাধার সময় গ্রাহককে জানানোর বার্তা">
+            <div className="grid grid-cols-1 gap-4">
+              <TemplateField
+                label="🚫 হরতাল Message"
+                value={String(config.hartal_message || '')}
+                onChange={v => setConfig(c => ({ ...c, hartal_message: v }))}
+                placeholder="আজ হরতাল আছে। ডেলিভারি সাময়িক বন্ধ। পরে অর্ডার করুন।"
+              />
+              <ComingSoon>
+                <TemplateField label="❌ Out of Stock Reply" value={String(config.tpl_out_of_stock || '')} onChange={() => {}} placeholder="দুঃখিত, {{product_name}} বর্তমানে stock নেই।" />
+              </ComingSoon>
+              <ComingSoon>
+                <TemplateField label="📫 Wrong Item Complaint" value={String(config.tpl_wrong_item || '')} onChange={() => {}} placeholder="আমরা সমস্যাটি সমাধান করব। ছবি পাঠান।" />
+              </ComingSoon>
+            </div>
+          </SectionCard>
+
+          {/* ── 🚚 ডেলিভারি ──────────────────────────────────────────────────── */}
+          <ComingSoon>
+            <SectionCard icon={MessageSquare} title="🚚 ডেলিভারি" subtitle="শিপিং ও ডেলিভারি আপডেট বার্তা">
+              <div className="grid grid-cols-1 gap-4">
+                <TemplateField label="📦 Shipping Confirmation" value={String(config.tpl_shipping_confirm || '')} onChange={() => {}} placeholder="আপনার অর্ডার #{{order_id}} শিপ করা হয়েছে। Tracking: {{tracking}}..." />
+                <TemplateField label="⏳ Delay Notification" value={String(config.tpl_delay_notify || '')} onChange={() => {}} placeholder="দুঃখিত, আপনার অর্ডার {{delay_days}} দিন দেরি হবে কারণ..." />
+              </div>
+            </SectionCard>
+          </ComingSoon>
+
+          {/* ── 📣 প্রচার ─────────────────────────────────────────────────────── */}
+          <ComingSoon>
+            <SectionCard icon={MessageSquare} title="📣 প্রচার" subtitle="রিভিউ ও রেফারেল প্রচারণার বার্তা">
+              <div className="grid grid-cols-1 gap-4">
+                <TemplateField label="⭐ Review Request" value={String(config.tpl_review_request || '')} onChange={() => {}} placeholder="আপনার অর্ডার পেয়েছেন? একটু review দিলে ভালো হতো! 😊" />
+                <TemplateField label="🎁 Referral Program" value={String(config.tpl_referral || '')} onChange={() => {}} placeholder="বন্ধুকে refer করুন, আপনি পাবেন {{discount}}% ছাড়!" />
+              </div>
+            </SectionCard>
+          </ComingSoon>
+
+        </div>
+      )}
+
+      {/* ══ TAB: সিকিউরিটি ═══════════════════════════════════════════════════ */}
+      {activeTab === 'security' && (
+        <div className="space-y-4">
+          <SectionCard icon={Shield} title="সিকিউরিটি" subtitle="Bot-এর নিরাপত্তা নিয়ন্ত্রণ করুন">
+            <div className="flex items-center justify-between p-3.5 rounded"
+                 style={{ backgroundColor: 'rgba(4,170,109,0.08)', border: '1px solid rgba(4,170,109,0.25)' }}>
+              <div>
+                <p className="text-sm font-medium" style={{ color: 'var(--c-text)' }}>Prompt Injection Protection</p>
+                <p className="text-xs mt-0.5" style={{ color: '#2E7D32' }}>AI-কে manipulate করা থেকে সুরক্ষিত রাখে</p>
+              </div>
+              <button
+                type="button" role="switch"
+                aria-checked={config.prompt_injection_guard !== false}
+                onClick={() => setConfig(c => ({ ...c, prompt_injection_guard: !c.prompt_injection_guard }))}
+                className={`toggle-track ${config.prompt_injection_guard !== false ? 'toggle-track-on' : ''}`}
+              >
+                <span className={`toggle-thumb ${config.prompt_injection_guard !== false ? 'toggle-thumb-on' : ''}`} />
+              </button>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-2 mb-0.5">
+                <AlertTriangle size={13} style={{ color: '#F57F17' }} />
+                <p className="text-sm font-medium" style={{ color: 'var(--c-text)' }}>Escalation Keywords</p>
+              </div>
+              <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>এই শব্দ দেখলে AI আপনাকে alert করবে ও human-এর কাছে পাঠাবে।</p>
+              <TagList
+                tags={config.escalation_keywords as string[] || []}
+                onRemove={removeKeyword}
+                inputValue={newKW}
+                onInputChange={setNewKW}
+                onAdd={addKeyword}
+                placeholder="keyword লিখুন (Enter চাপুন)..."
+                tagStyle={{ backgroundColor: '#FFF8E1', color: '#F57F17', borderColor: '#FFE082' }}
+              />
+            </div>
+
+            <div>
+              <p className="text-sm font-medium mb-0.5" style={{ color: 'var(--c-text)' }}>Forbidden Topics</p>
+              <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>এই বিষয়ে AI কথা বলবে না।</p>
+              <TagList
+                tags={config.forbidden_topics as string[] || []}
+                onRemove={removeForbidden}
+                inputValue={newFT}
+                onInputChange={setNewFT}
+                onAdd={addForbidden}
+                placeholder="topic লিখুন (Enter চাপুন)..."
+                tagStyle={{ backgroundColor: '#FFEBEE', color: '#C62828', borderColor: '#EF9A9A' }}
+              />
+            </div>
+          </SectionCard>
+
+          {/* ── SMS OTP Settings (moved from ইন্টিগ্রেশন) ───────────────────── */}
+          <SectionCard icon={MessageSquare} title="SMS OTP — গ্রাহক যাচাই" subtitle="Order tracking-এ customer-এর পরিচয় নিশ্চিত করুন">
             <Toggle
               checked={Boolean(config.sms_enabled)}
               onChange={v => setConfig(c => ({ ...c, sms_enabled: v }))}
@@ -1010,299 +1279,11 @@ export default function SettingsPage() {
               </div>
             </>)}
           </SectionCard>
-
-          {/* Courier Integration */}
-          <SectionCard icon={Package} title="Courier Integration" subtitle="Pathao, Steadfast ও Sundarban API credentials">
-            <div className="space-y-3">
-              <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--c-muted)' }}>Pathao</p>
-              <div className="grid grid-cols-1 gap-3">
-                <ComingSoon>
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Store ID</label>
-                    <input className="input" type="number" value={String(config.pathao_store_id || '')} onChange={e => setConfig(c => ({ ...c, pathao_store_id: e.target.value }))} placeholder="Pathao Store ID" />
-                  </div>
-                </ComingSoon>
-                <div className="grid grid-cols-2 gap-3">
-                  <ComingSoon>
-                    <div>
-                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Client ID</label>
-                      <input className="input" value={String(config.pathao_client_id || '')} onChange={e => setConfig(c => ({ ...c, pathao_client_id: e.target.value }))} placeholder="Client ID" />
-                    </div>
-                  </ComingSoon>
-                  <ComingSoon>
-                    <div>
-                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Client Secret</label>
-                      <input className="input" type="password" value={String(config.pathao_client_secret || '')} onChange={e => setConfig(c => ({ ...c, pathao_client_secret: e.target.value }))} placeholder="••••••" />
-                    </div>
-                  </ComingSoon>
-                </div>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--c-border-subtle)', paddingTop: 12, marginTop: 4 }}>
-                <p className="text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: 'var(--c-muted)' }}>Steadfast</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <ComingSoon>
-                    <div>
-                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Key</label>
-                      <input className="input" value={String(config.steadfast_api_key || '')} onChange={e => setConfig(c => ({ ...c, steadfast_api_key: e.target.value }))} placeholder="API Key" />
-                    </div>
-                  </ComingSoon>
-                  <ComingSoon>
-                    <div>
-                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Secret</label>
-                      <input className="input" type="password" value={String(config.steadfast_api_secret || '')} onChange={e => setConfig(c => ({ ...c, steadfast_api_secret: e.target.value }))} placeholder="••••••" />
-                    </div>
-                  </ComingSoon>
-                </div>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--c-border-subtle)', paddingTop: 12, marginTop: 4 }}>
-                <p className="text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: 'var(--c-muted)' }}>Sundarban</p>
-                <ComingSoon>
-                  <Toggle
-                    checked={Boolean(config.sundarban_enabled)}
-                    onChange={v => setConfig(c => ({ ...c, sundarban_enabled: v }))}
-                    label="সুন্দরবন Courier"
-                    sub="সুন্দরবন Courier সার্ভিস ব্যবহার করুন"
-                  />
-                </ComingSoon>
-              </div>
-            </div>
-          </SectionCard>
         </div>
       )}
 
-      {/* ══ TAB: স্থানীয় সেটিংস ════════════════════════════════════════════ */}
-      {activeTab === 'local' && (
-        <div className="space-y-4">
-          <SectionCard icon={MapPin} title="স্থানীয় সেটিংস" subtitle="হরতাল, শুক্রবার, রমজান ও ঈদ কনফিগারেশন">
-            <div className="space-y-3">
-              {/* Hartal */}
-              <Toggle
-                checked={Boolean(config.hartal_mode)}
-                onChange={v => setConfig(c => ({ ...c, hartal_mode: v }))}
-                label="হরতাল/ধর্মঘট Mode"
-                sub="চালু করলে AI ডেলিভারি বন্ধের message দেবে"
-              />
-              {config.hartal_mode && (
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>হরতাল Message</label>
-                  <textarea
-                    className="input h-16 resize-none text-sm"
-                    value={String(config.hartal_message || '')}
-                    onChange={e => setConfig(c => ({ ...c, hartal_message: e.target.value }))}
-                  />
-                </div>
-              )}
-
-              {/* Friday */}
-              <Toggle
-                checked={Boolean(config.friday_offline_enabled)}
-                onChange={v => setConfig(c => ({ ...c, friday_offline_enabled: v }))}
-                label="শুক্রবার Offline"
-                sub={`শুক্রবার ${String(config.friday_offline_start || '13:00')}–${String(config.friday_offline_end || '15:00')} সময় bot অফলাইন থাকবে`}
-              />
-              {config.friday_offline_enabled && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শুরু (HH:MM)</label>
-                    <input
-                      className="input" type="time"
-                      value={String(config.friday_offline_start || '13:00')}
-                      onChange={e => setConfig(c => ({ ...c, friday_offline_start: e.target.value }))}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শেষ (HH:MM)</label>
-                    <input
-                      className="input" type="time"
-                      value={String(config.friday_offline_end || '15:00')}
-                      onChange={e => setConfig(c => ({ ...c, friday_offline_end: e.target.value }))}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Ramadan */}
-              <Toggle
-                checked={Boolean(config.ramadan_mode)}
-                onChange={v => setConfig(c => ({ ...c, ramadan_mode: v }))}
-                label="রমজান Mode"
-                sub="রমজান মাসে বিশেষ greeting ও নির্ধারিত সময়ে service"
-              />
-              {config.ramadan_mode && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শুরু (HH:MM)</label>
-                    <input className="input" type="time" value={String(config.ramadan_start_time || '09:00')} onChange={e => setConfig(c => ({ ...c, ramadan_start_time: e.target.value }))} />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>শেষ (HH:MM)</label>
-                    <input className="input" type="time" value={String(config.ramadan_end_time || '17:00')} onChange={e => setConfig(c => ({ ...c, ramadan_end_time: e.target.value }))} />
-                  </div>
-                </div>
-              )}
-
-              {/* Eid */}
-              <Toggle
-                checked={Boolean(config.eid_greeting_enabled)}
-                onChange={v => setConfig(c => ({ ...c, eid_greeting_enabled: v }))}
-                label="ঈদ Greeting"
-                sub="ঈদের দিনে স্বয়ংক্রিয় শুভেচ্ছা বার্তা"
-              />
-              {config.eid_greeting_enabled && (
-                <div className="space-y-2">
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>ঈদের তারিখ</label>
-                    <input className="input" type="date" value={String(config.eid_greeting_date || '')} onChange={e => setConfig(c => ({ ...c, eid_greeting_date: e.target.value }))} />
-                  </div>
-                  <TemplateField label="ঈদ Message" value={String(config.eid_greeting_message || '')} onChange={v => setConfig(c => ({ ...c, eid_greeting_message: v }))} placeholder="ঈদ মোবারক! 🌙" />
-                </div>
-              )}
-            </div>
-          </SectionCard>
-
-          {/* District delivery charges */}
-          <div className="card p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded flex items-center justify-center" style={{ backgroundColor: 'rgba(4,170,109,0.12)' }}>
-                  <MapPin size={16} style={{ color: '#04AA6D' }} />
-                </div>
-                <div>
-                  <h2 className="font-semibold text-sm" style={{ color: 'var(--c-text)' }}>জেলা-ভিত্তিক ডেলিভারি চার্জ</h2>
-                  <p className="text-xs" style={{ color: 'var(--c-muted)' }}>৬৪ জেলার জন্য ডেলিভারি চার্জ নির্ধারণ করুন</p>
-                </div>
-              </div>
-              <button onClick={handleSaveCharges} disabled={savingCharges} className="btn-primary gap-1.5 text-xs py-1.5 px-3">
-                {savingCharges ? <><span className="spinner h-3 w-3" /> সংরক্ষণ...</> : <><Save size={12} /> Save Charges</>}
-              </button>
-            </div>
-
-            <div className="relative">
-              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--c-muted)' }} />
-              <input className="input pl-9 text-sm" placeholder="জেলার নাম খুঁজুন..." value={districtSearch} onChange={e => setDistrictSearch(e.target.value)} />
-            </div>
-
-            {chargesLoading ? (
-              <div className="flex justify-center py-8"><div className="spinner h-5 w-5" /></div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2 max-h-96 overflow-y-auto pr-1">
-                {filteredDistricts.map(c => (
-                  <div key={c.district} className="flex items-center gap-2">
-                    <span className="text-xs flex-1 truncate" style={{ color: 'var(--c-text)' }}>{c.district}</span>
-                    <div className="relative w-24 flex-shrink-0">
-                      <input
-                        type="number" min="0" step="10"
-                        className="input text-xs pr-5 py-1.5 h-auto"
-                        value={c.charge}
-                        onChange={e => setCharge(c.district, e.target.value)}
-                      />
-                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs pointer-events-none" style={{ color: 'var(--c-muted)' }}>৳</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ══ TAB: লয়ালটি ══════════════════════════════════════════════════════ */}
-      {activeTab === 'loyalty' && (
-        <FullTabComingSoon feature="Loyalty Program">
-          <div className="space-y-4">
-            <SectionCard icon={Heart} title="Loyalty Points" subtitle="গ্রাহকদের কেনাকাটায় পয়েন্ট দিন">
-              <Toggle checked={false} onChange={() => {}} label="Loyalty Points চালু করুন" sub="প্রতিটি কেনাকাটায় পয়েন্ট অর্জন করতে পারবে" />
-              <div className="grid grid-cols-2 gap-4">
-                <NumField label="পয়েন্ট / ১ টাকা" value="1" onChange={() => {}} suffix="pts" />
-                <NumField label="১ পয়েন্ট = কত টাকা" value="1" onChange={() => {}} suffix="৳" />
-                <NumField label="Minimum Redeem Points" value="100" onChange={() => {}} suffix="pts" />
-              </div>
-            </SectionCard>
-            <SectionCard icon={Heart} title="Referral Program" subtitle="রেফারেল করলে উভয়পক্ষ পুরস্কার পাবে">
-              <Toggle checked={false} onChange={() => {}} label="Referral Program চালু করুন" sub="বন্ধুকে রেফার করলে ছাড় পাবে" />
-              <div className="grid grid-cols-2 gap-4">
-                <NumField label="Referee Discount (%)" value="10" onChange={() => {}} suffix="%" />
-                <NumField label="Referrer Reward (%)" value="5" onChange={() => {}} suffix="%" />
-              </div>
-            </SectionCard>
-          </div>
-        </FullTabComingSoon>
-      )}
-
-      {/* ══ TAB: টেমপ্লেট ════════════════════════════════════════════════════ */}
-      {activeTab === 'templates' && (
-        <FullTabComingSoon feature="Message Templates">
-          <div className="space-y-4">
-            <SectionCard icon={MessageSquare} title="Message Templates" subtitle="AI এই template দিয়ে গ্রাহকদের message পাঠাবে">
-              <div className="grid grid-cols-1 gap-4">
-                <TemplateField label="📦 Shipping Confirmation" value={String(config.tpl_shipping_confirm || '')} onChange={v => setConfig(c => ({ ...c, tpl_shipping_confirm: v }))} placeholder="আপনার অর্ডার #{{order_id}} শিপ করা হয়েছে। Tracking: {{tracking}}..." />
-                <TemplateField label="⏳ Delay Notification" value={String(config.tpl_delay_notify || '')} onChange={v => setConfig(c => ({ ...c, tpl_delay_notify: v }))} placeholder="দুঃখিত, আপনার অর্ডার {{delay_days}} দিন দেরি হবে কারণ..." />
-                <TemplateField label="❌ Out of Stock Reply" value={String(config.tpl_out_of_stock || '')} onChange={v => setConfig(c => ({ ...c, tpl_out_of_stock: v }))} placeholder="দুঃখিত, {{product_name}} বর্তমানে stock নেই।" />
-                <TemplateField label="📫 Wrong Item Complaint" value={String(config.tpl_wrong_item || '')} onChange={v => setConfig(c => ({ ...c, tpl_wrong_item: v }))} placeholder="আমরা সমস্যাটি সমাধান করব। ছবি পাঠান।" />
-                <TemplateField label="⭐ Review Request" value={String(config.tpl_review_request || '')} onChange={v => setConfig(c => ({ ...c, tpl_review_request: v }))} placeholder="আপনার অর্ডার পেয়েছেন? একটু review দিলে ভালো হতো! 😊" />
-                <TemplateField label="🎁 Referral Program" value={String(config.tpl_referral || '')} onChange={v => setConfig(c => ({ ...c, tpl_referral: v }))} placeholder="বন্ধুকে refer করুন, আপনি পাবেন {{discount}}% ছাড়!" />
-              </div>
-            </SectionCard>
-          </div>
-        </FullTabComingSoon>
-      )}
-
-      {/* ══ TAB: সিকিউরিটি ═══════════════════════════════════════════════════ */}
-      {activeTab === 'security' && (
-        <SectionCard icon={Shield} title="সিকিউরিটি" subtitle="Bot-এর নিরাপত্তা নিয়ন্ত্রণ করুন">
-          <div className="flex items-center justify-between p-3.5 rounded"
-               style={{ backgroundColor: 'rgba(4,170,109,0.08)', border: '1px solid rgba(4,170,109,0.25)' }}>
-            <div>
-              <p className="text-sm font-medium" style={{ color: 'var(--c-text)' }}>Prompt Injection Protection</p>
-              <p className="text-xs mt-0.5" style={{ color: '#2E7D32' }}>AI-কে manipulate করা থেকে সুরক্ষিত রাখে</p>
-            </div>
-            <button
-              type="button" role="switch"
-              aria-checked={config.prompt_injection_guard !== false}
-              onClick={() => setConfig(c => ({ ...c, prompt_injection_guard: !c.prompt_injection_guard }))}
-              className={`toggle-track ${config.prompt_injection_guard !== false ? 'toggle-track-on' : ''}`}
-            >
-              <span className={`toggle-thumb ${config.prompt_injection_guard !== false ? 'toggle-thumb-on' : ''}`} />
-            </button>
-          </div>
-
-          <div>
-            <div className="flex items-center gap-2 mb-0.5">
-              <AlertTriangle size={13} style={{ color: '#F57F17' }} />
-              <p className="text-sm font-medium" style={{ color: 'var(--c-text)' }}>Escalation Keywords</p>
-            </div>
-            <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>এই শব্দ দেখলে AI আপনাকে alert করবে ও human-এর কাছে পাঠাবে।</p>
-            <TagList
-              tags={config.escalation_keywords as string[] || []}
-              onRemove={removeKeyword}
-              inputValue={newKW}
-              onInputChange={setNewKW}
-              onAdd={addKeyword}
-              placeholder="keyword লিখুন (Enter চাপুন)..."
-              tagStyle={{ backgroundColor: '#FFF8E1', color: '#F57F17', borderColor: '#FFE082' }}
-            />
-          </div>
-
-          <div>
-            <p className="text-sm font-medium mb-0.5" style={{ color: 'var(--c-text)' }}>Forbidden Topics</p>
-            <p className="text-xs mb-3" style={{ color: 'var(--c-muted)' }}>এই বিষয়ে AI কথা বলবে না।</p>
-            <TagList
-              tags={config.forbidden_topics as string[] || []}
-              onRemove={removeForbidden}
-              inputValue={newFT}
-              onInputChange={setNewFT}
-              onAdd={addForbidden}
-              placeholder="topic লিখুন (Enter চাপুন)..."
-              tagStyle={{ backgroundColor: '#FFEBEE', color: '#C62828', borderColor: '#EF9A9A' }}
-            />
-          </div>
-        </SectionCard>
-      )}
-
-      {/* Save button (bottom) — not shown for local (own save), loyalty/templates (coming soon) */}
-      {activeTab !== 'local' && activeTab !== 'loyalty' && activeTab !== 'templates' && (
+      {/* Save button (bottom) — not shown for local (own save) or loyalty (all coming soon) */}
+      {activeTab !== 'local' && activeTab !== 'loyalty' && (
         <button onClick={handleSave} disabled={saving} className="btn-primary px-8 py-2.5 gap-2">
           {saving ? <><span className="spinner h-4 w-4" /> সংরক্ষণ হচ্ছে...</> : <><Save size={15} /> পরিবর্তন সংরক্ষণ করুন</>}
         </button>
