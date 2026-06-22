@@ -45,8 +45,8 @@ _CUSTOMER_IMAGE_PROMPT = (
 
 # ── Text-to-image trigger keywords ───────────────────────────────────────────
 IMAGE_SHOW_TRIGGERS = [
-    # Bengali
-    "দেখাও", "দেখান", "ছবি দাও", "ছবি দেখাও", "ছবি পাঠাও",
+    # Bengali — standalone "ছবি" catches "মধুর ছবি", "পণ্যের ছবি" etc.
+    "ছবি", "দেখাও", "দেখান", "ছবি দাও", "ছবি দেখাও", "ছবি পাঠাও",
     "photo দেখাও", "picture দেখাও", "image দেখাও",
     "কেমন দেখতে", "দেখতে কেমন", "দেখতে চাই",
     # Romanized / mixed — "chobi" catches "chobita" as substring

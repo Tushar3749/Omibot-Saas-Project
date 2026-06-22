@@ -143,30 +143,34 @@ async def test_bot_chat(
     if reply is None:
         ai_cfg = get_ai_config(tid)
         if ai_cfg.get("product_image_auto_send", True) and img_svc.should_trigger_image_search(msg):
-            # Extract product name/SKU from the message (Gemini for translation/parsing only)
-            extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, msg)
-            product_name = extraction.get("product_name") or None
-            sku          = extraction.get("sku") or None
-            extra_kw     = extraction.get("keywords") or []
-            product = await asyncio.to_thread(
-                img_svc.get_product_with_image, tid, product_name, sku, extra_kw or None
-            )
-            # Context fallback: last product the customer was discussing
-            if not product:
-                last_pid = state.get("last_searched_product") or state.get("last_mentioned_product")
-                if last_pid:
-                    product = await asyncio.to_thread(
-                        img_svc.get_product_with_image_by_id, tid, last_pid
-                    )
-            if product:
-                image_url = product.get("image_url") or None
-                name  = product["name"]
-                price = float(product.get("mrp") or 0)
-                if image_url:
-                    reply = f"এই হলো {name}-এর ছবি: (৳{price:,.0f})"
+            try:
+                # Extract product name/SKU from the message (Gemini for translation/parsing only)
+                extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, msg)
+                product_name = extraction.get("product_name") or None
+                sku          = extraction.get("sku") or None
+                extra_kw     = extraction.get("keywords") or []
+                product = await asyncio.to_thread(
+                    img_svc.get_product_with_image, tid, product_name, sku, extra_kw or None
+                )
+                # Context fallback: last product the customer was discussing
+                if not product:
+                    last_pid = state.get("last_searched_product") or state.get("last_mentioned_product")
+                    if last_pid:
+                        product = await asyncio.to_thread(
+                            img_svc.get_product_with_image_by_id, tid, last_pid
+                        )
+                if product:
+                    image_url = product.get("image_url") or None
+                    name  = product["name"]
+                    price = float(product.get("mrp") or 0)
+                    if image_url:
+                        reply = f"এই হলো {name}-এর ছবি: (৳{price:,.0f})"
+                    else:
+                        reply = f"দুঃখিত, {name}-এর ছবি এখন নেই।"
                 else:
-                    reply = f"দুঃখিত, {name}-এর ছবি এখন নেই।"
-            else:
+                    reply = "কোন পণ্যের ছবি দেখতে চান? পণ্যের নাম বলুন।"
+            except Exception as _img_exc:
+                logger.warning(f"test_bot image handler error: {_img_exc}", exc_info=True)
                 reply = "কোন পণ্যের ছবি দেখতে চান? পণ্যের নাম বলুন।"
 
     # 3. Normal AI + check for order intent
