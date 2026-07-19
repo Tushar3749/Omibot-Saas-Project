@@ -32,8 +32,8 @@ export default function RegisterPage() {
     try {
       const data = await authAPI.register(form)
       saveAuth(data.access_token, data.tenant)
-      toast.success('স্বাগতম! Setup wizard শুরু হচ্ছে...')
-      router.push('/onboarding')
+      toast.success(`স্বাগতম, ${data.tenant.business_name}! Dashboard-এ যাচ্ছি...`)
+      router.push('/dashboard')
     } catch (err: unknown) {
       toast.error((err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Registration ব্যর্থ হয়েছে')
     } finally {

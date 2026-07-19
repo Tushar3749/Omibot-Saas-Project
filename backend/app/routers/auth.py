@@ -92,26 +92,34 @@ async def register(body: RegisterRequest):
 
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest):
-    result = (
-        supabase.table("tenants")
-        .select("*")
-        .eq("email", body.email)
-        .maybe_single()
-        .execute()
-    )
-    # safe for both supabase-py <2.7 (result=None) and ≥2.7 (result.data=None)
-    tenant = result.data if (result is not None and hasattr(result, 'data')) else result
-    if tenant is None:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not _verify_password(body.password, tenant["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    try:
+        result = (
+            supabase.table("tenants")
+            .select("*")
+            .eq("email", body.email)
+            .maybe_single()
+            .execute()
+        )
+        # safe for both supabase-py <2.7 (result=None) and ≥2.7 (result.data=None)
+        tenant = result.data if (result is not None and hasattr(result, 'data')) else result
+        if tenant is None:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        if not _verify_password(body.password, tenant["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not tenant.get("is_active", True):
-        raise HTTPException(status_code=403, detail="Account suspended")
+        if not tenant.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Account suspended")
 
-    token = create_access_token(tenant["tenant_id"], tenant["email"])
-    tenant.pop("password_hash", None)
-    return {"access_token": token, "token_type": "bearer", "tenant": tenant}
+        token = create_access_token(tenant["tenant_id"], tenant["email"])
+        tenant.pop("password_hash", None)
+        return {"access_token": token, "token_type": "bearer", "tenant": tenant}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error("LOGIN FAILED for %s: %s", body.email, str(e))
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="লগইন সমস্যা হয়েছে। পরে আবার চেষ্টা করুন।")
 
 
 @router.get("/me")

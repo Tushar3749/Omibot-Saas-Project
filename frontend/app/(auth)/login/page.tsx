@@ -26,7 +26,7 @@ export default function LoginPage() {
       const data = await authAPI.login(form)
       saveAuth(data.access_token, data.tenant)
       toast.success(`স্বাগতম, ${data.tenant.business_name}!`)
-      router.push(data.tenant.onboarding_done ? '/dashboard' : '/onboarding')
+      router.push('/dashboard')
     } catch (err: unknown) {
       toast.error((err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'লগইন ব্যর্থ হয়েছে')
     } finally {
