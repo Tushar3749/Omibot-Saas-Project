@@ -125,7 +125,11 @@ async def get_ai_config(tenant: dict = Depends(get_current_tenant_auth_only)):
         .execute()
     )
     # maybe_single() returns None in result.data when no row exists
-    return result.data or {}
+    cfg = dict(result.data or {})
+    # Gemini key has its own dedicated status/save endpoints (/api/settings/gemini-*) —
+    # never expose the stored (encrypted) key here.
+    cfg.pop("gemini_api_key", None)
+    return cfg
 
 
 @router.patch("/ai-config")

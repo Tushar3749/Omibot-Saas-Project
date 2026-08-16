@@ -93,6 +93,17 @@ class AIConfigUpdate(BaseModel):
     referral_reward_pct: Optional[float] = None
 
 
+# ─── Gemini API Key ───────────────────────────────────────────────────────────
+
+class GeminiKeyValidateRequest(BaseModel):
+    api_key: str
+
+
+class GeminiKeySaveRequest(BaseModel):
+    api_key: str
+    model: str = "gemini-2.5-flash"
+
+
 # ─── Delivery Charges ─────────────────────────────────────────────────────────
 
 class DeliveryChargeItem(BaseModel):

@@ -8,11 +8,20 @@ import {
   Bot, Shield, AlertTriangle, Plus, X, Save,
   Search, ShoppingBag, Zap, MapPin, Heart, MessageSquare, Package, Globe,
   FileText, Trash2, Edit2, Upload, BookOpen, RefreshCw, Sparkles,
+  Eye, EyeOff, KeyRound, ExternalLink, CheckCircle2, XCircle, CircleDashed,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DeliveryCharge { district: string; charge: number }
+
+interface GeminiStatus {
+  has_key: boolean
+  key_valid: boolean
+  model: string
+  last_checked: string | null
+  key_preview: string
+}
 
 interface KnowledgeFile {
   file_name: string
@@ -253,6 +262,15 @@ export default function SettingsPage() {
   const [summaryLoaded, setSummaryLoaded] = useState(false)
   const [generating, setGenerating]       = useState(false)
 
+  // ── Gemini API Key state ──────────────────────────────────────────────────
+  const [geminiStatus, setGeminiStatus]             = useState<GeminiStatus | null>(null)
+  const [geminiStatusLoaded, setGeminiStatusLoaded] = useState(false)
+  const [geminiKeyInput, setGeminiKeyInput]         = useState('')
+  const [geminiShowKey, setGeminiShowKey]           = useState(false)
+  const [geminiChecking, setGeminiChecking]         = useState(false)
+  const [geminiSaving, setGeminiSaving]             = useState(false)
+  const [geminiCheckResult, setGeminiCheckResult]   = useState<{ valid: boolean; message?: string; error?: string } | null>(null)
+
   // ── Load all data ─────────────────────────────────────────────────────────
   useEffect(() => {
     configAPI.get().then(d => setConfig(d || {})).catch(() => {}).finally(() => setLoading(false))
@@ -287,6 +305,61 @@ export default function SettingsPage() {
         .finally(() => setSummaryLoading(false))
     }
   }, [activeTab, instsLoaded, docsLoaded, summaryLoaded])
+
+  // Load Gemini key status when switching to ইন্টিগ্রেশন tab (only once per session)
+  useEffect(() => {
+    if (activeTab !== 'integrations') return
+    if (geminiStatusLoaded) return
+    settingsAPI.getGeminiStatus()
+      .then((d: GeminiStatus) => setGeminiStatus(d))
+      .catch(() => {})
+      .finally(() => setGeminiStatusLoaded(true))
+  }, [activeTab, geminiStatusLoaded])
+
+  // ── Gemini API key: check / save ──────────────────────────────────────────
+  async function handleCheckGeminiKey() {
+    const key = geminiKeyInput.trim()
+    if (!key) { toast.error('আগে API key লিখুন'); return }
+    setGeminiChecking(true)
+    setGeminiCheckResult(null)
+    try {
+      const res = await settingsAPI.validateGeminiKey(key)
+      setGeminiCheckResult(res)
+      if (res.valid) {
+        toast.success('✅ API key সঠিক! Gemini 2.5 Flash কাজ করছে')
+      } else {
+        toast.error(`❌ ${res.error || 'API key ভুল। সঠিক key দিন।'}`)
+      }
+    } catch {
+      toast.error('⚠️ চেক করতে পারিনি। ইন্টারনেট চেক করুন।')
+    } finally {
+      setGeminiChecking(false)
+    }
+  }
+
+  async function handleSaveGeminiKey() {
+    const key = geminiKeyInput.trim()
+    if (!key) { toast.error('আগে API key লিখুন'); return }
+    setGeminiSaving(true)
+    try {
+      const res = await settingsAPI.saveGeminiKey(key)
+      toast.success('💾 Gemini API key সংরক্ষিত হয়েছে!')
+      setGeminiKeyInput('')
+      setGeminiCheckResult(null)
+      setGeminiStatus({
+        has_key: true,
+        key_valid: true,
+        model: res.model,
+        last_checked: new Date().toISOString(),
+        key_preview: res.key_preview,
+      })
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg ? `❌ ${msg}` : '❌ API key ভুল। সঠিক key দিন।')
+    } finally {
+      setGeminiSaving(false)
+    }
+  }
 
   // ── Save AI Config ────────────────────────────────────────────────────────
   async function handleSave() {
@@ -953,6 +1026,102 @@ export default function SettingsPage() {
                     sub="সুন্দরবন Courier সার্ভিস ব্যবহার করুন"
                   />
                 </ComingSoon>
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* Gemini AI API Key */}
+          <SectionCard icon={KeyRound} title="🤖 Gemini AI Configuration" subtitle="আপনার Gemini API key সেট করুন">
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Model</label>
+                <input className="input" value="gemini-2.5-flash" disabled style={{ opacity: 0.6, cursor: 'not-allowed' }} />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Key</label>
+                <div className="relative">
+                  <input
+                    className="input pr-10"
+                    type={geminiShowKey ? 'text' : 'password'}
+                    value={geminiKeyInput}
+                    onChange={e => { setGeminiKeyInput(e.target.value); setGeminiCheckResult(null) }}
+                    placeholder={geminiStatus?.key_preview ? `সংরক্ষিত: ${geminiStatus.key_preview} — নতুন key দিতে এখানে লিখুন` : 'AIza...'}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setGeminiShowKey(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2"
+                    style={{ color: 'var(--c-muted)' }}
+                    tabIndex={-1}
+                  >
+                    {geminiShowKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Status */}
+              <div className="flex items-center gap-2 text-sm">
+                {(() => {
+                  const result = geminiCheckResult
+                  const valid = result ? result.valid : geminiStatus?.key_valid
+                  const hasAny = result !== null || Boolean(geminiStatus?.has_key)
+                  if (!hasAny) {
+                    return (
+                      <span className="flex items-center gap-1.5" style={{ color: 'var(--c-muted)' }}>
+                        <CircleDashed size={15} /> Key সেট করা হয়নি
+                      </span>
+                    )
+                  }
+                  if (valid) {
+                    return (
+                      <span className="flex items-center gap-1.5" style={{ color: '#04AA6D' }}>
+                        <CheckCircle2 size={15} />
+                        কাজ করছে
+                        {!result && geminiStatus?.last_checked && (
+                          <span style={{ color: 'var(--c-muted)' }}>
+                            (সর্বশেষ চেক: {new Date(geminiStatus.last_checked).toLocaleString('bn-BD')})
+                          </span>
+                        )}
+                      </span>
+                    )
+                  }
+                  return (
+                    <span className="flex items-center gap-1.5" style={{ color: '#ef4444' }}>
+                      <XCircle size={15} /> {result?.error || 'Invalid key'}
+                    </span>
+                  )
+                })()}
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleCheckGeminiKey}
+                  disabled={geminiChecking || geminiSaving}
+                  className="btn-secondary gap-1.5 text-xs py-1.5 px-3"
+                >
+                  {geminiChecking ? <><span className="spinner h-3.5 w-3.5" /> চেক হচ্ছে...</> : <><RefreshCw size={14} /> এখনই চেক করুন</>}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveGeminiKey}
+                  disabled={geminiSaving || geminiChecking}
+                  className="btn-primary gap-1.5 text-xs py-1.5 px-3"
+                >
+                  {geminiSaving ? <><span className="spinner h-3.5 w-3.5" /> সংরক্ষণ হচ্ছে...</> : <><Save size={14} /> সংরক্ষণ করুন</>}
+                </button>
+              </div>
+
+              <div className="p-3 rounded text-xs leading-relaxed flex items-start gap-2" style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border-subtle)', color: 'var(--c-muted)' }}>
+                <span>ℹ️</span>
+                <span>
+                  API key পেতে{' '}
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1" style={{ color: '#04AA6D' }}>
+                    Google AI Studio <ExternalLink size={11} />
+                  </a>
+                  {' '}দেখুন। Free tier: 15 RPM, 1M tokens/min। Key না দিলে আমাদের default key ব্যবহার হবে।
+                </span>
               </div>
             </div>
           </SectionCard>

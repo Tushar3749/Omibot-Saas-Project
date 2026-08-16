@@ -27,15 +27,13 @@ from app.services.discount_engine import get_discount_context as get_discount_ct
 from app.services.memory_service import MemoryService
 from app.services.otp_service import normalize_bd_phone, request_otp, verify_otp
 from app.services import image_search_service as img_svc
-
-from google import genai as _genai
+from app.services.gemini_key_service import resolve_gemini_client
 
 logger = logging.getLogger(__name__)
 
 META_GRAPH_API  = "https://graph.facebook.com/v19.0"
 ai_service      = AIService()
 memory_service  = MemoryService()
-_gemini_client  = _genai.Client(api_key=settings.GEMINI_API_KEY)
 
 # ── Order flow trigger keywords ───────────────────────────────────────────────
 
@@ -438,7 +436,7 @@ def _gemini_return_classify(
     )
 
     try:
-        resp = _gemini_client.models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
+        resp = resolve_gemini_client(ai_config=ai_config).models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
         text = resp.text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\n?", "", text)
@@ -1919,7 +1917,7 @@ def _gemini_classify(msg: str, state: dict, tenant_id: str, last_bot_msg: str) -
         "Return ONLY the JSON. No extra text."
     )
     try:
-        resp = _gemini_client.models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
+        resp = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
         text = resp.text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\n?", "", text)
@@ -2093,7 +2091,7 @@ def _answer_discount_via_gemini(tenant_id: str, question: str) -> str:
         "- Do NOT invent information not in the data."
     )
     try:
-        resp = _gemini_client.models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
+        resp = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(model=settings.GEMINI_MODEL, contents=prompt)
         return resp.text.strip()
     except Exception as e:
         logger.warning(f"_answer_discount_via_gemini failed: {e}")
@@ -3856,7 +3854,7 @@ async def process_message(
         or any(w in (message_text or "").lower() for w in _BUYING_ADJACENT)
     )
     if message_text and not state.get("order_flow") and _has_buying_context:
-        intent = await ai_service.detect_order_intent(message_text, messages, state)
+        intent = await ai_service.detect_order_intent(message_text, messages, state, ai_config=ai_config)
         if intent["is_order_intent"] and intent["confidence"] in ("high", "medium"):
             product_name = intent.get("product_name") or state.get("interested_product") or ""
             cart_item    = _extract_product_for_order(tenant_id, product_name, state) if product_name else {}

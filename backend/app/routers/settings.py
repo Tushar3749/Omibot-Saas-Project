@@ -1,13 +1,20 @@
 """
 OmniBot SaaS — Settings Router
-Delivery charges (district-wise) and bulk discount rules.
+Delivery charges (district-wise), bulk discount rules, and per-tenant
+Gemini API key management.
 """
 import logging
 import uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from app.auth.dependencies import get_current_tenant
 from app.database import supabase
-from app.models.schemas import DeliveryChargesUpdate, BulkDiscountRuleCreate, BulkDiscountRuleUpdate
+from app.models.schemas import (
+    DeliveryChargesUpdate, BulkDiscountRuleCreate, BulkDiscountRuleUpdate,
+    GeminiKeyValidateRequest, GeminiKeySaveRequest,
+)
+from app.utils.security import encrypt_token
+from app.services.gemini_key_service import validate_gemini_key, mask_key, DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -137,3 +144,84 @@ async def delete_bulk_discount(
 ):
     supabase.table("bulk_discount_rules").delete().eq("id", rule_id).eq("tenant_id", tenant["tenant_id"]).execute()
     return {"deleted": True}
+
+
+# ── Gemini API Key ────────────────────────────────────────────────────────────
+
+@router.post("/validate-gemini-key")
+async def validate_gemini_key_endpoint(
+    body: GeminiKeyValidateRequest,
+    tenant: dict = Depends(get_current_tenant),
+):
+    """Live-check a Gemini API key without saving it."""
+    return validate_gemini_key(body.api_key, DEFAULT_MODEL)
+
+
+@router.put("/gemini-key")
+async def save_gemini_key(
+    body: GeminiKeySaveRequest,
+    tenant: dict = Depends(get_current_tenant),
+):
+    """Validate then save (encrypted) the tenant's own Gemini API key."""
+    result = validate_gemini_key(body.api_key, body.model or DEFAULT_MODEL)
+    if not result.get("valid"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Invalid API key")
+
+    tid = tenant["tenant_id"]
+    update_data = {
+        "gemini_api_key":          encrypt_token(body.api_key.strip()),
+        "gemini_model":            body.model or DEFAULT_MODEL,
+        "gemini_key_valid":        True,
+        "gemini_key_last_checked": datetime.now(timezone.utc).isoformat(),
+    }
+
+    existing = (
+        supabase.table("ai_config")
+        .select("config_id")
+        .eq("tenant_id", tid)
+        .maybe_single()
+        .execute()
+    )
+    if existing.data:
+        supabase.table("ai_config").update(update_data).eq("tenant_id", tid).execute()
+    else:
+        supabase.table("ai_config").insert({
+            "config_id": str(uuid.uuid4()), "tenant_id": tid, **update_data,
+        }).execute()
+
+    return {
+        "saved": True,
+        "valid": True,
+        "model": update_data["gemini_model"],
+        "message": result.get("message"),
+        "key_preview": mask_key(body.api_key.strip()),
+    }
+
+
+@router.get("/gemini-status")
+async def gemini_status(tenant: dict = Depends(get_current_tenant)):
+    result = (
+        supabase.table("ai_config")
+        .select("gemini_api_key, gemini_model, gemini_key_valid, gemini_key_last_checked")
+        .eq("tenant_id", tenant["tenant_id"])
+        .maybe_single()
+        .execute()
+    )
+    cfg = (result.data if result is not None else None) or {}
+    raw_key = cfg.get("gemini_api_key")
+
+    key_preview = ""
+    if raw_key:
+        try:
+            from app.utils.security import decrypt_token
+            key_preview = mask_key(decrypt_token(raw_key))
+        except Exception:
+            key_preview = "••••"
+
+    return {
+        "has_key":      bool(raw_key),
+        "key_valid":    bool(cfg.get("gemini_key_valid")),
+        "model":        cfg.get("gemini_model") or DEFAULT_MODEL,
+        "last_checked": cfg.get("gemini_key_last_checked"),
+        "key_preview":  key_preview,
+    }

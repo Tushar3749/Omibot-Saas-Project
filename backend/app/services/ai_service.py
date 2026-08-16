@@ -19,10 +19,9 @@ from app.config import settings
 from app.utils.prompt_guard import PromptGuard
 from app.services.rag_service import RAGService
 from app.services.memory_service import MemoryService
+from app.services.gemini_key_service import resolve_gemini_client
 
 logger = logging.getLogger(__name__)
-
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 # ── Function declarations for order extraction ────────────────────────────────
 _EXTRACT_ORDER = genai_types.FunctionDeclaration(
@@ -385,7 +384,8 @@ class AIService:
             genai_types.Content(role="user", parts=[genai_types.Part(text=customer_message)])
         )
 
-        # 6. Call Gemini
+        # 6. Call Gemini (tenant's own key if set & valid, else platform default)
+        client = resolve_gemini_client(ai_config=ai_config)
         try:
             config = genai_types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -393,7 +393,7 @@ class AIService:
             )
 
             def _send():
-                return _client.models.generate_content(
+                return client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=contents,
                     config=config,
@@ -459,7 +459,7 @@ class AIService:
                     follow_contents.append(
                         genai_types.Content(role="user", parts=fn_response_parts)
                     )
-                    follow_up = _client.models.generate_content(
+                    follow_up = client.models.generate_content(
                         model=settings.GEMINI_MODEL,
                         contents=follow_contents,
                         config=genai_types.GenerateContentConfig(
@@ -486,6 +486,7 @@ class AIService:
         message_text: str,
         recent_messages: list[dict],
         state: dict,
+        ai_config: Optional[dict] = None,
     ) -> dict:
         """
         Calls Gemini with a lightweight JSON prompt to decide if the customer
@@ -517,7 +518,8 @@ class AIService:
         )
 
         try:
-            response = _client.models.generate_content(
+            client = resolve_gemini_client(ai_config=ai_config)
+            response = client.models.generate_content(
                 model=settings.GEMINI_MODEL,
                 contents=[genai_types.Content(
                     role="user", parts=[genai_types.Part(text=prompt)]

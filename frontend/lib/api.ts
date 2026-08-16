@@ -136,6 +136,13 @@ export const settingsAPI = {
     api.patch(`/api/settings/bulk-discounts/${id}`, data).then(r => r.data),
   deleteBulkDiscount: (id: string) =>
     api.delete(`/api/settings/bulk-discounts/${id}`).then(r => r.data),
+
+  validateGeminiKey: (api_key: string) =>
+    api.post('/api/settings/validate-gemini-key', { api_key }).then(r => r.data),
+  saveGeminiKey: (api_key: string, model = 'gemini-2.5-flash') =>
+    api.put('/api/settings/gemini-key', { api_key, model }).then(r => r.data),
+  getGeminiStatus: () =>
+    api.get('/api/settings/gemini-status').then(r => r.data),
 }
 
 // ── Courier ───────────────────────────────────────────────────────────────────
