@@ -67,6 +67,7 @@ const TABS = [
   { id: 'loyalty',      label: 'লয়ালটি',          icon: Heart },
   { id: 'templates',    label: 'টেমপ্লেট',         icon: MessageSquare },
   { id: 'security',     label: 'সিকিউরিটি',        icon: Shield },
+  { id: 'api',          label: '🔑 API',            icon: KeyRound },
 ] as const
 type TabId = typeof TABS[number]['id']
 
@@ -306,9 +307,9 @@ export default function SettingsPage() {
     }
   }, [activeTab, instsLoaded, docsLoaded, summaryLoaded])
 
-  // Load Gemini key status when switching to ইন্টিগ্রেশন tab (only once per session)
+  // Load Gemini key status when switching to 🔑 API tab (only once per session)
   useEffect(() => {
-    if (activeTab !== 'integrations') return
+    if (activeTab !== 'api') return
     if (geminiStatusLoaded) return
     settingsAPI.getGeminiStatus()
       .then((d: GeminiStatus) => setGeminiStatus(d))
@@ -1029,102 +1030,6 @@ export default function SettingsPage() {
               </div>
             </div>
           </SectionCard>
-
-          {/* Gemini AI API Key */}
-          <SectionCard icon={KeyRound} title="🤖 Gemini AI Configuration" subtitle="আপনার Gemini API key সেট করুন">
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Model</label>
-                <input className="input" value="gemini-2.5-flash" disabled style={{ opacity: 0.6, cursor: 'not-allowed' }} />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Key</label>
-                <div className="relative">
-                  <input
-                    className="input pr-10"
-                    type={geminiShowKey ? 'text' : 'password'}
-                    value={geminiKeyInput}
-                    onChange={e => { setGeminiKeyInput(e.target.value); setGeminiCheckResult(null) }}
-                    placeholder={geminiStatus?.key_preview ? `সংরক্ষিত: ${geminiStatus.key_preview} — নতুন key দিতে এখানে লিখুন` : 'AIza...'}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setGeminiShowKey(v => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2"
-                    style={{ color: 'var(--c-muted)' }}
-                    tabIndex={-1}
-                  >
-                    {geminiShowKey ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
-                </div>
-              </div>
-
-              {/* Status */}
-              <div className="flex items-center gap-2 text-sm">
-                {(() => {
-                  const result = geminiCheckResult
-                  const valid = result ? result.valid : geminiStatus?.key_valid
-                  const hasAny = result !== null || Boolean(geminiStatus?.has_key)
-                  if (!hasAny) {
-                    return (
-                      <span className="flex items-center gap-1.5" style={{ color: 'var(--c-muted)' }}>
-                        <CircleDashed size={15} /> Key সেট করা হয়নি
-                      </span>
-                    )
-                  }
-                  if (valid) {
-                    return (
-                      <span className="flex items-center gap-1.5" style={{ color: '#04AA6D' }}>
-                        <CheckCircle2 size={15} />
-                        কাজ করছে
-                        {!result && geminiStatus?.last_checked && (
-                          <span style={{ color: 'var(--c-muted)' }}>
-                            (সর্বশেষ চেক: {new Date(geminiStatus.last_checked).toLocaleString('bn-BD')})
-                          </span>
-                        )}
-                      </span>
-                    )
-                  }
-                  return (
-                    <span className="flex items-center gap-1.5" style={{ color: '#ef4444' }}>
-                      <XCircle size={15} /> {result?.error || 'Invalid key'}
-                    </span>
-                  )
-                })()}
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleCheckGeminiKey}
-                  disabled={geminiChecking || geminiSaving}
-                  className="btn-secondary gap-1.5 text-xs py-1.5 px-3"
-                >
-                  {geminiChecking ? <><span className="spinner h-3.5 w-3.5" /> চেক হচ্ছে...</> : <><RefreshCw size={14} /> এখনই চেক করুন</>}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSaveGeminiKey}
-                  disabled={geminiSaving || geminiChecking}
-                  className="btn-primary gap-1.5 text-xs py-1.5 px-3"
-                >
-                  {geminiSaving ? <><span className="spinner h-3.5 w-3.5" /> সংরক্ষণ হচ্ছে...</> : <><Save size={14} /> সংরক্ষণ করুন</>}
-                </button>
-              </div>
-
-              <div className="p-3 rounded text-xs leading-relaxed flex items-start gap-2" style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border-subtle)', color: 'var(--c-muted)' }}>
-                <span>ℹ️</span>
-                <span>
-                  API key পেতে{' '}
-                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1" style={{ color: '#04AA6D' }}>
-                    Google AI Studio <ExternalLink size={11} />
-                  </a>
-                  {' '}দেখুন। Free tier: 15 RPM, 1M tokens/min। Key না দিলে আমাদের default key ব্যবহার হবে।
-                </span>
-              </div>
-            </div>
-          </SectionCard>
         </div>
       )}
 
@@ -1451,8 +1356,108 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Save button (bottom) — not shown for local (own save) or loyalty (all coming soon) */}
-      {activeTab !== 'local' && activeTab !== 'loyalty' && (
+      {/* ══ TAB: 🔑 API ═══════════════════════════════════════════════════════ */}
+      {activeTab === 'api' && (
+        <div className="space-y-4">
+          <SectionCard icon={KeyRound} title="🤖 Gemini AI Configuration" subtitle="আপনার Gemini API key সেট করুন">
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Model</label>
+                <input className="input" value="gemini-2.5-flash" disabled style={{ opacity: 0.6, cursor: 'not-allowed' }} />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>API Key</label>
+                <div className="relative">
+                  <input
+                    className="input pr-10"
+                    type={geminiShowKey ? 'text' : 'password'}
+                    value={geminiKeyInput}
+                    onChange={e => { setGeminiKeyInput(e.target.value); setGeminiCheckResult(null) }}
+                    placeholder={geminiStatus?.key_preview ? `সংরক্ষিত: ${geminiStatus.key_preview} — নতুন key দিতে এখানে লিখুন` : 'AIza...'}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setGeminiShowKey(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2"
+                    style={{ color: 'var(--c-muted)' }}
+                    tabIndex={-1}
+                  >
+                    {geminiShowKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Status */}
+              <div className="flex items-center gap-2 text-sm">
+                {(() => {
+                  const result = geminiCheckResult
+                  const valid = result ? result.valid : geminiStatus?.key_valid
+                  const hasAny = result !== null || Boolean(geminiStatus?.has_key)
+                  if (!hasAny) {
+                    return (
+                      <span className="flex items-center gap-1.5" style={{ color: 'var(--c-muted)' }}>
+                        <CircleDashed size={15} /> সেট করা হয়নি
+                      </span>
+                    )
+                  }
+                  if (valid) {
+                    return (
+                      <span className="flex items-center gap-1.5" style={{ color: '#04AA6D' }}>
+                        <CheckCircle2 size={15} />
+                        কাজ করছে
+                        {!result && geminiStatus?.last_checked && (
+                          <span style={{ color: 'var(--c-muted)' }}>
+                            (সর্বশেষ চেক: {new Date(geminiStatus.last_checked).toLocaleString('bn-BD')})
+                          </span>
+                        )}
+                      </span>
+                    )
+                  }
+                  return (
+                    <span className="flex items-center gap-1.5" style={{ color: '#ef4444' }}>
+                      <XCircle size={15} /> {result?.error || 'Invalid key'}
+                    </span>
+                  )
+                })()}
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleCheckGeminiKey}
+                  disabled={geminiChecking || geminiSaving}
+                  className="btn-secondary gap-1.5 text-xs py-1.5 px-3"
+                >
+                  {geminiChecking ? <><span className="spinner h-3.5 w-3.5" /> চেক হচ্ছে...</> : <><RefreshCw size={14} /> এখনই চেক করুন</>}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveGeminiKey}
+                  disabled={geminiSaving || geminiChecking}
+                  className="btn-primary gap-1.5 text-xs py-1.5 px-3"
+                >
+                  {geminiSaving ? <><span className="spinner h-3.5 w-3.5" /> সংরক্ষণ হচ্ছে...</> : <><Save size={14} /> সংরক্ষণ করুন</>}
+                </button>
+              </div>
+
+              <div className="p-3 rounded text-xs leading-relaxed flex items-start gap-2" style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border-subtle)', color: 'var(--c-muted)' }}>
+                <span>ℹ️</span>
+                <span>
+                  API key পেতে{' '}
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1" style={{ color: '#04AA6D' }}>
+                    Google AI Studio <ExternalLink size={11} />
+                  </a>
+                  {' '}দেখুন। Free tier: 15 RPM, 1M tokens/min। Key না দিলে আমাদের default key ব্যবহার হবে।
+                </span>
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+      )}
+
+      {/* Save button (bottom) — not shown for local (own save), loyalty (all coming soon), or api (own save buttons) */}
+      {activeTab !== 'local' && activeTab !== 'loyalty' && activeTab !== 'api' && (
         <button onClick={handleSave} disabled={saving} className="btn-primary px-8 py-2.5 gap-2">
           {saving ? <><span className="spinner h-4 w-4" /> সংরক্ষণ হচ্ছে...</> : <><Save size={15} /> পরিবর্তন সংরক্ষণ করুন</>}
         </button>
