@@ -303,6 +303,26 @@ def _fmt_orders_list(orders: list[dict]) -> str:
     return "\n".join(lines)
 
 
+UNIT_LABELS = {
+    "piece":   "পিস",
+    "kg":      "কেজি",
+    "gram":    "গ্রাম",
+    "liter":   "লিটার",
+    "set":     "সেট",
+    "pair":    "জোড়া",
+    "meter":   "মিটার",
+    "serving": "সার্ভিং",
+    "box":     "বাক্স",
+    "pack":    "প্যাক",
+}
+
+
+def get_unit_label(product: Optional[dict]) -> str:
+    """Bangla unit label for a product/cart/order-item dict's unit_type (default: piece)."""
+    unit_type = (product or {}).get("unit_type") or "piece"
+    return UNIT_LABELS.get(unit_type, "পিস")
+
+
 def _fmt_order_items_for_return(order: dict) -> str:
     ref   = order.get("order_ref") or order.get("order_id", "")[:12]
     items = _get_order_items(order)
@@ -316,7 +336,7 @@ def _fmt_order_items_for_return(order: dict) -> str:
         total += lt
         num   = NUMS[i] if i < len(NUMS) else f"{i+1}."
         price_str = f" (৳{lt:,.0f})" if lt else ""
-        lines.append(f"{num} {name} — {qty} পিস{price_str}")
+        lines.append(f"{num} {name} — {qty} {get_unit_label(it)}{price_str}")
     lines += ["━" * 23]
     if total:
         lines.append(f"মোট: ৳{total:,.0f}")
@@ -650,7 +670,7 @@ async def _handle_return_flow_v2(
             lines = ["কোন পণ্য ফেরত দিতে চান?"]
             for i, it in enumerate(items):
                 num = NUMS[i] if i < len(NUMS) else f"{i+1}."
-                lines.append(f"{num} {it.get('product_name','পণ্য')} ({it.get('quantity',1)} পিস)")
+                lines.append(f"{num} {it.get('product_name','পণ্য')} ({it.get('quantity',1)} {get_unit_label(it)})")
             lines.append("নম্বর বলুন:")
             reply = "\n".join(lines)
             return _step(reply, "selecting_items", {"return_type": "partial", "return_items": []})
@@ -691,9 +711,10 @@ async def _handle_return_flow_v2(
         chosen_qty  = chosen.get("quantity", 1)
 
         if chosen_qty > 1:
+            unit = get_unit_label(chosen)
             reply = (
-                f"{chosen.get('product_name','পণ্য')} মোট {chosen_qty} পিস আছে।\n"
-                f"কত পিস ফেরত দিতে চান? (1-{chosen_qty})"
+                f"{chosen.get('product_name','পণ্য')} মোট {chosen_qty} {unit} আছে।\n"
+                f"কত {unit} ফেরত দিতে চান? (1-{chosen_qty})"
             )
             return _step(reply, "selecting_qty",
                         {"return_items": current_items, "return_pending_item_idx": idx})
@@ -1193,11 +1214,12 @@ def build_idle_system_prompt(
     8. Active discounts
     9. Rules
     """
-    bot_name    = (ai_config.get("bot_name") or "Assistant").strip()
-    store_name  = (ai_config.get("store_name") or "আমাদের স্টোর").strip()
-    language    = ai_config.get("language", "bangla")
-    base_prompt = (ai_config.get("system_prompt") or "").strip()
-    forbidden   = ai_config.get("forbidden_topics") or []
+    bot_name      = (ai_config.get("bot_name") or "Assistant").strip()
+    store_name    = (ai_config.get("store_name") or "আমাদের স্টোর").strip()
+    language      = ai_config.get("language", "bangla")
+    base_prompt   = (ai_config.get("system_prompt") or "").strip()
+    forbidden     = ai_config.get("forbidden_topics") or []
+    business_type = ai_config.get("business_type", "general")
 
     lang_map = {
         "bangla":   "বাংলা — সহজ ও বন্ধুত্বপূর্ণ বাংলায় উত্তর দাও।",
@@ -1293,10 +1315,20 @@ def build_idle_system_prompt(
     ) if forbidden else ""
 
     # Identity rule — must come first, highest priority
+    business_type_labels = {
+        "general":     "একটি দোকান",
+        "grocery":     "একটি মুদি/গ্রোসারি দোকান",
+        "fashion":     "একটি পোশাক/ফ্যাশন দোকান",
+        "electronics": "একটি ইলেকট্রনিক্স দোকান",
+        "cosmetics":   "একটি কসমেটিক্স দোকান",
+        "food":        "একটি রেস্টুরেন্ট/খাবারের দোকান",
+    }
+    business_type_label = business_type_labels.get(business_type, business_type_labels["general"])
+
     identity_rule = (
         f"[পরিচয় — HIGHEST PRIORITY — NEVER OVERRIDE]\n"
         f"তোমার নাম: {bot_name}\n"
-        f"তুমি {store_name}-এর shopping assistant।\n"
+        f"তুমি {store_name}-এর shopping assistant — {business_type_label}।\n"
         "কখনো নিজেকে AI, ভাষা মডেল, language model, Gemini বা chatbot বলবে না।\n"
         f"সবসময় নিজেকে '{bot_name}' হিসেবে পরিচয় দাও।\n"
         "কোর্স, ট্রেনিং, শিক্ষাকার্যক্রম বা Business Intelligence বিষয়ে কথা বলবে না।\n"
@@ -1432,7 +1464,7 @@ def _query_stock(tenant_id: str, product_name: str) -> Optional[dict]:
     try:
         prods = (
             supabase.table("products")
-            .select("product_id, name")
+            .select("product_id, name, unit_type")
             .eq("tenant_id", tenant_id)
             .ilike("name", f"%{product_name}%")
             .eq("is_active", True)
@@ -1458,7 +1490,7 @@ def _query_stock(tenant_id: str, product_name: str) -> Optional[dict]:
             stock = max(0, phys - issued)
         else:
             stock = int(sd.get("current_stock") or 0)
-        return {"name": p["name"], "current_stock": stock}
+        return {"name": p["name"], "current_stock": stock, "unit_type": p.get("unit_type") or "piece"}
     except Exception as e:
         logger.warning(f"_query_stock error: {e}")
         return None
@@ -1692,7 +1724,7 @@ def _search_product_db(tenant_id: str, search_term: str) -> list:
             safe = word.replace("%", "").replace("_", "")
             res  = (
                 supabase.table("products")
-                .select("product_id, name, sku, mrp")
+                .select("product_id, name, sku, mrp, unit_type")
                 .eq("tenant_id", tenant_id)
                 .eq("is_active", True)
                 .or_(f"name.ilike.%{safe}%,sku.ilike.%{safe}%,category.ilike.%{safe}%")
@@ -1707,6 +1739,7 @@ def _search_product_db(tenant_id: str, search_term: str) -> list:
                         "product_name": p["name"],
                         "sku":          p.get("sku") or "",
                         "price":        float(p.get("mrp") or 0),
+                        "unit_type":    p.get("unit_type") or "piece",
                     })
         except Exception:
             continue
@@ -1723,7 +1756,7 @@ def _build_cart_text(cart: list) -> str:
         qty   = int(item.get("quantity") or 1)
         price = float(item.get("price") or 0)
         total += qty * price
-        rows.append(f"{name} × {qty} (৳{price:.0f}/পিস)")
+        rows.append(f"{name} × {qty} (৳{price:.0f}/{get_unit_label(item)})")
     rows.append(f"মোট: ৳{total:.0f}")
     return "\n".join(rows)
 
@@ -2128,7 +2161,7 @@ def _handle_info_query(intent: str, data: dict, tenant_id: str, state: dict, nat
         hits = _search_product_db(tenant_id, term) if term else []
         if hits:
             p = hits[0]
-            return f"💰 {p['product_name']}: ৳{p['price']:.0f}/পিস"
+            return f"💰 {p['product_name']}: ৳{p['price']:.0f}/{get_unit_label(p)}"
         return "দুঃখিত, এই পণ্যের দাম পাওয়া যাচ্ছে না।"
     if intent == "stock_check":
         term = data.get("product_search_term") or data.get("question") or ""
@@ -2136,7 +2169,7 @@ def _handle_info_query(intent: str, data: dict, tenant_id: str, state: dict, nat
         if hit:
             avail = hit.get("available_quantity") or 0
             name  = hit.get("product_name") or term
-            return (f"✅ {name}: {avail} পিস স্টকে আছে।"
+            return (f"✅ {name}: {avail} {get_unit_label(hit)} স্টকে আছে।"
                     if avail > 0 else f"❌ {name} এখন স্টকে নেই।")
         return "এই পণ্যের স্টক তথ্য পাওয়া যাচ্ছে না।"
     if intent == "discount_check":
@@ -2184,7 +2217,7 @@ def _fuzzy_product_search(tenant_id: str, term: str, neg_price) -> dict:
             safe = word.replace("%", "").replace("_", "")
             res = (
                 supabase.table("products")
-                .select("product_id, name, sku, mrp")
+                .select("product_id, name, sku, mrp, unit_type")
                 .eq("tenant_id", tenant_id)
                 .eq("is_active", True)
                 .or_(f"name.ilike.%{safe}%,sku.ilike.%{safe}%,category.ilike.%{safe}%")
@@ -2199,6 +2232,7 @@ def _fuzzy_product_search(tenant_id: str, term: str, neg_price) -> dict:
                     "sku":          p.get("sku") or "",
                     "price":        float(neg_price or p.get("mrp") or 0),
                     "quantity":     1,
+                    "unit_type":    p.get("unit_type") or "piece",
                 }
         except Exception:
             continue
@@ -2314,7 +2348,7 @@ async def _step_selecting_products(
             p         = hits[0]
             new_state = {**state, "last_searched_product": p["product_id"], "current_step": "ask_quantity"}
             _set_conv_state(conversation_id, new_state)
-            return f"✅ পাওয়া গেছে: {p['product_name']} (৳{p['price']:.0f}/পিস)\nকত পিস নেবেন?"
+            return f"✅ পাওয়া গেছে: {p['product_name']} (৳{p['price']:.0f}/{get_unit_label(p)})\nকত {get_unit_label(p)} নেবেন?"
         return f"'{search_term}' নামে কোনো পণ্য পাওয়া যায়নি। অন্য কোনো পণ্য বলুন।"
 
     if intent in ("start_order", "answer_current_step"):
@@ -2326,7 +2360,7 @@ async def _step_selecting_products(
                 p         = hits[0]
                 new_state = {**state, "last_searched_product": p["product_id"], "current_step": "ask_quantity"}
                 _set_conv_state(conversation_id, new_state)
-                return f"✅ পাওয়া গেছে: {p['product_name']} (৳{p['price']:.0f}/পিস)\nকত পিস নেবেন?"
+                return f"✅ পাওয়া গেছে: {p['product_name']} (৳{p['price']:.0f}/{get_unit_label(p)})\nকত {get_unit_label(p)} নেবেন?"
             return f"'{data.get('product_search_term','')}' নামে কোনো পণ্য পাওয়া যায়নি। অন্য কোনো পণ্য বলুন।"
         return "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
 
@@ -2367,7 +2401,7 @@ async def _step_ask_quantity(
         product = None
         if pid:
             try:
-                row = (supabase.table("products").select("product_id, name, sku, mrp")
+                row = (supabase.table("products").select("product_id, name, sku, mrp, unit_type")
                        .eq("product_id", pid).eq("tenant_id", tenant_id)
                        .maybe_single().execute().data)
                 if row:
@@ -2376,6 +2410,7 @@ async def _step_ask_quantity(
                         "product_name": row["name"],
                         "sku":          row.get("sku") or "",
                         "price":        float(row.get("mrp") or 0),
+                        "unit_type":    row.get("unit_type") or "piece",
                     }
             except Exception:
                 pass
@@ -2396,7 +2431,18 @@ async def _step_ask_quantity(
         _set_conv_state(conversation_id, new_state)
         return f"✅ {product['product_name']} × {qty} কার্টে যোগ হয়েছে!\nআর কিছু নেবেন? (হ্যাঁ/না)"
 
-    return "কত পিস নেবেন? শুধু সংখ্যা লিখুন।"
+    fallback_unit = "পিস"
+    fallback_pid  = state.get("last_searched_product")
+    if fallback_pid:
+        try:
+            fb_row = (supabase.table("products").select("unit_type")
+                      .eq("product_id", fallback_pid).eq("tenant_id", tenant_id)
+                      .maybe_single().execute().data)
+            if fb_row:
+                fallback_unit = get_unit_label(fb_row)
+        except Exception:
+            pass
+    return f"কত {fallback_unit} নেবেন? শুধু সংখ্যা লিখুন।"
 
 
 async def _step_confirm_add(
@@ -2441,7 +2487,7 @@ async def _step_confirm_add(
                 p         = hits[0]
                 new_state = {**state, "last_searched_product": p["product_id"], "current_step": "ask_quantity"}
                 _set_conv_state(conversation_id, new_state)
-                return f"✅ {p['product_name']} (৳{p['price']:.0f}/পিস)\nকত পিস নেবেন?"
+                return f"✅ {p['product_name']} (৳{p['price']:.0f}/{get_unit_label(p)})\nকত {get_unit_label(p)} নেবেন?"
             new_state = {**state, "current_step": "ask_quantity"}
             _set_conv_state(conversation_id, new_state)
             return f"'{search_term}' পাওয়া যায়নি। আর কিছু নেবেন? (হ্যাঁ/না)"
@@ -2812,6 +2858,7 @@ async def _execute_create_order(
             "quantity":     qty,
             "unit_price":   unit_price,
             "line_total":   round(unit_price * qty, 2),
+            "unit_type":    item.get("unit_type") or "piece",
         })
 
     total_qty    = sum(i["quantity"] for i in items)
@@ -3346,6 +3393,7 @@ async def _handle_customer_image(
     plain_token: str,
     order_flow_active: bool = False,
     state: Optional[dict] = None,
+    business_type: str = "general",
 ) -> bool:
     """
     Direct Gemini catalog-match image handler.
@@ -3365,7 +3413,7 @@ async def _handle_customer_image(
 
     try:
         match = await asyncio.wait_for(
-            asyncio.to_thread(img_svc.match_image_to_catalog, tenant_id, image_bytes, mime_type),
+            asyncio.to_thread(img_svc.match_image_to_catalog, tenant_id, image_bytes, mime_type, business_type),
             timeout=20.0,
         )
     except asyncio.TimeoutError:
@@ -3408,7 +3456,7 @@ async def _handle_customer_image(
                 "last_searched_product": product_id,
                 "current_step":          "ask_quantity",
             })
-            reply = f"{name} (৳{price:,.0f}/পিস) কত পিস নেবেন?"
+            reply = f"{name} (৳{price:,.0f}/{get_unit_label(match)}) কত {get_unit_label(match)} নেবেন?"
             save_message(conversation_id, tenant_id, "bot", reply)
             send_reply(sender_id, reply, plain_token)
             return True
@@ -3766,6 +3814,7 @@ async def process_message(
             tenant_id, conversation_id, sender_id, image_urls[0], plain_token,
             order_flow_active=state.get("order_flow") == "active",
             state=state,
+            business_type=ai_config.get("business_type") or "general",
         )
         if handled:
             return
@@ -3834,7 +3883,7 @@ async def process_message(
         _set_conv_state(conversation_id, new_flow)
         if cart_item and cart_item.get("product_id"):
             pname = cart_item.get("product_name") or "পণ্য"
-            reply = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/পিস)\nকত পিস নেবেন?"
+            reply = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/{get_unit_label(cart_item)})\nকত {get_unit_label(cart_item)} নেবেন?"
         else:
             reply = "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
         new_flow["last_bot_message"] = reply
@@ -3864,7 +3913,7 @@ async def process_message(
                 new_flow["current_step"]          = "ask_quantity"
                 new_flow["last_searched_product"] = cart_item["product_id"]
                 pname  = cart_item.get("product_name") or "পণ্য"
-                reply  = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/পিস)\nকত পিস নেবেন?"
+                reply  = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/{get_unit_label(cart_item)})\nকত {get_unit_label(cart_item)} নেবেন?"
             else:
                 reply = "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
             new_flow["last_bot_message"] = reply
@@ -3929,7 +3978,7 @@ async def process_message(
             new_flow["current_step"]          = "ask_quantity"
             new_flow["last_searched_product"] = cart_item["product_id"]
             pname      = cart_item.get("product_name") or "পণ্য"
-            flow_reply = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/পিস)\nকত পিস নেবেন?"
+            flow_reply = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/{get_unit_label(cart_item)})\nকত {get_unit_label(cart_item)} নেবেন?"
         else:
             flow_reply = "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
         new_flow["last_bot_message"] = flow_reply

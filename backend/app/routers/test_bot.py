@@ -37,6 +37,7 @@ from app.services.webhook_service import (
     _search_product_db,
     _set_conv_state,
     get_ai_config,
+    get_unit_label,
     get_or_create_conversation,
     get_recent_messages,
     save_message,
@@ -203,7 +204,7 @@ async def test_bot_chat(
                     new_flow["current_step"]          = "ask_quantity"
                     new_flow["last_searched_product"] = cart_item["product_id"]
                     pname = cart_item.get("product_name") or "পণ্য"
-                    reply = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/পিস)\nকত পিস নেবেন?"
+                    reply = f"✅ পাওয়া গেছে: {pname} (৳{float(cart_item.get('price') or 0):.0f}/{get_unit_label(cart_item)})\nকত {get_unit_label(cart_item)} নেবেন?"
                 else:
                     reply = "কোন পণ্য অর্ডার করতে চান? পণ্যের নাম বলুন।"
                 new_flow["last_bot_message"] = reply
@@ -255,10 +256,14 @@ async def test_bot_image(
         raise HTTPException(status_code=413, detail="ছবিটি অনেক বড়। ৫MB এর কম সাইজের ছবি পাঠান।")
 
     mime_type = file.content_type or "image/jpeg"
+    ai_cfg    = get_ai_config(tid)
 
     try:
         match = await asyncio.wait_for(
-            asyncio.to_thread(img_svc.match_image_to_catalog, tid, image_bytes, mime_type),
+            asyncio.to_thread(
+                img_svc.match_image_to_catalog, tid, image_bytes, mime_type,
+                ai_cfg.get("business_type") or "general",
+            ),
             timeout=20.0,
         )
     except asyncio.TimeoutError:

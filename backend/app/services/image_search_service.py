@@ -548,11 +548,26 @@ def format_image_recognition_reply(products: list[dict], analysis: dict) -> str:
 
 # ── Direct Catalog Match (Gemini Vision + full catalog) ───────────────────────
 
+_BUSINESS_TYPE_LABELS = {
+    "general":     "Bangladeshi shop",
+    "grocery":     "Bangladeshi grocery/FMCG shop",
+    "fashion":     "Bangladeshi clothing/fashion shop",
+    "electronics": "Bangladeshi electronics shop",
+    "cosmetics":   "Bangladeshi cosmetics/beauty shop",
+    "food":        "Bangladeshi restaurant/food shop",
+}
+
+
+def _business_type_label(business_type: str) -> str:
+    return _BUSINESS_TYPE_LABELS.get(business_type, _BUSINESS_TYPE_LABELS["general"])
+
+
 _CATALOG_MATCH_PROMPT = (
-    "A customer sent the attached product image to a Bangladeshi grocery/FMCG shop's chatbot.\n"
+    "A customer sent the attached product image to a {shop_label}'s chatbot.\n"
     "Our full product catalog (JSON) — names are mostly in Bangla:\n"
     "{catalog_json}\n\n"
-    "Common English/Romanized ↔ Bangla grocery equivalents (use these to bridge language gaps):\n"
+    "Common English/Romanized ↔ Bangla grocery equivalents (use these to bridge language gaps "
+    "when the shop sells grocery/FMCG items):\n"
     "honey=মধু, oil/tel=তেল, rice/chal=চাল, lentil/dal/dal=ডাল, flour/atta=আটা, "
     "sugar/chini=চিনি, salt/lobon=লবণ, ghee=ঘি, milk/dudh=দুধ, egg/dim=ডিম, "
     "spice/moshla=মসলা, tea/cha=চা, biscuit=বিস্কুট, soap/shaban=সাবান.\n\n"
@@ -628,7 +643,7 @@ def _get_catalog_cached(tenant_id: str) -> list:
     try:
         res = (
             supabase.table("products")
-            .select("product_id,name,sku,mrp,category,image_url")
+            .select("product_id,name,sku,mrp,category,image_url,unit_type")
             .eq("tenant_id", tenant_id)
             .eq("is_active", True)
             .limit(200)
@@ -651,6 +666,7 @@ def match_image_to_catalog(
     tenant_id: str,
     image_bytes: bytes,
     mime_type: str = "image/jpeg",
+    business_type: str = "general",
 ) -> dict:
     """
     Single-pass Gemini catalog match: image + full product catalog JSON → structured result.
@@ -673,7 +689,8 @@ def match_image_to_catalog(
         for p in products
     ]
     prompt = _CATALOG_MATCH_PROMPT.format(
-        catalog_json=json.dumps(catalog, ensure_ascii=False)
+        shop_label=_business_type_label(business_type),
+        catalog_json=json.dumps(catalog, ensure_ascii=False),
     )
 
     logger.info(
@@ -738,6 +755,7 @@ def match_image_to_catalog(
                 result["category"]   = p.get("category") or ""
                 result["image_url"]  = p.get("image_url") or ""
                 result["price"]      = p.get("mrp") or result.get("price") or 0
+                result["unit_type"]  = p.get("unit_type") or "piece"
                 break
 
     result["_catalog"] = products
@@ -860,7 +878,7 @@ def get_product_with_image(
 
     base_q = (
         supabase.table("products")
-        .select("product_id,name,sku,mrp,category,image_url")
+        .select("product_id,name,sku,mrp,category,image_url,unit_type")
         .eq("tenant_id", tenant_id)
         .eq("is_active", True)
     )
@@ -914,7 +932,7 @@ def get_product_with_image_by_id(tenant_id: str, product_id: str) -> Optional[di
     try:
         res = (
             supabase.table("products")
-            .select("product_id,name,sku,mrp,category,image_url")
+            .select("product_id,name,sku,mrp,category,image_url,unit_type")
             .eq("tenant_id", tenant_id)
             .eq("product_id", product_id)
             .eq("is_active", True)
