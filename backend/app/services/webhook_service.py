@@ -491,7 +491,7 @@ async def _handle_return_flow_v2(
     if return_step == "awaiting_photo" and image_urls:
         try:
             img_bytes, mime = await img_svc.download_image(image_urls[0], plain_token)
-            validation      = img_svc.validate_return_photo(img_bytes, mime)
+            validation      = img_svc.validate_return_photo(img_bytes, mime, tenant_id=tenant_id)
         except Exception as _ve:
             logger.warning(f"Return photo download/validate failed: {_ve}")
             validation = {"is_product_photo": True, "damage_visible": False, "analysis": ""}
@@ -3438,7 +3438,7 @@ async def _handle_text_image_request(
     try:
         # Caller already confirmed intent via should_trigger_image_search keyword match.
         # Use Gemini only to extract/translate product name — no intent gate here.
-        extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, message_text)
+        extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, message_text, tenant_id)
         product_name = extraction.get("product_name") or None
         sku          = extraction.get("sku") or None
         keywords     = extraction.get("keywords") or []
@@ -3944,7 +3944,7 @@ async def process_message(
     save_message(conversation_id, tenant_id, "bot", reply_text)
 
     try:
-        memory_service.maybe_summarise(conversation_id)
+        memory_service.maybe_summarise(conversation_id, tenant_id=tenant_id)
     except Exception as e:
         logger.warning(f"Summarise failed: {e}")
 

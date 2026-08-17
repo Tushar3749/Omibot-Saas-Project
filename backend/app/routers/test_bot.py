@@ -145,7 +145,7 @@ async def test_bot_chat(
         if ai_cfg.get("product_image_auto_send", True) and img_svc.should_trigger_image_search(msg):
             try:
                 # Extract product name/SKU from the message (Gemini for translation/parsing only)
-                extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, msg)
+                extraction   = await asyncio.to_thread(img_svc.extract_product_from_image_request, msg, tid)
                 product_name = extraction.get("product_name") or None
                 sku          = extraction.get("sku") or None
                 extra_kw     = extraction.get("keywords") or []

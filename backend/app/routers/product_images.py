@@ -115,7 +115,7 @@ async def upload_image(
     if auto_describe and not final_description:
         mime = file.content_type or "image/jpeg"
         try:
-            final_description = analyze_image(file_bytes, mime)
+            final_description = analyze_image(file_bytes, mime, tenant_id=tid)
         except Exception as e:
             logger.warning(f"Auto-describe failed: {e}")
             final_description = prod.data.get("name", "")
@@ -127,7 +127,7 @@ async def upload_image(
     # Generate embedding
     embedding: Optional[list[float]] = None
     if final_description:
-        embedding = embed_description(final_description)
+        embedding = embed_description(final_description, tenant_id=tid)
 
     # If setting as primary, clear existing primary flag for this product
     if is_primary:
@@ -198,7 +198,7 @@ async def update_description(
     if not description:
         raise HTTPException(status_code=400, detail="Description cannot be empty")
 
-    embedding = embed_description(description)
+    embedding = embed_description(description, tenant_id=tid)
     update_data: dict = {"image_description": description}
     if embedding:
         update_data["embedding"] = embedding

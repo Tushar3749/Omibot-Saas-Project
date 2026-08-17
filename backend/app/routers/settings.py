@@ -224,4 +224,17 @@ async def gemini_status(tenant: dict = Depends(get_current_tenant)):
         "model":        cfg.get("gemini_model") or DEFAULT_MODEL,
         "last_checked": cfg.get("gemini_key_last_checked"),
         "key_preview":  key_preview,
+        "using":        "tenant_key" if raw_key else "platform_default",
     }
+
+
+@router.delete("/gemini-key")
+async def remove_gemini_key(tenant: dict = Depends(get_current_tenant)):
+    """Remove the tenant's own Gemini key — bot reverts to the platform default key."""
+    tid = tenant["tenant_id"]
+    supabase.table("ai_config").update({
+        "gemini_api_key":          None,
+        "gemini_key_valid":        False,
+        "gemini_key_last_checked": None,
+    }).eq("tenant_id", tid).execute()
+    return {"removed": True, "using": "platform_default"}

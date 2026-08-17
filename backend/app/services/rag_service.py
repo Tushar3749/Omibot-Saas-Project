@@ -6,16 +6,13 @@ Uses Google text-embedding-004 (768-dim) via the new google.genai SDK.
 import logging
 from typing import Optional
 
-from google import genai
 from google.genai import types as genai_types
 
 from app.config import settings
 from app.database import supabase
+from app.services.gemini_key_service import resolve_gemini_client
 
 logger = logging.getLogger(__name__)
-
-# One shared client instance
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
 class RAGService:
@@ -23,18 +20,18 @@ class RAGService:
 
     # ── Embedding ─────────────────────────────────────────────────────────────
 
-    def _embed(self, text: str) -> list[float]:
+    def _embed(self, text: str, tenant_id: Optional[str] = None) -> list[float]:
         """Create a 768-dim embedding for indexing a document."""
-        result = _client.models.embed_content(
+        result = resolve_gemini_client(tenant_id=tenant_id).models.embed_content(
             model=settings.GEMINI_EMBEDDING_MODEL,
             contents=text,
             config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
         )
         return list(result.embeddings[0].values)
 
-    def _embed_query(self, text: str) -> list[float]:
+    def _embed_query(self, text: str, tenant_id: Optional[str] = None) -> list[float]:
         """Create a 768-dim embedding optimised for a search query."""
-        result = _client.models.embed_content(
+        result = resolve_gemini_client(tenant_id=tenant_id).models.embed_content(
             model=settings.GEMINI_EMBEDDING_MODEL,
             contents=text,
             config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
@@ -52,7 +49,7 @@ class RAGService:
     ) -> str:
         """Search the knowledge base and return a formatted context string."""
         try:
-            query_embedding = self._embed_query(query)
+            query_embedding = self._embed_query(query, tenant_id=tenant_id)
 
             result = supabase.rpc(
                 "match_knowledge_base",
@@ -91,7 +88,7 @@ class RAGService:
     ) -> dict:
         """Embed a document and upsert it into knowledge_base."""
         try:
-            embedding = self._embed(content)
+            embedding = self._embed(content, tenant_id=tenant_id)
             row = {
                 "tenant_id":    tenant_id,
                 "content":      content,

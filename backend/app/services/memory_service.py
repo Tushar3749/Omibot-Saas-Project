@@ -7,14 +7,11 @@ Two-layer memory strategy:
 import logging
 from typing import Optional
 
-from google import genai
-
 from app.config import settings
 from app.database import supabase
+from app.services.gemini_key_service import resolve_gemini_client
 
 logger = logging.getLogger(__name__)
-
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 SUMMARY_THRESHOLD = 30
 KEEP_RECENT       = 15
@@ -46,7 +43,7 @@ class MemoryService:
 
     # ── Summarisation ─────────────────────────────────────────────────────────
 
-    def summarise_messages(self, messages_to_summarise: list[dict]) -> str:
+    def summarise_messages(self, messages_to_summarise: list[dict], tenant_id: Optional[str] = None) -> str:
         """Ask Gemini to produce a concise Bangla summary of old messages."""
         if not messages_to_summarise:
             return ""
@@ -61,7 +58,7 @@ class MemoryService:
                 "ঠিকানা, phone, আলোচনার অবস্থা — এগুলো অবশ্যই রাখো।\n\n"
                 f"{formatted}"
             )
-            response = _client.models.generate_content(
+            response = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(
                 model=settings.GEMINI_MODEL,
                 contents=prompt,
             )
@@ -70,7 +67,7 @@ class MemoryService:
             logger.error(f"Summary generation failed: {e}")
             return ""
 
-    def maybe_summarise(self, conversation_id: str) -> None:
+    def maybe_summarise(self, conversation_id: str, tenant_id: Optional[str] = None) -> None:
         """
         Check message count. If ≥ SUMMARY_THRESHOLD, summarise old messages
         and update the conversation row in Supabase.
@@ -97,7 +94,7 @@ class MemoryService:
         existing_summary = (conv_res.data or {}).get("conversation_summary", "")
         old_messages     = messages[: -KEEP_RECENT]
 
-        new_summary = self.summarise_messages(old_messages)
+        new_summary = self.summarise_messages(old_messages, tenant_id=tenant_id)
         if existing_summary:
             new_summary = f"{existing_summary}\n\n[আপডেট] {new_summary}"
 

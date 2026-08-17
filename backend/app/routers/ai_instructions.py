@@ -23,13 +23,10 @@ from pydantic import BaseModel
 from app.auth.dependencies import get_current_tenant
 from app.config import settings
 from app.database import supabase
-
-from google import genai as _genai
+from app.services.gemini_key_service import resolve_gemini_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-_client = _genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
@@ -144,7 +141,7 @@ async def generate_summary(tenant: dict = Depends(get_current_tenant)):
     )
 
     try:
-        response = _client.models.generate_content(
+        response = resolve_gemini_client(tenant_id=tid).models.generate_content(
             model=settings.GEMINI_MODEL,
             contents=gemini_prompt,
         )

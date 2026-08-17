@@ -21,6 +21,7 @@ interface GeminiStatus {
   model: string
   last_checked: string | null
   key_preview: string
+  using?: 'tenant_key' | 'platform_default'
 }
 
 interface KnowledgeFile {
@@ -270,6 +271,7 @@ export default function SettingsPage() {
   const [geminiShowKey, setGeminiShowKey]           = useState(false)
   const [geminiChecking, setGeminiChecking]         = useState(false)
   const [geminiSaving, setGeminiSaving]             = useState(false)
+  const [geminiRemoving, setGeminiRemoving]         = useState(false)
   const [geminiCheckResult, setGeminiCheckResult]   = useState<{ valid: boolean; message?: string; error?: string } | null>(null)
 
   // ── Load all data ─────────────────────────────────────────────────────────
@@ -353,12 +355,35 @@ export default function SettingsPage() {
         model: res.model,
         last_checked: new Date().toISOString(),
         key_preview: res.key_preview,
+        using: 'tenant_key',
       })
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       toast.error(msg ? `❌ ${msg}` : '❌ API key ভুল। সঠিক key দিন।')
     } finally {
       setGeminiSaving(false)
+    }
+  }
+
+  async function handleRemoveGeminiKey() {
+    setGeminiRemoving(true)
+    try {
+      await settingsAPI.removeGeminiKey()
+      toast.success('🗑️ Key মুছে ফেলা হয়েছে — এখন থেকে platform default key ব্যবহার হবে')
+      setGeminiKeyInput('')
+      setGeminiCheckResult(null)
+      setGeminiStatus({
+        has_key: false,
+        key_valid: false,
+        model: geminiStatus?.model || 'gemini-2.5-flash',
+        last_checked: null,
+        key_preview: '',
+        using: 'platform_default',
+      })
+    } catch {
+      toast.error('⚠️ Key মুছতে পারিনি। আবার চেষ্টা করুন।')
+    } finally {
+      setGeminiRemoving(false)
     }
   }
 
@@ -1361,6 +1386,12 @@ export default function SettingsPage() {
         <div className="space-y-4">
           <SectionCard icon={KeyRound} title="🤖 Gemini AI Configuration" subtitle="আপনার Gemini API key সেট করুন">
             <div className="space-y-3">
+              <div className="text-xs font-medium" style={{ color: 'var(--c-muted)' }}>
+                বর্তমানে ব্যবহার হচ্ছে: {geminiStatus?.using === 'tenant_key'
+                  ? <span style={{ color: '#04AA6D' }}>🟢 আপনার নিজের key</span>
+                  : <span>⚪ Platform default key</span>}
+              </div>
+
               <div>
                 <label className="block text-xs font-medium mb-1" style={{ color: 'var(--c-text)' }}>Model</label>
                 <input className="input" value="gemini-2.5-flash" disabled style={{ opacity: 0.6, cursor: 'not-allowed' }} />
@@ -1439,6 +1470,17 @@ export default function SettingsPage() {
                 >
                   {geminiSaving ? <><span className="spinner h-3.5 w-3.5" /> সংরক্ষণ হচ্ছে...</> : <><Save size={14} /> সংরক্ষণ করুন</>}
                 </button>
+                {geminiStatus?.has_key && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveGeminiKey}
+                    disabled={geminiRemoving || geminiSaving || geminiChecking}
+                    className="btn-secondary gap-1.5 text-xs py-1.5 px-3"
+                    style={{ color: '#ef4444' }}
+                  >
+                    {geminiRemoving ? <><span className="spinner h-3.5 w-3.5" /> মুছে ফেলা হচ্ছে...</> : <><Trash2 size={14} /> Key মুছুন</>}
+                  </button>
+                )}
               </div>
 
               <div className="p-3 rounded text-xs leading-relaxed flex items-start gap-2" style={{ backgroundColor: 'var(--c-surface)', border: '1px solid var(--c-border-subtle)', color: 'var(--c-muted)' }}>

@@ -143,6 +143,8 @@ export const settingsAPI = {
     api.put('/api/settings/gemini-key', { api_key, model }).then(r => r.data),
   getGeminiStatus: () =>
     api.get('/api/settings/gemini-status').then(r => r.data),
+  removeGeminiKey: () =>
+    api.delete('/api/settings/gemini-key').then(r => r.data),
 }
 
 // ── Courier ───────────────────────────────────────────────────────────────────

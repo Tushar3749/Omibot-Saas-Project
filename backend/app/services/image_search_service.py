@@ -18,15 +18,13 @@ import time
 from typing import Optional
 
 import httpx
-from google import genai
 from google.genai import types as genai_types
 
 from app.config import settings
 from app.database import supabase
+from app.services.gemini_key_service import resolve_gemini_client
 
 logger = logging.getLogger(__name__)
-
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 # ── Vision prompt ─────────────────────────────────────────────────────────────
 _VISION_PROMPT = (
@@ -82,8 +80,8 @@ _CATALOG_CACHE_TTL = 600  # seconds
 
 # ── Embedding helpers ─────────────────────────────────────────────────────────
 
-def _embed_query(text: str) -> list[float]:
-    result = _client.models.embed_content(
+def _embed_query(text: str, tenant_id: Optional[str] = None) -> list[float]:
+    result = resolve_gemini_client(tenant_id=tenant_id).models.embed_content(
         model=settings.GEMINI_EMBEDDING_MODEL,
         contents=text,
         config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
@@ -91,8 +89,8 @@ def _embed_query(text: str) -> list[float]:
     return list(result.embeddings[0].values)
 
 
-def _embed_document(text: str) -> list[float]:
-    result = _client.models.embed_content(
+def _embed_document(text: str, tenant_id: Optional[str] = None) -> list[float]:
+    result = resolve_gemini_client(tenant_id=tenant_id).models.embed_content(
         model=settings.GEMINI_EMBEDDING_MODEL,
         contents=text,
         config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
@@ -121,10 +119,10 @@ async def download_image(url: str, access_token: Optional[str] = None) -> tuple[
 
 # ── Gemini Vision ─────────────────────────────────────────────────────────────
 
-def analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+def analyze_image(image_bytes: bytes, mime_type: str = "image/jpeg", tenant_id: Optional[str] = None) -> str:
     """Use Gemini Vision to generate a text description of an image."""
     try:
-        response = _client.models.generate_content(
+        response = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(
             model=settings.GEMINI_MODEL,
             contents=[
                 genai_types.Content(parts=[
@@ -230,10 +228,10 @@ _RETURN_PHOTO_PROMPT = (
 )
 
 
-def validate_return_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+def validate_return_photo(image_bytes: bytes, mime_type: str = "image/jpeg", tenant_id: Optional[str] = None) -> dict:
     """Validate a customer return photo using Gemini Vision."""
     try:
-        response = _client.models.generate_content(
+        response = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(
             model=settings.GEMINI_MODEL,
             contents=[
                 genai_types.Content(parts=[
@@ -275,7 +273,7 @@ async def search_by_customer_image(
         return []
 
     # 2. Describe with Gemini
-    description = analyze_image(image_bytes, mime_type)
+    description = analyze_image(image_bytes, mime_type, tenant_id=tenant_id)
     if not description:
         logger.warning("Gemini Vision returned no description")
         return []
@@ -284,7 +282,7 @@ async def search_by_customer_image(
 
     # 3. Embed description
     try:
-        embedding = _embed_query(description)
+        embedding = _embed_query(description, tenant_id=tenant_id)
     except Exception as e:
         logger.error(f"Embedding failed: {e}")
         return []
@@ -306,7 +304,7 @@ def search_by_text(
     Used for "কালো শাড়ি দেখাও" type requests.
     """
     try:
-        embedding = _embed_query(query)
+        embedding = _embed_query(query, tenant_id=tenant_id)
     except Exception as e:
         logger.error(f"Text embedding failed: {e}")
         return []
@@ -315,10 +313,10 @@ def search_by_text(
     return _enrich_with_product(tenant_id, matches)
 
 
-def embed_description(description: str) -> Optional[list[float]]:
+def embed_description(description: str, tenant_id: Optional[str] = None) -> Optional[list[float]]:
     """Embed a description text for storage in product_images."""
     try:
-        return _embed_document(description)
+        return _embed_document(description, tenant_id=tenant_id)
     except Exception as e:
         logger.error(f"embed_description failed: {e}")
         return None
@@ -357,13 +355,13 @@ def get_primary_image_cached(tenant_id: str, product_id: str) -> Optional[str]:
 
 # ── Customer image analysis (JSON output) ────────────────────────────────────
 
-def analyze_customer_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+def analyze_customer_image(image_bytes: bytes, mime_type: str = "image/jpeg", tenant_id: Optional[str] = None) -> dict:
     """
     Analyze a customer-sent image with Gemini Vision.
     Returns structured JSON: product_description, likely_product_name, category, confidence.
     """
     try:
-        response = _client.models.generate_content(
+        response = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(
             model=settings.GEMINI_MODEL,
             contents=[
                 genai_types.Content(parts=[
@@ -448,7 +446,7 @@ async def recognize_and_search_customer_image(
     # 2. Vision with timeout
     try:
         analysis: dict = await asyncio.wait_for(
-            asyncio.to_thread(analyze_customer_image, image_bytes, mime_type),
+            asyncio.to_thread(analyze_customer_image, image_bytes, mime_type, tenant_id),
             timeout=5.0,
         )
     except asyncio.TimeoutError:
@@ -480,7 +478,7 @@ async def recognize_and_search_customer_image(
         if not description:
             return None
         try:
-            return await asyncio.to_thread(_embed_query, description)
+            return await asyncio.to_thread(_embed_query, description, tenant_id)
         except Exception as exc:
             logger.warning(f"Embedding failed in customer image search: {exc}")
             return None
@@ -684,7 +682,7 @@ def match_image_to_catalog(
     )
 
     try:
-        response = _client.models.generate_content(
+        response = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(
             model=settings.GEMINI_MODEL,
             contents=[
                 genai_types.Content(parts=[
@@ -790,7 +788,7 @@ def format_catalog_match_reply(match: dict) -> str:
     return "\n".join(lines)
 
 
-def extract_product_from_image_request(text: str) -> dict:
+def extract_product_from_image_request(text: str, tenant_id: Optional[str] = None) -> dict:
     """
     Extract product name/SKU from a message already confirmed as an image request.
     Caller has already verified intent via should_trigger_image_search — no intent check here.
@@ -798,7 +796,7 @@ def extract_product_from_image_request(text: str) -> dict:
     """
     prompt = _PRODUCT_NAME_EXTRACT_PROMPT.format(message=text)
     try:
-        response = _client.models.generate_content(
+        response = resolve_gemini_client(tenant_id=tenant_id).models.generate_content(
             model=settings.GEMINI_MODEL,
             contents=prompt,
         )
@@ -817,9 +815,9 @@ def extract_product_from_image_request(text: str) -> dict:
         return {"product_name": None, "sku": None, "keywords": []}
 
 
-def extract_product_image_intent(text: str) -> dict:
+def extract_product_image_intent(text: str, tenant_id: Optional[str] = None) -> dict:
     """Legacy wrapper — prefer extract_product_from_image_request."""
-    result = extract_product_from_image_request(text)
+    result = extract_product_from_image_request(text, tenant_id=tenant_id)
     # Always returns see_product_image since caller confirmed intent via keyword match
     return {"intent": "see_product_image", **result}
 
