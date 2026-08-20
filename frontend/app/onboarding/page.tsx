@@ -22,7 +22,7 @@ export default function OnboardingPage() {
   const [saving, setSaving] = useState(false)
 
   const [aiConfig, setAIConfig] = useState({
-    bot_name: 'Riya',
+    bot_name: '',
     language: 'bangla',
     system_prompt: `আমি ${tenant?.business_name || 'আপনার ব্যবসা'}-এর AI assistant। আমি customer-দের সাথে সুন্দরভাবে কথা বলি।`,
   })
@@ -32,6 +32,10 @@ export default function OnboardingPage() {
   const [testReply, setTestReply] = useState('')
 
   async function saveAIConfig() {
+    if (!aiConfig.bot_name.trim()) {
+      toast.error('Bot-এর একটি নাম দিন')
+      return
+    }
     setSaving(true)
     try {
       await configAPI.update(aiConfig)
