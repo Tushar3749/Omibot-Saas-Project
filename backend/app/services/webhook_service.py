@@ -1609,7 +1609,7 @@ def _build_product_catalog_for_ai(tenant_id: str) -> str:
     try:
         rows = (
             supabase.table("products")
-            .select("name, sku, mrp, category, current_stock")
+            .select("name, sku, mrp, category")
             .eq("tenant_id", tenant_id)
             .eq("is_active", True)
             .order("category")
